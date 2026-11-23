@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>markdown_engine Documentation</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+  <meta name="description" content="Pure-Dart CommonMark 0.31.2 and GitHub Flavored Markdown parser, incremental streaming engine, and Flutter renderer.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  <link id="me-favicon" rel="icon" type="image/svg+xml" href="doc/images/markdown_engine_favicon.svg">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
+  <style>
+    :root {
+      --me-bg: #ffffff;
+      --me-surface: #f8fafc;
+      --me-border: #e2e8f0;
+      --me-text: #0f172a;
+      --me-muted: #475569;
+      --me-accent: #0284c7;
+      --me-accent-strong: #0369a1;
+      --me-code-bg: #f1f5f9;
+      --me-blockquote-bg: #f0f9ff;
+      --me-table-stripe: #f8fafc;
+    }
+
+    html[data-theme="dark"] {
+      --me-bg: #0f172a;
+      --me-surface: #111c33;
+      --me-border: #1e293b;
+      --me-text: #e2e8f0;
+      --me-muted: #94a3b8;
+      --me-accent: #38bdf8;
+      --me-accent-strong: #7dd3fc;
+      --me-code-bg: #1e293b;
+      --me-blockquote-bg: #0c1f35;
+      --me-table-stripe: #131f38;
+    }
+
+    body {
+      background-color: var(--me-bg);
+      color: var(--me-text);
+      transition: background-color 150ms ease, color 150ms ease;
+    }
+
+    .sidebar {
+      background-color: var(--me-surface);
+      border-right: 1px solid var(--me-border);
+      color: var(--me-text);
+    }
+
+    .sidebar .app-name-link img {
+      max-width: 210px;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+
+    .sidebar ul li a {
+      color: var(--me-muted);
+    }
+
+    .sidebar ul li.active > a,
+    .sidebar ul li a:hover {
+      color: var(--me-accent);
+    }
+
+    .sidebar .search {
+      border-bottom: 1px solid var(--me-border);
+    }
+
+    .sidebar .search input {
+      background-color: var(--me-bg);
+      color: var(--me-text);
+      border: 1px solid var(--me-border);
+      border-radius: 6px;
+    }
+
+    .sidebar-toggle {
+      background-color: transparent;
+    }
+
+    .sidebar-toggle span {
+      background-color: var(--me-accent);
+    }
+
+    .markdown-section {
+      color: var(--me-text);
+      max-width: 900px;
+    }
+
+    .markdown-section h1,
+    .markdown-section h2,
+    .markdown-section h3,
+    .markdown-section h4,
+    .markdown-section strong {
+      color: var(--me-text);
+    }
+
+    .markdown-section a {
+      color: var(--me-accent);
+    }
+
+    .markdown-section a:hover {
+      color: var(--me-accent-strong);
+    }
+
+    .markdown-section code,
+    .markdown-section pre {
+      background-color: var(--me-code-bg);
+      color: var(--me-text);
+    }
+
+    .markdown-section pre > code {
+      background-color: transparent;
+      color: var(--me-text);
+    }
+
+    .markdown-section blockquote {
+      background-color: var(--me-blockquote-bg);
+      border-left: 4px solid var(--me-accent);
+      color: var(--me-text);
+      padding: 0.75rem 1rem;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .markdown-section table th,
+    .markdown-section table td {
+      border-color: var(--me-border);
+    }
+
+    .markdown-section table tr:nth-child(2n) {
+      background-color: var(--me-table-stripe);
+    }
+
+    .markdown-section hr {
+      border-bottom: 1px solid var(--me-border);
+    }
+
+    .markdown-section .mermaid {
+      background-color: transparent;
+      padding: 0.75rem 0;
+      text-align: center;
+      overflow-x: auto;
+    }
+
+    html[data-theme="dark"] .token.comment,
+    html[data-theme="dark"] .token.prolog,
+    html[data-theme="dark"] .token.doctype,
+    html[data-theme="dark"] .token.cdata {
+      color: #64748b;
+    }
+
+    html[data-theme="dark"] .token.keyword,
+    html[data-theme="dark"] .token.operator {
+      color: #7dd3fc;
+    }
+
+    html[data-theme="dark"] .token.string,
+    html[data-theme="dark"] .token.attr-value {
+      color: #86efac;
+    }
+
+    html[data-theme="dark"] .token.function,
+    html[data-theme="dark"] .token.class-name {
+      color: #c4b5fd;
+    }
+
+    html[data-theme="dark"] .token.number,
+    html[data-theme="dark"] .token.boolean {
+      color: #fcd34d;
+    }
+
+    #me-theme-toggle {
+      position: fixed;
+      top: 14px;
+      right: 18px;
+      z-index: 30;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--me-border);
+      background-color: var(--me-surface);
+      color: var(--me-text);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+    }
+
+    #me-theme-toggle:hover {
+      border-color: var(--me-accent);
+      color: var(--me-accent);
+    }
+  </style>
+  <script>
+    (function () {
+      var inDocDir = /\/doc\/(?:index\.html)?$/.test(window.location.pathname);
+      if (inDocDir) {
+        var favicon = document.getElementById('me-favicon');
+        if (favicon) {
+          favicon.setAttribute('href', 'images/markdown_engine_favicon.svg');
+        }
+      }
+      var stored = null;
+      try {
+        stored = window.localStorage.getItem('markdown_engine_theme');
+      } catch (_) {}
+      var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var initialTheme = stored || (prefersDark ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', initialTheme);
+    })();
+  </script>
+</head>
+<body>
+  <button id="me-theme-toggle" type="button" aria-label="Toggle color theme">Theme</button>
+  <div id="app">Loading markdown_engine documentation...</div>
+  <script>
+    window.__markdownEngineRenderMermaid = function () {
+      if (!window.mermaid) return;
+      var theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default';
+      window.mermaid.initialize({ startOnLoad: false, theme: theme });
+      var nodes = Array.prototype.slice.call(document.querySelectorAll('.markdown-section .mermaid'));
+      if (nodes.length === 0) return;
+      nodes.forEach(function (node) {
+        var src = node.getAttribute('data-mermaid-source');
+        if (src !== null) {
+          node.removeAttribute('data-processed');
+          node.textContent = src;
+        }
+      });
+      window.mermaid.run({ nodes: nodes });
+    };
+  </script>
+  <script>
+    (function () {
+      var inDocDir = /\/doc\/(?:index\.html)?$/.test(window.location.pathname);
+      window.$docsify = {
+        name: 'markdown_engine',
+        logo: inDocDir ? 'images/markdown_engine_logo.svg' : 'doc/images/markdown_engine_logo.svg',
+        basePath: inDocDir ? '../' : '',
+        homepage: 'README.md',
+        loadSidebar: inDocDir ? 'doc/_sidebar.md' : '_sidebar.md',
+        relativePath: true,
+        subMaxLevel: 3,
+        auto2top: true,
+        markdown: {
+          renderer: {
+            code: function (code, lang) {
+              if (lang === 'mermaid') {
+                var escaped = code
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;');
+                var attr = escaped.replace(/"/g, '&quot;');
+                return '<div class="mermaid" data-mermaid-source="' + attr + '">' + escaped + '</div>';
+              }
+              return this.origin.code.apply(this, arguments);
+            }
+          }
+        },
+        plugins: [
+          function (hook) {
+            hook.doneEach(function () {
+              if (window.__markdownEngineRenderMermaid) {
+                window.__markdownEngineRenderMermaid();
+              }
+            });
+          }
+        ],
+        search: {
+          paths: 'auto',
+          placeholder: 'Search documentation',
+          noData: 'No matching documentation found.',
+          depth: 4
+        },
+        copyCode: {
+          buttonText: 'Copy',
+          errorText: 'Error',
+          successText: 'Copied'
+        },
+        pagination: {
+          previousText: 'Previous',
+          nextText: 'Next',
+          crossChapter: true
+        }
+      };
+    })();
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/plugins/search.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code@2/dist/docsify-copy-code.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-pagination@2/dist/docsify-pagination.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-dart.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-json.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-markdown.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-yaml.min.js"></script>
+  <script>
+    (function () {
+      var toggle = document.getElementById('me-theme-toggle');
+      if (!toggle) return;
+      function updateLabel(theme) {
+        toggle.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+        toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+      }
+      var current = document.documentElement.getAttribute('data-theme') || 'light';
+      updateLabel(current);
+      toggle.addEventListener('click', function () {
+        var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        updateLabel(next);
+        try {
+          window.localStorage.setItem('markdown_engine_theme', next);
+        } catch (_) {}
+        if (window.__markdownEngineRenderMermaid) {
+          window.__markdownEngineRenderMermaid();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

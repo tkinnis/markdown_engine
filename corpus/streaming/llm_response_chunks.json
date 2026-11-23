@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "description": "Chunked streaming Markdown response fixtures covering partial fences, tables, emphasis, and list items.",
+  "scenarios": [
+    {
+      "id": "markdown_guide_stream",
+      "options": "gfm",
+      "chunks": [
+        "# HTTP Client ",
+        "Quickstart\n\n",
+        "Use `HttpClient` to ",
+        "stream responses *safely*.\n\n",
+        "```da",
+        "rt\nfinal client = ",
+        "HttpClient();\n",
+        "```\n\n",
+        "| Option | Default | Notes |\n",
+        "| :--- | :--- | :--- |\n",
+        "| `timeout` | `15s` | Connection ",
+        "deadline |\n",
+        "\n- Validate TLS certificates\n",
+        "- Enforce response size budgets\n"
+      ],
+      "expectedFinalContains": [
+        "<h1>HTTP Client Quickstart</h1>",
+        "<pre><code class=\"language-dart\">",
+        "<table>",
+        "<li>Validate TLS certificates</li>"
+      ]
+    },
+    {
+      "id": "partial_emphasis_and_link_stream",
+      "options": "gfm",
+      "chunks": [
+        "See [**API ",
+        "Reference**",
+        "](https://example.com/",
+        "docs) for details."
+      ],
+      "expectedFinalContains": [
+        "<a href=\"https://example.com/docs\"><strong>API Reference</strong></a>"
+      ]
+    }
+  ]
+}

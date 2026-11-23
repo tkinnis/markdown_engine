@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Analyze, Test & Spec
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter & Dart SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.6"
+          channel: stable
+          cache: true
+
+      - name: Install Dart & Flutter workspace dependencies
+        run: flutter pub get
+
+      - name: Verify code formatting
+        run: dart format --output=none --set-exit-if-changed packages tool studio
+
+      - name: Run static analysis
+        run: dart analyze --fatal-infos
+
+      - name: Run pure-Dart core tests & CLI example
+        working-directory: packages/markdown_engine
+        run: |
+          dart test
+          dart run example/main.dart
+
+      - name: Run pure-Dart dartdoc check (release tags)
+        if: github.ref_type == 'tag'
+        working-directory: packages/markdown_engine
+        run: dart doc --dry-run
+
+      - name: Run Flutter package tests
+        working-directory: packages/markdown_engine_flutter
+        run: flutter test
+
+      - name: Run Flutter package dartdoc check (release tags)
+        if: github.ref_type == 'tag'
+        working-directory: packages/markdown_engine_flutter
+        run: dart doc --dry-run
+
+      - name: Run Flutter example app tests
+        working-directory: packages/markdown_engine_flutter/example
+        run: flutter test
+
+      - name: Run Studio app tests
+        working-directory: studio
+        run: flutter test
+
+      - name: Verify lockstep versions
+        run: dart run tool/check_versions.dart
+
+      - name: Verify release git tag matches lockstep version
+        if: github.ref_type == 'tag'
+        run: dart run tool/check_versions.dart --tag "${GITHUB_REF_NAME}"
+
+      - name: Verify REFERENCE.md pins and spec SHA-256 digests
+        run: dart run tool/sync_reference.dart --verify
+
+      - name: Verify CommonMark & GFM specification parity
+        run: dart run tool/verify_spec.dart
+
+      - name: Verify native AOT benchmark regressions
+        run: dart run tool/benchmark_suite.dart --check-regressions
+
+      - name: Validate pub.dev publish readiness for markdown_engine
+        if: github.ref_type == 'tag'
+        working-directory: packages/markdown_engine
+        run: dart pub publish --dry-run
+
+      - name: Validate pub.dev publish readiness for markdown_engine_flutter
+        if: github.ref_type == 'tag'
+        working-directory: packages/markdown_engine_flutter
+        run: flutter pub publish --dry-run

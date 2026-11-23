@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "description": "Incremental text-edit sequences exercising block reuse, fence closure, and paragraph splitting.",
+  "sequences": [
+    {
+      "id": "edit_paragraph_and_split",
+      "initialSource": "# Notes\n\nInitial paragraph line.",
+      "edits": [
+        {
+          "startOffset": 31,
+          "deleteLength": 1,
+          "insertText": " with update."
+        },
+        {
+          "startOffset": 44,
+          "deleteLength": 0,
+          "insertText": "\n\n## Next Section\n\n- First item\n- Second item"
+        }
+      ],
+      "expectedFinalBlocks": 4
+    },
+    {
+      "id": "close_fenced_code_block",
+      "initialSource": "```dart\nvoid main() {}\n",
+      "edits": [
+        {
+          "startOffset": 23,
+          "deleteLength": 0,
+          "insertText": "```\n\nDone."
+        }
+      ],
+      "expectedFinalBlocks": 2
+    }
+  ]
+}

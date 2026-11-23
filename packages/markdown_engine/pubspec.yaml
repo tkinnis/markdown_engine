@@ -1,0 +1,26 @@
+name: markdown_engine
+description: Pure-Dart CommonMark 0.31.2 and GitHub Flavored Markdown parser, AST, HTML/text/JSON exporters, and streaming incremental engine.
+version: 0.1.0
+homepage: https://tkinnis.github.io/markdown_engine/
+repository: https://github.com/tkinnis/markdown_engine/tree/main/packages/markdown_engine
+issue_tracker: https://github.com/tkinnis/markdown_engine/issues
+documentation: https://tkinnis.github.io/markdown_engine/
+
+topics:
+  - markdown
+  - commonmark
+  - gfm
+  - parser
+  - ast
+
+resolution: workspace
+
+environment:
+  sdk: ^3.8.0
+
+dependencies:
+  meta: ^1.16.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.27.0

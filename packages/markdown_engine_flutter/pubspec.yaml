@@ -1,0 +1,30 @@
+name: markdown_engine_flutter
+description: Flutter widgets, Material ColorScheme theming, selection integration, and streaming controller support for markdown_engine.
+version: 0.1.0
+homepage: https://tkinnis.github.io/markdown_engine/
+repository: https://github.com/tkinnis/markdown_engine/tree/main/packages/markdown_engine_flutter
+issue_tracker: https://github.com/tkinnis/markdown_engine/issues
+documentation: https://tkinnis.github.io/markdown_engine/
+
+topics:
+  - markdown
+  - commonmark
+  - gfm
+  - widget
+  - streaming
+
+resolution: workspace
+
+environment:
+  sdk: ^3.8.0
+  flutter: ">=3.32.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  markdown_engine: ^0.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^6.0.0

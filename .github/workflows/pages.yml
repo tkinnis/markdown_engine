@@ -1,0 +1,79 @@
+name: Deploy Documentation to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - REFERENCE.md
+      - CONTRIBUTING.md
+      - CODE_OF_CONDUCT.md
+      - SECURITY.md
+      - LICENSE
+      - AGENTS.md
+      - doc/**
+      - corpus/README.md
+      - packages/markdown_engine/README.md
+      - packages/markdown_engine/CHANGELOG.md
+      - packages/markdown_engine/LICENSE
+      - packages/markdown_engine_flutter/README.md
+      - packages/markdown_engine_flutter/CHANGELOG.md
+      - packages/markdown_engine_flutter/LICENSE
+      - studio/README.md
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Stage & Upload Docsify Portal
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Stage documentation site
+        run: |
+          mkdir -p _site/doc _site/corpus _site/packages/markdown_engine _site/packages/markdown_engine_flutter _site/studio
+          cp README.md REFERENCE.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md LICENSE AGENTS.md _site/
+          cp -R doc/* _site/doc/
+          cp corpus/README.md _site/corpus/
+          cp packages/markdown_engine/README.md packages/markdown_engine/CHANGELOG.md packages/markdown_engine/LICENSE _site/packages/markdown_engine/
+          cp packages/markdown_engine_flutter/README.md packages/markdown_engine_flutter/CHANGELOG.md packages/markdown_engine_flutter/LICENSE _site/packages/markdown_engine_flutter/
+          cp studio/README.md _site/studio/
+          cp doc/index.html _site/index.html
+          cp doc/_sidebar.md _site/_sidebar.md
+          if [ -f doc/images/markdown_engine_favicon.svg ]; then
+            cp doc/images/markdown_engine_favicon.svg _site/favicon.svg
+          fi
+          if [ -f doc/images/markdown_engine_favicon.png ]; then
+            cp doc/images/markdown_engine_favicon.png _site/favicon.png
+          fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
