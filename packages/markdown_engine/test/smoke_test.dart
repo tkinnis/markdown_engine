@@ -7,6 +7,7 @@ void main() {
       const MarkdownOptions defaults = MarkdownOptions();
       expect(defaults.gfmTables, isTrue);
       expect(defaults.gfmTagFilter, isTrue);
+      expect(defaults.math, isTrue);
       expect(defaults.sanitizeUrls, isTrue);
       expect(defaults.maxInputLength, MarkdownOptions.defaultMaxInputLength);
       expect(defaults.maxNestingDepth, MarkdownOptions.defaultMaxNestingDepth);
@@ -19,6 +20,11 @@ void main() {
       expect(commonMark.gfmStrikethrough, isFalse);
       expect(commonMark.gfmTaskLists, isFalse);
       expect(commonMark.gfmAutolinks, isFalse);
+      expect(commonMark.math, isFalse);
+
+      const MarkdownOptions gfm = MarkdownOptions.gfm();
+      expect(gfm.gfmTables, isTrue);
+      expect(gfm.math, isFalse);
 
       const MarkdownOptions extended = MarkdownOptions.extended();
       expect(extended.alerts, isTrue);

@@ -464,14 +464,47 @@ final class _MarkdownViewState extends State<MarkdownView> {
     final MarkdownUrlPolicy resolvedPolicy = widget.delegates.resolveUrlPolicy(
       activeDocument.options.urlPolicy,
     );
-    final MarkdownBlockRenderContext renderContext = MarkdownBlockRenderContext(
-      theme: resolvedTheme,
-      delegates: widget.delegates,
-      urlPolicy: resolvedPolicy,
-      controller: widget.controller,
-      remoteImagesApproved: _effectiveRemoteImagesApproved,
-      onRequestLoadRemoteImages: _approveRemoteImagesLocally,
-    );
+    final StreamingMarkdownController? streamCtrl = widget.streamingController;
+    final bool isActiveStream = streamCtrl != null && !streamCtrl.isFinished;
+    final MarkdownBlockRenderContext settledContext =
+        MarkdownBlockRenderContext(
+          theme: resolvedTheme,
+          delegates: widget.delegates,
+          urlPolicy: resolvedPolicy,
+          controller: widget.controller,
+          remoteImagesApproved: _effectiveRemoteImagesApproved,
+          onRequestLoadRemoteImages: _approveRemoteImagesLocally,
+        );
+    final MarkdownBlockRenderContext tailContext = isActiveStream
+        ? MarkdownBlockRenderContext(
+            theme: resolvedTheme,
+            delegates: widget.delegates,
+            urlPolicy: resolvedPolicy,
+            controller: widget.controller,
+            remoteImagesApproved: _effectiveRemoteImagesApproved,
+            onRequestLoadRemoteImages: _approveRemoteImagesLocally,
+            streamingNormalizedSource: activeDocument.source,
+          )
+        : settledContext;
+
+    int settledVisibleCount = 0;
+    if (isActiveStream) {
+      final int clampedSettled = streamCtrl.settledPrefixBlockCount.clamp(
+        0,
+        activeDocument.blocks.length,
+      );
+      if (widget.showFrontmatter) {
+        settledVisibleCount = clampedSettled;
+      } else {
+        for (int i = 0; i < clampedSettled; i++) {
+          if (activeDocument.blocks[i] is! FrontmatterNode) {
+            settledVisibleCount++;
+          }
+        }
+      }
+    } else {
+      settledVisibleCount = visibleBlocks.length;
+    }
 
     final Widget column = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -481,7 +514,9 @@ final class _MarkdownViewState extends State<MarkdownView> {
           MarkdownTopLevelBlockWidget(
             key: ValueKey<String>(visibleBlocks[i].blockId),
             node: visibleBlocks[i],
-            renderContext: renderContext,
+            renderContext: i < settledVisibleCount
+                ? settledContext
+                : tailContext,
             bottomSpacing: i == visibleBlocks.length - 1
                 ? 0.0
                 : resolvedTheme.blockSpacing,
@@ -496,19 +531,129 @@ final class _MarkdownViewState extends State<MarkdownView> {
   }
 
   Widget _buildScrollableView(
+    BuildContext context,
     MarkdownDocument activeDocument,
     MarkdownThemeData resolvedTheme,
   ) {
-    final Widget sliver = SliverMarkdownDocument(
-      document: activeDocument,
-      theme: resolvedTheme,
-      delegates: widget.delegates,
-      controller: widget.controller,
-      showFrontmatter: widget.showFrontmatter,
-      padding: widget.padding == EdgeInsets.zero ? null : widget.padding,
-      remoteImagesApproved: _effectiveRemoteImagesApproved,
-      onRequestLoadRemoteImages: _approveRemoteImagesLocally,
-    );
+    final StreamingMarkdownController? streamCtrl = widget.streamingController;
+    final bool isActiveStream = streamCtrl != null && !streamCtrl.isFinished;
+    final int settledCount = streamCtrl == null
+        ? 0
+        : streamCtrl.settledPrefixBlockCount.clamp(
+            0,
+            activeDocument.blocks.length,
+          );
+
+    List<MarkdownBlockNode>? visibleSettled;
+    List<MarkdownBlockNode>? visibleTail;
+    if (streamCtrl != null &&
+        settledCount > 0 &&
+        settledCount < activeDocument.blocks.length) {
+      visibleSettled = SliverMarkdownDocument.visibleBlocksFor(
+        activeDocument,
+        showFrontmatter: widget.showFrontmatter,
+        startBlockIndex: 0,
+        endBlockIndex: settledCount,
+      );
+      visibleTail = SliverMarkdownDocument.visibleBlocksFor(
+        activeDocument,
+        showFrontmatter: widget.showFrontmatter,
+        startBlockIndex: settledCount,
+      );
+    }
+
+    final List<Widget> slivers;
+    if (visibleSettled != null &&
+        visibleTail != null &&
+        visibleSettled.isNotEmpty &&
+        visibleTail.isNotEmpty) {
+      final EdgeInsetsGeometry? settledPadding;
+      final EdgeInsetsGeometry? tailPadding;
+      if (widget.padding == EdgeInsets.zero) {
+        settledPadding = null;
+        tailPadding = null;
+      } else {
+        final EdgeInsets resolvedPad = widget.padding.resolve(
+          Directionality.maybeOf(context) ?? TextDirection.ltr,
+        );
+        settledPadding =
+            (resolvedPad.left == 0.0 &&
+                resolvedPad.top == 0.0 &&
+                resolvedPad.right == 0.0)
+            ? null
+            : EdgeInsets.fromLTRB(
+                resolvedPad.left,
+                resolvedPad.top,
+                resolvedPad.right,
+                0.0,
+              );
+        tailPadding =
+            (resolvedPad.left == 0.0 &&
+                resolvedPad.right == 0.0 &&
+                resolvedPad.bottom == 0.0)
+            ? null
+            : EdgeInsets.fromLTRB(
+                resolvedPad.left,
+                0.0,
+                resolvedPad.right,
+                resolvedPad.bottom,
+              );
+      }
+
+      final MarkdownUrlPolicy resolvedPolicy = widget.delegates
+          .resolveUrlPolicy(activeDocument.options.urlPolicy);
+      final MarkdownBlockRenderContext tailRenderContext =
+          MarkdownBlockRenderContext(
+            theme: resolvedTheme,
+            delegates: widget.delegates,
+            urlPolicy: resolvedPolicy,
+            controller: widget.controller,
+            remoteImagesApproved: _effectiveRemoteImagesApproved,
+            onRequestLoadRemoteImages: _approveRemoteImagesLocally,
+            streamingNormalizedSource: isActiveStream
+                ? activeDocument.source
+                : null,
+          );
+
+      slivers = <Widget>[
+        SliverMarkdownDocument(
+          key: const ValueKey<String>('markdown-settled-sliver'),
+          document: activeDocument,
+          endBlockIndex: settledCount,
+          trailingBlockSpacing: true,
+          theme: resolvedTheme,
+          delegates: widget.delegates,
+          controller: widget.controller,
+          showFrontmatter: widget.showFrontmatter,
+          padding: settledPadding,
+          remoteImagesApproved: _effectiveRemoteImagesApproved,
+          onRequestLoadRemoteImages: _approveRemoteImagesLocally,
+        ),
+        _SliverMarkdownTail(
+          key: const ValueKey<String>('markdown-active-tail-sliver'),
+          blocks: visibleTail,
+          renderContext: tailRenderContext,
+          padding: tailPadding,
+        ),
+      ];
+    } else {
+      slivers = <Widget>[
+        SliverMarkdownDocument(
+          key: const ValueKey<String>('markdown-settled-sliver'),
+          document: activeDocument,
+          theme: resolvedTheme,
+          delegates: widget.delegates,
+          controller: widget.controller,
+          showFrontmatter: widget.showFrontmatter,
+          padding: widget.padding == EdgeInsets.zero ? null : widget.padding,
+          remoteImagesApproved: _effectiveRemoteImagesApproved,
+          onRequestLoadRemoteImages: _approveRemoteImagesLocally,
+          streamingNormalizedSource: isActiveStream
+              ? activeDocument.source
+              : null,
+        ),
+      ];
+    }
 
     return CustomScrollView(
       controller: _effectiveScrollController,
@@ -517,7 +662,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
       // Keeps compatibility down to Flutter 3.32 before scrollCacheExtent.
       // ignore: deprecated_member_use
       cacheExtent: widget.cacheExtent,
-      slivers: <Widget>[sliver],
+      slivers: slivers,
     );
   }
 
@@ -548,7 +693,11 @@ final class _MarkdownViewState extends State<MarkdownView> {
       content = LayoutBuilder(
         builder: (BuildContext layoutContext, BoxConstraints constraints) {
           if (constraints.hasBoundedHeight || widget.shrinkWrap) {
-            return _buildScrollableView(activeDocument, resolvedTheme);
+            return _buildScrollableView(
+              layoutContext,
+              activeDocument,
+              resolvedTheme,
+            );
           }
           return _buildNonScrollingColumn(
             layoutContext,
@@ -699,5 +848,85 @@ final class _MarkdownSelectionContainerDelegate
   void dispose() {
     _selectAllDispatched.clear();
     super.dispose();
+  }
+}
+
+final class _SliverMarkdownTail extends StatefulWidget {
+  const _SliverMarkdownTail({
+    super.key,
+    required this.blocks,
+    required this.renderContext,
+    this.padding,
+  });
+
+  final List<MarkdownBlockNode> blocks;
+  final MarkdownBlockRenderContext renderContext;
+  final EdgeInsetsGeometry? padding;
+
+  @override
+  State<_SliverMarkdownTail> createState() => _SliverMarkdownTailState();
+}
+
+final class _SliverMarkdownTailState extends State<_SliverMarkdownTail> {
+  late Map<String, int> _idToIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _rebuildIdIndex();
+  }
+
+  @override
+  void didUpdateWidget(_SliverMarkdownTail oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.blocks, widget.blocks)) {
+      _rebuildIdIndex();
+    }
+  }
+
+  void _rebuildIdIndex() {
+    _idToIndex = <String, int>{
+      for (int i = 0; i < widget.blocks.length; i++)
+        widget.blocks[i].blockId: i,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<MarkdownBlockNode> blocks = widget.blocks;
+    if (blocks.isEmpty) {
+      return const SliverToBoxAdapter(child: SizedBox.shrink());
+    }
+    final Map<String, int> idToIndex = _idToIndex;
+    final MarkdownBlockRenderContext renderContext = widget.renderContext;
+    final double blockSpacing = renderContext.theme.blockSpacing;
+    final Widget sliver = SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (BuildContext itemContext, int index) {
+          final MarkdownBlockNode block = blocks[index];
+          final bool isLast = index == blocks.length - 1;
+          return MarkdownTopLevelBlockWidget(
+            key: ValueKey<String>(block.blockId),
+            node: block,
+            renderContext: renderContext,
+            bottomSpacing: isLast ? 0.0 : blockSpacing,
+          );
+        },
+        childCount: blocks.length,
+        addAutomaticKeepAlives: true,
+        addRepaintBoundaries: true,
+        findChildIndexCallback: (Key key) {
+          if (key is ValueKey<String>) {
+            return idToIndex[key.value];
+          }
+          return null;
+        },
+      ),
+    );
+    final EdgeInsetsGeometry? pad = widget.padding;
+    if (pad != null) {
+      return SliverPadding(padding: pad, sliver: sliver);
+    }
+    return sliver;
   }
 }

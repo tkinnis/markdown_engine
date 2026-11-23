@@ -25,6 +25,7 @@ export 'package:markdown_engine/markdown_engine.dart'
         StreamingMarkdownController,
         TableAlignment;
 
+export 'src/built_in_renderers.dart' show MarkdownBuiltInRenderers;
 export 'src/controller.dart' show MarkdownController, MarkdownReadingPlace;
 export 'src/delegates.dart'
     show

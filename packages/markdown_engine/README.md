@@ -16,7 +16,7 @@ If you are building a Flutter application and want ready-made Markdown widgets, 
 
 ## Quick Start
 
-Configure a `MarkdownEngine` with `.commonMark()`, `.gfm()`, or `.extended()` options and parse synchronously into an immutable `MarkdownDocument`:
+Configure a `MarkdownEngine` with default `MarkdownOptions()` (GFM core plus `math: true` and `headingSlugs: true`), strict `.commonMark()` or `.gfm()` (`math: false`), or `.extended()` options and parse synchronously into an immutable `MarkdownDocument`:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -79,7 +79,7 @@ void editInPlace() {
 
 ### Streaming Token Feeds (`StreamingMarkdownController`)
 
-For token-by-token SSE or LLM streams, `StreamingMarkdownController` freezes completed leading blocks in `settledBlocks`, notifies registered push listeners (`addListener`/`removeListener`/`dispose`), and re-parses only the active trailing slice on each `append()`, reconciling exact parity on `finish()`:
+For token-by-token SSE or LLM streams, `StreamingMarkdownController` freezes completed leading blocks in `settledBlocks`, exposes `settledPrefixBlockCount` (the exact prefix length of `currentDocument.blocks` whose frozen objects stay identical by reference across active tail chunks, returning `0` while active definitions force full reparsing and equaling `currentDocument.blocks.length` after `finish()`), notifies registered push listeners (`addListener`/`removeListener`/`dispose`), and re-parses only the active trailing slice on each `append()`, reconciling exact parity on `finish()`:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -129,17 +129,18 @@ const MarkdownOptions hardenedOptions = MarkdownOptions.gfm(
 | Symbol | Role |
 | :--- | :--- |
 | `MarkdownEngine` | Stateless entry point exposing `parse`, `renderToHtml`, and `toPlainText`. |
-| `MarkdownOptions` | Presets (`.commonMark()`, `.gfm()`, `.extended()`), default `MarkdownOptions()` (`headingSlugs: true`, `urlPolicy: MarkdownUrlPolicy.strict()`), and 26 feature/sanitization flags plus `budgets` and `urlPolicy`. |
+| `MarkdownOptions` | Presets (`.commonMark()`, `.gfm()`, `.extended()`), default `MarkdownOptions()` (`math: true`, `headingSlugs: true`, `urlPolicy: MarkdownUrlPolicy.strict()`), and 26 feature/sanitization flags plus `budgets` and `urlPolicy` (`commonMark()` and `gfm()` keep `math: false`). |
 | `MarkdownDocument` | Immutable parsed output exposing `blocks`, `frontmatter`, `outline`, `footnotes`, `remoteImageAddresses`, `linkDefinitions`, `abbreviations`, `toHtml()`, `toPlainText()`, and `toJson()`. |
 | `HtmlRenderer` | Renders `List<MarkdownBlockNode>` to CommonMark/GFM HTML respecting sanitization, `maxHtmlBytes`, and `maxOutputBytes`. |
-| `IncrementalMarkdownParser` / `IncrementalParseResult` | Reuses unchanged prefix/suffix AST blocks across targeted document edits with $O(1)$ edit-windowing and lazy span shifting. |
-| `StreamingMarkdownController` | Accumulates streamed chunks with frozen `settledBlocks`, pure-Dart push listeners (`addListener`/`removeListener`/`dispose`), prefix-preserving `replaceText()`, and full-parity `finish()`. |
-| `MarkdownBlockNode` / `MarkdownInlineNode` | Sealed Dart 3 AST hierarchies (18 block subtypes, 20 inline subtypes) with `SourceSpan`, `blockId`, `toPlainText()`, and `shiftSpan()`. |
+| `IncrementalMarkdownParser` / `IncrementalParseResult` | Reuses unchanged prefix/suffix AST blocks across targeted document edits with $O(1)$ edit-windowing, fast prefix/suffix diffing, cached source normalization reuse, and $O(1)$ lazy span shifting. |
+| `StreamingMarkdownController` | Accumulates streamed chunks with frozen `settledBlocks`, exact `settledPrefixBlockCount` alignment, pure-Dart push listeners (`addListener`/`removeListener`/`dispose`), prefix-preserving `replaceText()`, and full-parity `finish()`. |
+| `MarkdownBlockNode` / `MarkdownInlineNode` | Sealed Dart 3 AST hierarchies (18 block subtypes including `MathBlockNode` for `$$...$$` and `\[...\]`, 20 inline subtypes including `MathInlineNode` for `$...$` and `\(...\)`) with `SourceSpan`, `blockId`, `toPlainText()`, and `shiftSpan()`. |
 | `HeadingSlugGenerator` / `slugifyHeadingText` | Deterministic GitHub-style heading anchor slug generation with collision deduplication. |
 
-## Companion Packages
+## Built-In Flutter Integration & Companion Packages
 
-* **LaTeX Math ([`tex_math`](https://pub.dev/packages/tex_math) / [`tex_math_flutter`](https://pub.dev/packages/tex_math_flutter))**: Pass `MathInlineNode.latex` and `MathBlockNode.latex` (when `math: true`) straight into `TexMathEngine` or `TexMath` widgets for pure-Dart OpenType `MATH` typesetting.
+* **Out-of-the-Box Flutter Rendering ([`markdown_engine_flutter`](https://pub.dev/packages/markdown_engine_flutter))**: Pairs directly with `markdown_engine` to render `MathInlineNode`, `MathBlockNode`, and `mermaid` fenced `CodeBlockNode`s natively out of the box via bundled `tex_math_flutter` and `pele_dart` integration.
+* **LaTeX Math ([`tex_math`](https://pub.dev/packages/tex_math) / [`tex_math_flutter`](https://pub.dev/packages/tex_math_flutter))**: With `math: true` (default on `MarkdownOptions()` and `.extended()`), inline `$...$` / `\(...\)` and display `$$...$$` / `\[...\]` expressions parse into `MathInlineNode.latex` and `MathBlockNode.latex` for pure-Dart OpenType `MATH` typesetting.
 * **Mermaid Diagrams ([`pele_dart`](https://pub.dev/packages/pele_dart))**: Match fenced `CodeBlockNode`s where `language == 'mermaid'` and render `literal` to pure-Dart SVG diagrams.
 
 ## Specification Parity & Native AOT Performance
@@ -152,15 +153,15 @@ Verified against the vendored CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.g
 | `gfm_spec` (`0.29.0.gfm.13`) | 670 | 0 | 2 | 672 | **100.0%** |
 | `gfm_extensions` (`0.29.0.gfm.13`) | 30 | 0 | 0 | 30 | **100.0%** |
 
-Native Dart AOT measurements on Apple M4 (`arm64`, macOS 15.6, Dart `3.13.5`) under `MarkdownOptions.gfm()`:
+Native Dart AOT measurements on Apple M4 (`arm64`, macOS 15.6, Dart `3.13.5`, measured under concurrent host background VM load) under `MarkdownOptions.gfm()`:
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) |
 | :--- | ---: | ---: | ---: | ---: |
-| `small_doc_parse_and_html` | 937 B (18 lines) | 12.78 us | **12.77 us** | 70.00 MB/s |
-| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 402.74 us | **399.72 us** | 60.23 MB/s |
-| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 2.595 ms | **2.601 ms** | 63.43 MB/s |
-| `incremental_single_paragraph_edit` | 168.9 KB (`1,457/1,458` reused, **16.28x**) | 160.04 us | **159.80 us** | 1032.33 MB/s |
-| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (14/15 settled) | 3.06 us | **3.05 us** | 13.47 MB/s |
+| `small_doc_parse_and_html` | 937 B (18 lines) | 25.42 us | **25.33 us** | 35.28 MB/s |
+| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 919.58 us | **858.92 us** | 28.03 MB/s |
+| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 5.189 ms | **4.573 ms** | 36.08 MB/s |
+| `incremental_single_paragraph_edit` | 168.9 KB (`1,457/1,458` reused, **130.05x**) | 42.12 us | **35.16 us** | 4691.86 MB/s |
+| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (14/15 settled) | 5.90 us | **5.81 us** | 7.07 MB/s |
 
 ## License & Additional Resources
 

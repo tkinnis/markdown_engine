@@ -11,20 +11,101 @@ import 'studio_streaming_pane.dart';
 
 /// Entry point for the `markdown_engine` macOS inspection and streaming
 /// workbench.
-void main() {
-  runApp(const MarkdownStudioApp());
+void main([List<String> args = const <String>[]]) {
+  WidgetsFlutterBinding.ensureInitialized();
+  unawaited(MarkdownBuiltInRenderers.warmUp());
+  runApp(MarkdownStudioApp.fromArgs(args));
 }
 
 /// Root widget for the `markdown_engine_studio` macOS desktop application.
 final class MarkdownStudioApp extends StatefulWidget {
   /// Creates the studio workbench application.
   ///
-  /// When [initialSource] is omitted, the workbench opens with the default
-  /// `CommonMark & GFM Showcase` preset.
-  const MarkdownStudioApp({super.key, this.initialSource});
+  /// When [initialSource] is omitted, the workbench opens with [initialPreset]
+  /// (`CommonMark & GFM Showcase` by default).
+  const MarkdownStudioApp({
+    super.key,
+    this.initialSource,
+    this.initialPreset = StudioPresetId.showcase,
+    this.initialDark = false,
+    this.initialStreamingMode = false,
+    this.initialAutoFinishStream = false,
+    this.initialStreamSteps,
+    this.initialScrollOffset = 0.0,
+    this.initialAnchor,
+  });
+
+  /// Parses optional CLI launch arguments (`--preset=<name>`, `--dark`,
+  /// `--streaming`, `--stream-finish`, `--stream-steps=<n>`, `--scroll=<px>`,
+  /// `--anchor=<slug>`) into an initial [MarkdownStudioApp] configuration.
+  factory MarkdownStudioApp.fromArgs(List<String> args) {
+    StudioPresetId preset = StudioPresetId.showcase;
+    bool dark = false;
+    bool streaming = false;
+    bool finishStream = false;
+    int? streamSteps;
+    double scrollOffset = 0.0;
+    String? anchor;
+
+    for (final String arg in args) {
+      if (arg == '--dark') {
+        dark = true;
+      } else if (arg == '--streaming') {
+        streaming = true;
+      } else if (arg == '--stream-finish') {
+        finishStream = true;
+      } else if (arg.startsWith('--preset=')) {
+        final String name = arg.substring('--preset='.length).trim();
+        for (final StudioPresetId id in StudioPresetId.values) {
+          if (id.name.toLowerCase() == name.toLowerCase()) {
+            preset = id;
+            break;
+          }
+        }
+      } else if (arg.startsWith('--stream-steps=')) {
+        streamSteps = int.tryParse(arg.substring('--stream-steps='.length));
+      } else if (arg.startsWith('--scroll=')) {
+        scrollOffset =
+            double.tryParse(arg.substring('--scroll='.length)) ?? 0.0;
+      } else if (arg.startsWith('--anchor=')) {
+        anchor = arg.substring('--anchor='.length).trim();
+      }
+    }
+
+    return MarkdownStudioApp(
+      initialPreset: preset,
+      initialDark: dark,
+      initialStreamingMode: streaming,
+      initialAutoFinishStream: finishStream,
+      initialStreamSteps: streamSteps,
+      initialScrollOffset: scrollOffset,
+      initialAnchor: anchor,
+    );
+  }
 
   /// Optional custom Markdown source pre-populated in the editor pane.
   final String? initialSource;
+
+  /// Initial preset loaded when [initialSource] is omitted.
+  final StudioPresetId initialPreset;
+
+  /// Whether the workbench starts in dark mode.
+  final bool initialDark;
+
+  /// Whether the workbench starts in LLM Streaming Simulator mode.
+  final bool initialStreamingMode;
+
+  /// Whether streaming mode immediately advances through all chunks on startup.
+  final bool initialAutoFinishStream;
+
+  /// Optional number of streaming chunks to apply immediately on startup.
+  final int? initialStreamSteps;
+
+  /// Optional initial vertical scroll offset applied to the preview pane.
+  final double initialScrollOffset;
+
+  /// Optional initial heading/footnote anchor slug to scroll to on startup.
+  final String? initialAnchor;
 
   @override
   State<MarkdownStudioApp> createState() => _MarkdownStudioAppState();
@@ -69,12 +150,21 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
   MarkdownUrlPolicy? _lastAuditedPolicy;
   StudioLinkAudit? _cachedLinkAudit;
 
+  MarkdownBuilderDelegates? _cachedDelegates;
+  MarkdownThemeData? _cachedDelegatesTheme;
+  MarkdownUrlPolicy? _cachedDelegatesPolicy;
+  bool? _cachedDelegatesRemoteImagesApproved;
+  MarkdownUrlPolicy? _activeDelegateUrlPolicy;
+
   Timer? _streamTimer;
 
   @override
   void initState() {
     super.initState();
-    _selectedPresetId = StudioPresetId.showcase;
+    unawaited(MarkdownBuiltInRenderers.warmUp());
+    _selectedPresetId = widget.initialPreset;
+    _isDark = widget.initialDark;
+    _isStreamingMode = widget.initialStreamingMode;
     final StudioPreset initialPreset = studioPresetById(_selectedPresetId);
     _activeOptions = initialPreset.options;
     final String initialText = widget.initialSource ?? initialPreset.source;
@@ -91,6 +181,61 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
       message: null,
       isError: false,
     ));
+
+    if (_isStreamingMode) {
+      if (widget.initialAutoFinishStream) {
+        _finishStream();
+      } else if (widget.initialStreamSteps != null &&
+          widget.initialStreamSteps! > 0) {
+        final int steps = widget.initialStreamSteps!.clamp(
+          0,
+          studioStreamingChunks.length,
+        );
+        for (int i = 0; i < steps; i++) {
+          _stepStreamChunk();
+        }
+      }
+    }
+
+    if (widget.initialAnchor != null && widget.initialAnchor!.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+        if (mounted) {
+          unawaited(
+            _markdownController.scrollToAnchor(
+              widget.initialAnchor!,
+              duration: Duration.zero,
+            ),
+          );
+        }
+      });
+    } else if (widget.initialScrollOffset > 0.0) {
+      WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+        unawaited(_stepInitialScrollTo(widget.initialScrollOffset));
+      });
+    }
+  }
+
+  Future<void> _stepInitialScrollTo(double targetOffset) async {
+    double current = 0.0;
+    while (mounted && current < targetOffset) {
+      if (!_previewScrollController.hasClients ||
+          !_previewScrollController.position.hasContentDimensions) {
+        await WidgetsBinding.instance.endOfFrame;
+        continue;
+      }
+      final double maxExtent =
+          _previewScrollController.position.maxScrollExtent;
+      final double next = (current + 280.0).clamp(
+        0.0,
+        targetOffset.clamp(0.0, maxExtent),
+      );
+      _previewScrollController.jumpTo(next);
+      current = next;
+      await WidgetsBinding.instance.endOfFrame;
+      if (next >= maxExtent || next >= targetOffset) {
+        break;
+      }
+    }
   }
 
   @override
@@ -387,6 +532,50 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     );
   }
 
+  void _handleDelegateLinkTap(String destination, String? title) {
+    final MarkdownUrlPolicy? policy = _activeDelegateUrlPolicy;
+    if (policy != null) {
+      _handleLinkTap(destination, title, policy);
+    }
+  }
+
+  void _handleDelegateLoadRemoteImages() {
+    setState(() {
+      _remoteImagesApproved = true;
+    });
+    _showStatus(
+      'Remote image loading approved for current view (MarkdownImagePolicy.ask).',
+      showSnackBar: true,
+    );
+  }
+
+  MarkdownBuilderDelegates _memoizedDelegates({
+    required MarkdownThemeData theme,
+    required MarkdownUrlPolicy urlPolicy,
+    required bool remoteImagesApproved,
+  }) {
+    _activeDelegateUrlPolicy = urlPolicy;
+    final MarkdownBuilderDelegates? cached = _cachedDelegates;
+    if (cached != null &&
+        _cachedDelegatesTheme == theme &&
+        _cachedDelegatesPolicy == urlPolicy &&
+        _cachedDelegatesRemoteImagesApproved == remoteImagesApproved) {
+      return cached;
+    }
+    final MarkdownBuilderDelegates next = buildStudioDelegates(
+      theme: theme,
+      urlPolicy: urlPolicy,
+      remoteImagesApproved: remoteImagesApproved,
+      onTapLink: _handleDelegateLinkTap,
+      onLoadRemoteImages: _handleDelegateLoadRemoteImages,
+    );
+    _cachedDelegates = next;
+    _cachedDelegatesTheme = theme;
+    _cachedDelegatesPolicy = urlPolicy;
+    _cachedDelegatesRemoteImagesApproved = remoteImagesApproved;
+    return next;
+  }
+
   @override
   Widget build(BuildContext context) {
     final MarkdownThemeData markdownTheme = _isDark
@@ -395,21 +584,10 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     final MarkdownUrlPolicy activeUrlPolicy = _isStreamingMode
         ? _streamController.effectiveOptions.urlPolicy
         : _activeOptions.urlPolicy;
-    final MarkdownBuilderDelegates delegates = buildStudioDelegates(
+    final MarkdownBuilderDelegates delegates = _memoizedDelegates(
       theme: markdownTheme,
       urlPolicy: activeUrlPolicy,
       remoteImagesApproved: _remoteImagesApproved,
-      onTapLink: (String destination, String? title) =>
-          _handleLinkTap(destination, title, activeUrlPolicy),
-      onLoadRemoteImages: () {
-        setState(() {
-          _remoteImagesApproved = true;
-        });
-        _showStatus(
-          'Remote image loading approved for current view (MarkdownImagePolicy.ask).',
-          showSnackBar: true,
-        );
-      },
     );
 
     return MaterialApp(

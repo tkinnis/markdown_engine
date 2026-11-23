@@ -2,20 +2,21 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/tkinnis/markdown_engine/ci.yml?branch=main&label=CI&logo=github)](https://github.com/tkinnis/markdown_engine/actions/workflows/ci.yml) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-0ea5e9)](https://tkinnis.github.io/markdown_engine/) [![CommonMark 0.31.2](https://img.shields.io/badge/spec-CommonMark%200.31.2-0284c7)](https://github.com/tkinnis/markdown_engine/blob/main/REFERENCE.md) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Pure-Dart Flutter sliver rendering widgets, widgets-first and Material theming, background isolate document reading, native text selection, security-gated links and images, and live streaming Markdown support built on [markdown_engine](https://github.com/tkinnis/markdown_engine/tree/main/packages/markdown_engine).
+Pure-Dart Flutter sliver rendering widgets, built-in native OpenType TeX math (`tex_math_flutter`) and vector Mermaid diagrams (`pele_dart` + `vector_graphics`), widgets-first and Material theming, background isolate document reading, native text selection, security-gated links and images, and live streaming Markdown support built on [markdown_engine](https://github.com/tkinnis/markdown_engine/tree/main/packages/markdown_engine).
 
 ## Highlights
 
-* **Zero-Reparse Theme Switching & Incremental Updates**: `MarkdownView` caches the parsed AST in widget state, reuses untouched blocks automatically via `IncrementalMarkdownParser` on `data` edits (preserving stateful block widgets such as `<details>`), and performs zero re-parses when `MarkdownTheme` flips Light/Dark modes.
+* **Out-of-the-Box LaTeX Math & Vector Mermaid Diagrams**: With default `MarkdownOptions()` (`math: true`) and `MarkdownBuilderDelegates` (`enableBuiltInMath: true`, `enableBuiltInMermaid: true`), inline (`$...$`, `\(...\)`) and display (`$$...$$`, `\[...\]`) TeX math renders natively via `tex_math_flutter` (`TexMath` + `NewCMMath-Regular.otf`) and fenced `mermaid` code blocks compile via `pele_dart` + `vector_graphics` (`VectorGraphic`) in background isolates with zero custom builder boilerplate, bounded LRU caches (`256` math / `128` Mermaid), calm streaming preview cards for unclosed Mermaid fences, and safe fallback widgets for invalid syntax.
+* **Zero-Reparse Theme Switching & Block Memoization**: `MarkdownView` caches the parsed AST in widget state, reuses untouched blocks automatically via `IncrementalMarkdownParser` on `data` edits (preserving stateful block widgets such as `<details>`), memoizes top-level block and inline `RichText` subtrees, derives `TexMathThemeData` and `PelePalette` reactively from `MarkdownThemeData`, and performs zero re-parses or TeX relayouts when `MarkdownTheme` flips Light/Dark modes.
 * **Lazy Sliver Virtualization & Full-Document Selection**: `SliverMarkdownDocument` materializes only visible top-level blocks via `SliverChildBuilderDelegate` keyed by `node.blockId` (`addAutomaticKeepAlives: true`), works inside both `MaterialApp` (`SelectionArea`) and `WidgetsApp` (`SelectableRegion`), accepts an optional `focusNode`, excludes UI chrome (`Copy` buttons, bullets, alert badges) from selection, and exports full `document.toPlainText()` on `Cmd+A` / Select All across off-screen slivers.
-* **Push-Based LLM Streaming**: `MarkdownView.streaming` subscribes directly to `StreamingMarkdownController.addListener` with zero polling timers, freezing settled prefix blocks while updating only the active trailing slice (including post-`finish()` `reset()` / `append()` reuse).
+* **Push-Based Split-Sliver LLM Streaming**: `MarkdownView.streaming` subscribes directly to `StreamingMarkdownController.addListener` with zero polling timers and splits `CustomScrollView` into a settled-prefix `SliverMarkdownDocument` (aligned to `settledPrefixBlockCount`) plus a dedicated active tail sliver so trailing token appends never rebuild settled blocks (including post-`finish()` `reset()` / `append()` reuse).
 * **Background Isolate `ValueListenable` Reader**: `MarkdownDocumentReader` implements `ValueListenable<MarkdownDocument>` (`value`, `hasRead`), parses short inputs (`< 4096` UTF-16 code units) synchronously, offloads larger documents to `Isolate.run` with in-flight deduplication and latest-wins coalescing, and falls back synchronously on `IsolateSpawnException`.
-* **Defense-in-Depth Security & Accessibility**: Enforces `MarkdownUrlPolicy` (defaulting to strict scheme/host checks) on interactive links and images, gates remote/external images via `MarkdownImagePolicy` (`block`, `ask`, `load` with `remoteImagesApproved` scoping per document), and provides screen-reader `Semantics` (`headingLevel`, table header traits, single-speak `<abbr>` tooltips, link traits) and keyboard `FocusableActionDetector` controls.
+* **Defense-in-Depth Security & Accessibility**: Enforces `MarkdownUrlPolicy` (defaulting to strict scheme/host checks) on interactive links and images, gates remote/external images via `MarkdownImagePolicy` (`block`, `ask`, `load` with `remoteImagesApproved` scoping per document), and provides screen-reader `Semantics` (`headingLevel`, table header traits, spoken TeX labels, SVG `aria-label` diagram semantics, single-speak `<abbr>` tooltips, link traits) and keyboard `FocusableActionDetector` controls.
 * **Rich Native Widgets**: Supports headings with anchor registration and `MarkdownController.readingPlaceNotifier` tracking, aligned GFM tables, task list checkboxes, all five GitHub Alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), YAML/TOML frontmatter cards, interactive collapsible `<details>`/`<summary>`, figures, aligned blocks, definition lists, footnotes with back-links, `<kbd>`, `<abbr>`, `<u>`/`<small>`/`<q>`, sized `<img width height>`, `<picture>`, and code blocks with language badges and copy buttons.
 
 ## Installation
 
-Add `markdown_engine_flutter` with the Flutter CLI (requires Dart `^3.8.0` and Flutter `>=3.32.0`):
+Add `markdown_engine_flutter` with the Flutter CLI (requires Dart `^3.13.0` and Flutter `>=3.47.0`):
 
 ```bash
 flutter pub add markdown_engine_flutter
@@ -104,18 +105,29 @@ Widget buildLoadedDocument() {
 }
 ```
 
-## Companion Adapters (`tex_math_flutter` & `pele_dart`)
+## Built-In Math & Mermaid Rendering (`MarkdownBuiltInRenderers`)
 
-Plug native math rendering from [tex_math_flutter](https://pub.dev/packages/tex_math_flutter) and native Mermaid diagrams from `pele_dart` directly into `MarkdownBuilderDelegates` without introducing WebViews or heavy dependencies:
+`markdown_engine_flutter` renders inline (`$...$`, `\(...\)`), display (`$$...$$`, `\[...\]`) TeX formulas and fenced `mermaid` code blocks automatically without configuring `mathInlineBuilder`, `mathBlockBuilder`, or `diagramBuilder`. Optionally pre-warm the OpenType math font and `pele_dart` diagram registry at startup, opt out via `enableBuiltInMath` / `enableBuiltInMermaid`, or override individual builders:
 
 ```dart
+import 'dart:async' show unawaited;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
-// import 'package:tex_math_flutter/tex_math_flutter.dart';
-// import 'package:pele_dart/pele_dart.dart';
 
-MarkdownBuilderDelegates buildEcosystemDelegates() {
+void initMarkdownRenderers() {
+  // Optional: pre-loads NewCMMath-Regular.otf and primes pele_dart off the UI thread.
+  unawaited(MarkdownBuiltInRenderers.warmUp());
+}
+
+// Disable built-in renderers to fall back to raw monospace chips/code blocks:
+const MarkdownBuilderDelegates rawFallbackDelegates = MarkdownBuilderDelegates(
+  enableBuiltInMath: false,
+  enableBuiltInMermaid: false,
+);
+
+// Or override individual math / diagram renderers (custom builders take precedence):
+MarkdownBuilderDelegates buildCustomOverrideDelegates() {
   return MarkdownBuilderDelegates(
     mathInlineBuilder: (
       BuildContext context,
@@ -123,8 +135,6 @@ MarkdownBuilderDelegates buildEcosystemDelegates() {
       TextStyle style,
       GestureRecognizer? linkRecognizer,
     ) {
-      // With tex_math_flutter:
-      // return TexMathSpan(node.latex, style: style);
       return WidgetSpan(
         alignment: PlaceholderAlignment.baseline,
         baseline: TextBaseline.alphabetic,
@@ -132,21 +142,20 @@ MarkdownBuilderDelegates buildEcosystemDelegates() {
       );
     },
     mathBlockBuilder: (BuildContext context, MathBlockNode node) {
-      // With tex_math_flutter:
-      // return TexMath(node.latex, overflow: TexMathOverflow.scroll);
       return Text(node.latex);
     },
     diagramBuilder: (BuildContext context, CodeBlockNode node) {
-      if (node.language == 'mermaid') {
-        // With pele_dart:
-        // return PeleMermaidDiagram(source: node.literal);
-        return Text('Mermaid diagram (${node.literal.length} chars)');
+      if (node.language == 'graphviz') {
+        return Text('Custom diagram (${node.literal.length} chars)');
       }
+      // Returning null keeps built-in Mermaid rendering for `mermaid` fences.
       return null;
     },
   );
 }
 ```
+
+Use `MarkdownBuiltInRenderers.clearCaches()` and `MarkdownBuiltInRenderers.dispose()` during teardown or tests to release cached math display lists (`256` max entries), compiled Mermaid `vector_graphics` payloads (`128` max entries), and pending compilation state.
 
 ## License & Documentation
 

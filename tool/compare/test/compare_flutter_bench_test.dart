@@ -154,9 +154,9 @@ void main() {
         samples: 11,
         batchIterations: 2,
         operation: () {
-          sink ^= fmd.Markdown.fromString(
-            largeFixture.baseSource,
-          ).blocks.length;
+          sink ^= fmd.Markdown.fromString(largeFixture.baseSource)
+              .blocks
+              .length;
         },
       );
       final LatencyStats largePkgMarkdownAst = measureLatency(

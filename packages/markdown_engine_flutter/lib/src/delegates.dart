@@ -25,34 +25,43 @@ enum MarkdownImagePolicy {
 ///
 /// The enclosing [linkRecognizer] is passed when the math span sits inside an
 /// active sanitized hyperlink so tapping the formula can trigger the link.
-typedef MarkdownMathInlineBuilder =
-    InlineSpan Function(
-      BuildContext context,
-      MathInlineNode node,
-      TextStyle style,
-      GestureRecognizer? linkRecognizer,
-    );
+typedef MarkdownMathInlineBuilder = InlineSpan Function(
+  BuildContext context,
+  MathInlineNode node,
+  TextStyle style,
+  GestureRecognizer? linkRecognizer,
+);
 
 /// Builder returning a custom widget for a display LaTeX [MathBlockNode].
-typedef MarkdownMathBlockBuilder =
-    Widget Function(BuildContext context, MathBlockNode node);
+typedef MarkdownMathBlockBuilder = Widget Function(
+  BuildContext context,
+  MathBlockNode node,
+);
 
 /// Builder optionally returning a diagram widget for a fenced [CodeBlockNode]
 /// (for example `mermaid` blocks), or `null` to fall back to code rendering.
-typedef MarkdownDiagramBuilder =
-    Widget? Function(BuildContext context, CodeBlockNode node);
+typedef MarkdownDiagramBuilder = Widget? Function(
+  BuildContext context,
+  CodeBlockNode node,
+);
 
 /// Builder returning a custom widget for a [CodeBlockNode].
-typedef MarkdownCodeBlockBuilder =
-    Widget Function(BuildContext context, CodeBlockNode node);
+typedef MarkdownCodeBlockBuilder = Widget Function(
+  BuildContext context,
+  CodeBlockNode node,
+);
 
 /// Builder returning a custom widget for an allowed [ImageNode].
-typedef MarkdownImageBuilder =
-    Widget Function(BuildContext context, ImageNode node);
+typedef MarkdownImageBuilder = Widget Function(
+  BuildContext context,
+  ImageNode node,
+);
 
 /// Callback invoked when the user taps an allowed link destination.
-typedef MarkdownLinkTapCallback =
-    void Function(String destination, String? title);
+typedef MarkdownLinkTapCallback = void Function(
+  String destination,
+  String? title,
+);
 
 /// Callback invoked when the user taps an allowed `http` or `https` web URI.
 typedef MarkdownWebLinkCallback = void Function(Uri uri);
@@ -66,6 +75,8 @@ final class MarkdownBuilderDelegates {
     this.remoteImagesApproved = false,
     this.onLoadRemoteImages,
     this.autoScrollToAnchors = true,
+    this.enableBuiltInMath = true,
+    this.enableBuiltInMermaid = true,
     this.mathInlineBuilder,
     this.mathBlockBuilder,
     this.diagramBuilder,
@@ -93,6 +104,22 @@ final class MarkdownBuilderDelegates {
   /// Defaults to `true`. Set to `false` when handling `#fragment` links
   /// exclusively inside [onTapLink].
   final bool autoScrollToAnchors;
+
+  /// Whether built-in `tex_math_flutter` rendering is enabled for
+  /// [MathInlineNode] and [MathBlockNode] when [mathInlineBuilder] and
+  /// [mathBlockBuilder] are omitted.
+  ///
+  /// Defaults to `true`. Set to `false` to fall back to raw monospace LaTeX
+  /// chips and display boxes.
+  final bool enableBuiltInMath;
+
+  /// Whether built-in `pele_dart` + `vector_graphics` rendering is enabled for
+  /// fenced `mermaid` code blocks when [diagramBuilder] returns `null` or is
+  /// omitted.
+  ///
+  /// Defaults to `true`. Set to `false` to render `mermaid` fences through
+  /// [codeBlockBuilder] or the default code block widget.
+  final bool enableBuiltInMermaid;
 
   /// Optional custom renderer for inline `$...$` math nodes.
   final MarkdownMathInlineBuilder? mathInlineBuilder;
@@ -126,6 +153,8 @@ final class MarkdownBuilderDelegates {
     bool? remoteImagesApproved,
     VoidCallback? onLoadRemoteImages,
     bool? autoScrollToAnchors,
+    bool? enableBuiltInMath,
+    bool? enableBuiltInMermaid,
     MarkdownMathInlineBuilder? mathInlineBuilder,
     MarkdownMathBlockBuilder? mathBlockBuilder,
     MarkdownDiagramBuilder? diagramBuilder,
@@ -140,6 +169,8 @@ final class MarkdownBuilderDelegates {
       remoteImagesApproved: remoteImagesApproved ?? this.remoteImagesApproved,
       onLoadRemoteImages: onLoadRemoteImages ?? this.onLoadRemoteImages,
       autoScrollToAnchors: autoScrollToAnchors ?? this.autoScrollToAnchors,
+      enableBuiltInMath: enableBuiltInMath ?? this.enableBuiltInMath,
+      enableBuiltInMermaid: enableBuiltInMermaid ?? this.enableBuiltInMermaid,
       mathInlineBuilder: mathInlineBuilder ?? this.mathInlineBuilder,
       mathBlockBuilder: mathBlockBuilder ?? this.mathBlockBuilder,
       diagramBuilder: diagramBuilder ?? this.diagramBuilder,
@@ -196,6 +227,8 @@ final class MarkdownBuilderDelegates {
           remoteImagesApproved == other.remoteImagesApproved &&
           onLoadRemoteImages == other.onLoadRemoteImages &&
           autoScrollToAnchors == other.autoScrollToAnchors &&
+          enableBuiltInMath == other.enableBuiltInMath &&
+          enableBuiltInMermaid == other.enableBuiltInMermaid &&
           mathInlineBuilder == other.mathInlineBuilder &&
           mathBlockBuilder == other.mathBlockBuilder &&
           diagramBuilder == other.diagramBuilder &&
@@ -211,6 +244,8 @@ final class MarkdownBuilderDelegates {
     remoteImagesApproved,
     onLoadRemoteImages,
     autoScrollToAnchors,
+    enableBuiltInMath,
+    enableBuiltInMermaid,
     mathInlineBuilder,
     mathBlockBuilder,
     diagramBuilder,

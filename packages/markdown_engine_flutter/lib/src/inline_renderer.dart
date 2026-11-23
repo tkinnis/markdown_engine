@@ -10,6 +10,7 @@ import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 
+import 'built_in_math.dart';
 import 'controller.dart';
 import 'delegates.dart';
 import 'theme.dart';
@@ -249,13 +250,40 @@ final class _TrackedRecognizer {
   final TapGestureRecognizer recognizer;
 }
 
-enum _InlineHtmlStyleTag { underline, small, quote }
+enum _InlineHtmlStyleTag { underline, small, quote, code }
 
 final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
+  static const Map<ShortcutActivator, Intent> _linkActivateShortcuts =
+      <ShortcutActivator, Intent>{
+        SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+      };
+
   List<_TrackedRecognizer> _recognizers = <_TrackedRecognizer>[];
   final List<TapGestureRecognizer> _retiredRecognizers =
       <TapGestureRecognizer>[];
   bool _postFrameCleanupScheduled = false;
+
+  Widget? _cachedRichText;
+  List<MarkdownInlineNode>? _cachedNodes;
+  TextStyle? _cachedBaseStyle;
+  MarkdownThemeData? _cachedTheme;
+  MarkdownBuilderDelegates? _cachedDelegates;
+  MarkdownUrlPolicy? _cachedUrlPolicy;
+  MarkdownController? _cachedController;
+  TextAlign? _cachedTextAlign;
+  bool? _cachedRemoteImagesApproved;
+  VoidCallback? _cachedOnRequestLoadRemoteImages;
+  TextScaler? _cachedTextScaler;
+  TextDirection? _cachedTextDirection;
+  bool? _cachedHasSelectionContainer;
+  bool? _cachedHasOverlay;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _cachedRichText = null;
+  }
 
   @override
   void dispose() {
@@ -264,6 +292,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     }
     _recognizers = <_TrackedRecognizer>[];
     _disposeRetiredRecognizers();
+    _cachedRichText = null;
     super.dispose();
   }
 
@@ -289,6 +318,30 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
 
   @override
   Widget build(BuildContext context) {
+    final TextScaler? textScaler = MediaQuery.maybeTextScalerOf(context);
+    final TextDirection? textDirection = Directionality.maybeOf(context);
+    final bool hasSelectionContainer =
+        SelectionContainer.maybeOf(context) != null;
+    final bool hasOverlay = Overlay.maybeOf(context) != null;
+
+    final Widget? cached = _cachedRichText;
+    if (cached != null &&
+        identical(widget.nodes, _cachedNodes) &&
+        widget.baseStyle == _cachedBaseStyle &&
+        widget.theme == _cachedTheme &&
+        widget.delegates == _cachedDelegates &&
+        widget.urlPolicy == _cachedUrlPolicy &&
+        identical(widget.controller, _cachedController) &&
+        widget.textAlign == _cachedTextAlign &&
+        widget.remoteImagesApproved == _cachedRemoteImagesApproved &&
+        widget.onRequestLoadRemoteImages == _cachedOnRequestLoadRemoteImages &&
+        textScaler == _cachedTextScaler &&
+        textDirection == _cachedTextDirection &&
+        hasSelectionContainer == _cachedHasSelectionContainer &&
+        hasOverlay == _cachedHasOverlay) {
+      return cached;
+    }
+
     final Map<String, List<TapGestureRecognizer>> pool =
         <String, List<TapGestureRecognizer>>{};
     for (final _TrackedRecognizer entry in _recognizers) {
@@ -316,10 +369,25 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     _recognizers = nextRecognizers;
     _scheduleRetiredCleanup();
 
-    return Text.rich(
+    final Widget built = Text.rich(
       TextSpan(style: widget.baseStyle, children: spans),
       textAlign: widget.textAlign,
     );
+    _cachedRichText = built;
+    _cachedNodes = widget.nodes;
+    _cachedBaseStyle = widget.baseStyle;
+    _cachedTheme = widget.theme;
+    _cachedDelegates = widget.delegates;
+    _cachedUrlPolicy = widget.urlPolicy;
+    _cachedController = widget.controller;
+    _cachedTextAlign = widget.textAlign;
+    _cachedRemoteImagesApproved = widget.remoteImagesApproved;
+    _cachedOnRequestLoadRemoteImages = widget.onRequestLoadRemoteImages;
+    _cachedTextScaler = textScaler;
+    _cachedTextDirection = textDirection;
+    _cachedHasSelectionContainer = hasSelectionContainer;
+    _cachedHasOverlay = hasOverlay;
+    return built;
   }
 
   TapGestureRecognizer _acquireRecognizer(
@@ -361,7 +429,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     for (final MarkdownInlineNode node in nodes) {
       final TextStyle activeStyle = tagStack.isEmpty
           ? style
-          : _applyHtmlTagStackStyle(style, tagStack);
+          : _applyHtmlTagStackStyle(style, tagStack, isLink: isLink);
       if (node is RawHtmlInlineNode) {
         final _RawHtmlDirective directive = _parseRawHtmlDirective(node.html);
         switch (directive.kind) {
@@ -394,13 +462,16 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
                 ),
               );
             }
+          case _RawHtmlDirectiveKind.openCode:
+            tagStack.add(_InlineHtmlStyleTag.code);
+          case _RawHtmlDirectiveKind.closeCode:
+            _popTag(tagStack, _InlineHtmlStyleTag.code);
           case _RawHtmlDirectiveKind.anchor:
             final String? anchorId = directive.anchorId;
             if (anchorId != null && anchorId.isNotEmpty) {
               result.add(
                 WidgetSpan(
-                  alignment: PlaceholderAlignment.baseline,
-                  baseline: TextBaseline.alphabetic,
+                  alignment: PlaceholderAlignment.middle,
                   child: ExcludeSemantics(
                     child: MarkdownAnchorTarget(
                       slugs: <String>[anchorId],
@@ -436,8 +507,9 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
 
   TextStyle _applyHtmlTagStackStyle(
     TextStyle base,
-    List<_InlineHtmlStyleTag> stack,
-  ) {
+    List<_InlineHtmlStyleTag> stack, {
+    required bool isLink,
+  }) {
     TextStyle current = base;
     for (final _InlineHtmlStyleTag tag in stack) {
       switch (tag) {
@@ -453,6 +525,17 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           current = current.copyWith(fontSize: baseSize * 0.85);
         case _InlineHtmlStyleTag.quote:
           break;
+        case _InlineHtmlStyleTag.code:
+          final double baseSize = current.fontSize ?? widget.theme.fontSize;
+          current = current.copyWith(
+            fontFamily: widget.theme.effectiveCodeFontFamily,
+            fontFamilyFallback: MarkdownThemeData.defaultCodeFontFallback,
+            fontSize: baseSize * 0.9,
+            color: isLink
+                ? current.color
+                : widget.theme.effectiveCodeForeground,
+            backgroundColor: widget.theme.codeBackground,
+          );
       }
     }
     return current;
@@ -679,6 +762,28 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         if (builder != null) {
           return builder(context, node, style, linkRecognizer);
         }
+        if (delegates.enableBuiltInMath) {
+          final Widget builtInMath = buildBuiltInInlineMathWidget(
+            context: context,
+            node: node,
+            style: style,
+            theme: theme,
+            delegates: delegates,
+            urlPolicy: widget.urlPolicy,
+            isInsideLink: isLink,
+          );
+          return WidgetSpan(
+            alignment: PlaceholderAlignment.baseline,
+            baseline: TextBaseline.alphabetic,
+            style: style,
+            child: _wrapWidgetWithLink(
+              builtInMath,
+              onLinkTap: onLinkTap,
+              isLink: isLink,
+              linkUrl: linkUrl,
+            ),
+          );
+        }
         final double baseSize = style.fontSize ?? theme.fontSize;
         final Widget mathChip = Semantics(
           label: 'Math: ${node.latex}',
@@ -811,8 +916,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         );
       case AnchorInlineNode():
         return WidgetSpan(
-          alignment: PlaceholderAlignment.baseline,
-          baseline: TextBaseline.alphabetic,
+          alignment: PlaceholderAlignment.middle,
           child: ExcludeSemantics(
             child: MarkdownAnchorTarget(
               slugs: <String>[node.id],
@@ -1044,8 +1148,17 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
   }) {
     Widget current = child;
     if (onLinkTap != null) {
-      current = MouseRegion(
-        cursor: SystemMouseCursors.click,
+      current = FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        shortcuts: _linkActivateShortcuts,
+        actions: <Type, Action<Intent>>{
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (ActivateIntent _) {
+              onLinkTap();
+              return null;
+            },
+          ),
+        },
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: onLinkTap,
@@ -1054,7 +1167,12 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
       );
     }
     if (isLink) {
-      current = Semantics(link: true, linkUrl: linkUrl, child: current);
+      current = Semantics(
+        link: true,
+        linkUrl: linkUrl,
+        onTap: onLinkTap,
+        child: current,
+      );
     }
     return current;
   }
@@ -1271,6 +1389,8 @@ enum _RawHtmlDirectiveKind {
   closeSmall,
   openQuote,
   closeQuote,
+  openCode,
+  closeCode,
   anchor,
 }
 
@@ -1393,6 +1513,13 @@ _RawHtmlDirective _parseRawHtmlDirective(String rawHtml) {
       return isSelfClosing
           ? _RawHtmlDirective.none
           : const _RawHtmlDirective(_RawHtmlDirectiveKind.openQuote);
+    case 'code':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeCode);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openCode);
     case 'a':
       if (isClosing) {
         return _RawHtmlDirective.none;

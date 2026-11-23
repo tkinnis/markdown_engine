@@ -18,7 +18,7 @@ final class MarkdownOptions {
     this.alerts = false,
     this.frontmatter = false,
     this.definitionLists = false,
-    this.math = false,
+    this.math = true,
     this.headingSlugs = true,
     this.highlight = false,
     this.subscript = false,
@@ -214,7 +214,8 @@ final class MarkdownOptions {
   /// Enables PHP Markdown Extra style definition lists.
   final bool definitionLists;
 
-  /// Enables inline and display math spans (`$...$`, `$$...$$`).
+  /// Enables inline and display math spans (`$...$`, `$$...$$`, `\(...\)`,
+  /// `\[...\]`).
   final bool math;
 
   /// Enables deterministic GitHub-style heading anchor slug generation.

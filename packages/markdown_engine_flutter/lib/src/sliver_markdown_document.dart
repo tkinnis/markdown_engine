@@ -23,6 +23,10 @@ final class SliverMarkdownDocument extends StatefulWidget {
     this.addRepaintBoundaries = true,
     this.remoteImagesApproved = false,
     this.onRequestLoadRemoteImages,
+    this.startBlockIndex = 0,
+    this.endBlockIndex,
+    this.trailingBlockSpacing = false,
+    this.streamingNormalizedSource,
   });
 
   /// Parsed immutable [MarkdownDocument] whose blocks are lazily materialized.
@@ -60,21 +64,49 @@ final class SliverMarkdownDocument extends StatefulWidget {
   /// Optional callback invoked when the user requests loading remote images.
   final VoidCallback? onRequestLoadRemoteImages;
 
+  /// Inclusive starting index inside `document.blocks` for sliced rendering.
+  final int startBlockIndex;
+
+  /// Optional exclusive ending index inside `document.blocks` for sliced
+  /// rendering (`null` renders through the end of `document.blocks`).
+  final int? endBlockIndex;
+
+  /// Whether the final block in this sliver appends `theme.blockSpacing` below
+  /// it (for example when followed by an active streaming tail sliver).
+  final bool trailingBlockSpacing;
+
+  /// Normalized source text for unfinished active-tail streaming blocks, or
+  /// `null` for settled or complete documents.
+  final String? streamingNormalizedSource;
+
   /// Returns the visible top-level blocks for [document] honoring
-  /// [showFrontmatter].
+  /// [showFrontmatter] and optional `[startBlockIndex, endBlockIndex)` slice
+  /// bounds.
   static List<MarkdownBlockNode> visibleBlocksFor(
     MarkdownDocument document, {
     required bool showFrontmatter,
+    int startBlockIndex = 0,
+    int? endBlockIndex,
   }) {
-    final List<MarkdownBlockNode> blocks = document.blocks;
-    if (showFrontmatter || blocks.isEmpty) {
-      return blocks;
+    final List<MarkdownBlockNode> allBlocks = document.blocks;
+    final int clampedStart = startBlockIndex.clamp(0, allBlocks.length);
+    final int clampedEnd = (endBlockIndex ?? allBlocks.length).clamp(
+      clampedStart,
+      allBlocks.length,
+    );
+    final List<MarkdownBlockNode> slice =
+        (clampedStart == 0 && clampedEnd == allBlocks.length)
+        ? allBlocks
+        : allBlocks.sublist(clampedStart, clampedEnd);
+
+    if (showFrontmatter || slice.isEmpty) {
+      return slice;
     }
-    if (blocks.first is! FrontmatterNode &&
-        !blocks.any((MarkdownBlockNode b) => b is FrontmatterNode)) {
-      return blocks;
+    if (slice.first is! FrontmatterNode &&
+        !slice.any((MarkdownBlockNode b) => b is FrontmatterNode)) {
+      return slice;
     }
-    return blocks
+    return slice
         .where((MarkdownBlockNode b) => b is! FrontmatterNode)
         .toList(growable: false);
   }
@@ -87,6 +119,13 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   late List<MarkdownBlockNode> _visibleBlocks;
   late Map<String, int> _idToIndex;
 
+  Widget? _cachedSliver;
+  MarkdownBlockRenderContext? _cachedRenderContext;
+  EdgeInsetsGeometry? _cachedPadding;
+  bool? _cachedTrailingBlockSpacing;
+  bool? _cachedKeepAlives;
+  bool? _cachedRepaintBoundaries;
+
   @override
   void initState() {
     super.initState();
@@ -94,23 +133,72 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _cachedSliver = null;
+  }
+
+  @override
   void didUpdateWidget(SliverMarkdownDocument oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.document, widget.document) ||
-        oldWidget.showFrontmatter != widget.showFrontmatter) {
-      _rebuildIndexCache();
+        oldWidget.showFrontmatter != widget.showFrontmatter ||
+        oldWidget.startBlockIndex != widget.startBlockIndex ||
+        oldWidget.endBlockIndex != widget.endBlockIndex) {
+      final List<MarkdownBlockNode> nextBlocks =
+          SliverMarkdownDocument.visibleBlocksFor(
+            widget.document,
+            showFrontmatter: widget.showFrontmatter,
+            startBlockIndex: widget.startBlockIndex,
+            endBlockIndex: widget.endBlockIndex,
+          );
+      if (!_blockListsIdentical(_visibleBlocks, nextBlocks)) {
+        _visibleBlocks = nextBlocks;
+        _idToIndex = <String, int>{
+          for (int i = 0; i < _visibleBlocks.length; i++)
+            _visibleBlocks[i].blockId: i,
+        };
+        _cachedSliver = null;
+      }
     }
+  }
+
+  @override
+  void dispose() {
+    _cachedSliver = null;
+    super.dispose();
   }
 
   void _rebuildIndexCache() {
     _visibleBlocks = SliverMarkdownDocument.visibleBlocksFor(
       widget.document,
       showFrontmatter: widget.showFrontmatter,
+      startBlockIndex: widget.startBlockIndex,
+      endBlockIndex: widget.endBlockIndex,
     );
     _idToIndex = <String, int>{
       for (int i = 0; i < _visibleBlocks.length; i++)
         _visibleBlocks[i].blockId: i,
     };
+    _cachedSliver = null;
+  }
+
+  static bool _blockListsIdentical(
+    List<MarkdownBlockNode> a,
+    List<MarkdownBlockNode> b,
+  ) {
+    if (identical(a, b)) {
+      return true;
+    }
+    if (a.length != b.length) {
+      return false;
+    }
+    for (int i = 0; i < a.length; i++) {
+      if (!identical(a[i], b[i])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   @override
@@ -132,9 +220,22 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
       controller: widget.controller,
       remoteImagesApproved: widget.remoteImagesApproved,
       onRequestLoadRemoteImages: widget.onRequestLoadRemoteImages,
+      streamingNormalizedSource: widget.streamingNormalizedSource,
     );
 
-    final Widget sliver = SliverList(
+    final Widget? cached = _cachedSliver;
+    if (cached != null &&
+        _cachedRenderContext == renderContext &&
+        _cachedPadding == widget.padding &&
+        _cachedTrailingBlockSpacing == widget.trailingBlockSpacing &&
+        _cachedKeepAlives == widget.addAutomaticKeepAlives &&
+        _cachedRepaintBoundaries == widget.addRepaintBoundaries) {
+      return cached;
+    }
+
+    final Map<String, int> idToIndex = _idToIndex;
+    final bool trailingSpacing = widget.trailingBlockSpacing;
+    final Widget listSliver = SliverList(
       delegate: SliverChildBuilderDelegate(
         (BuildContext itemContext, int index) {
           final MarkdownBlockNode block = blocks[index];
@@ -143,7 +244,9 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
             key: ValueKey<String>(block.blockId),
             node: block,
             renderContext: renderContext,
-            bottomSpacing: isLast ? 0.0 : resolvedTheme.blockSpacing,
+            bottomSpacing: (isLast && !trailingSpacing)
+                ? 0.0
+                : resolvedTheme.blockSpacing,
           );
         },
         childCount: blocks.length,
@@ -151,7 +254,7 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
         addRepaintBoundaries: widget.addRepaintBoundaries,
         findChildIndexCallback: (Key key) {
           if (key is ValueKey<String>) {
-            return _idToIndex[key.value];
+            return idToIndex[key.value];
           }
           return null;
         },
@@ -159,9 +262,16 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
     );
 
     final EdgeInsetsGeometry? pad = widget.padding;
-    if (pad != null) {
-      return SliverPadding(padding: pad, sliver: sliver);
-    }
-    return sliver;
+    final Widget built = pad != null
+        ? SliverPadding(padding: pad, sliver: listSliver)
+        : listSliver;
+
+    _cachedSliver = built;
+    _cachedRenderContext = renderContext;
+    _cachedPadding = pad;
+    _cachedTrailingBlockSpacing = trailingSpacing;
+    _cachedKeepAlives = widget.addAutomaticKeepAlives;
+    _cachedRepaintBoundaries = widget.addRepaintBoundaries;
+    return built;
   }
 }

@@ -741,6 +741,23 @@ final class _InlineItem {
   int inlineDepth = 0;
   int prevActive = -1;
   int nextActive = -1;
+  StringBuffer? textBuffer;
+  SourceSpan? textBufferSpan;
+
+  MarkdownInlineNode materializeNode() {
+    final StringBuffer? buf = textBuffer;
+    if (buf == null) {
+      return node;
+    }
+    final TextNode materialized = TextNode(
+      buf.toString(),
+      span: textBufferSpan ?? node.span,
+    );
+    node = materialized;
+    textBuffer = null;
+    textBufferSpan = null;
+    return materialized;
+  }
 }
 
 String _repeatDelimChar(int delimChar, int count) {
@@ -803,6 +820,7 @@ final class _InlineScanner {
   bool _noPiClose = false;
   bool _noCdataClose = false;
   bool _noValidClosingDollar = false;
+  bool _noClosingParenMath = false;
   bool _sawAutolinkCandidate = false;
   bool _sawEmojiColon = false;
   bool _sawSmartPunct = false;
@@ -836,6 +854,7 @@ final class _InlineScanner {
     _noPiClose = false;
     _noCdataClose = false;
     _noValidClosingDollar = false;
+    _noClosingParenMath = false;
     _sawAutolinkCandidate = false;
     _sawEmojiColon = false;
     _sawSmartPunct = false;
@@ -1073,15 +1092,16 @@ final class _InlineScanner {
     if (_activeTail != -1) {
       final _InlineItem last = _items[_activeTail];
       if (last.isText && !last.isDelimiter && !last.isBracket) {
-        final TextNode prev = last.node as TextNode;
-        last.node = TextNode(
-          '${prev.text}$text',
-          span: SourceSpan(
-            startOffset: prev.span.startOffset,
-            endOffset: span.endOffset,
-            startLine: prev.span.startLine,
-            endLine: span.endLine,
-          ),
+        final StringBuffer buf = last.textBuffer ??= StringBuffer(
+          (last.node as TextNode).text,
+        );
+        buf.write(text);
+        final SourceSpan prevSpan = last.textBufferSpan ?? last.node.span;
+        last.textBufferSpan = SourceSpan(
+          startOffset: prevSpan.startOffset,
+          endOffset: span.endOffset,
+          startLine: prevSpan.startLine,
+          endLine: span.endLine,
         );
         return;
       }
@@ -1093,7 +1113,7 @@ final class _InlineScanner {
     if (_activeTail != -1) {
       final _InlineItem last = _items[_activeTail];
       if (last.isText && !last.isDelimiter && !last.isBracket) {
-        final TextNode prev = last.node as TextNode;
+        final TextNode prev = last.materializeNode() as TextNode;
         int trailingSpaces = 0;
         for (int k = prev.text.length - 1; k >= 0; k--) {
           if (prev.text.codeUnitAt(k) == 0x20) {
@@ -1155,6 +1175,12 @@ final class _InlineScanner {
         _InlineItem.node(HardBreakNode(span: _span(pos, pos + 2))),
       );
       return _skipLeadingSpacesAfterNewline(pos + 2);
+    }
+    if (options.math && next == 0x28 && !_noClosingParenMath) {
+      final int? end = _tryHandleParenInlineMath(pos);
+      if (end != null) {
+        return end;
+      }
     }
     if (isAsciiPunctuation(next)) {
       if (next == 0x3A) {
@@ -1237,6 +1263,35 @@ final class _InlineScanner {
     }
     _appendText('&', _span(pos, pos + 1));
     return pos + 1;
+  }
+
+  int? _tryHandleParenInlineMath(int pos) {
+    int i = pos + 2;
+    final int len = input.length;
+    while (i < len) {
+      final int cu = input.codeUnitAt(i);
+      if (cu == 0x5C && i + 1 < len) {
+        final int after = input.codeUnitAt(i + 1);
+        if (after == 0x29) {
+          final String latex = input.substring(pos + 2, i).trim();
+          if (latex.isEmpty) {
+            return null;
+          }
+          _appendActiveItem(
+            _InlineItem.node(MathInlineNode(latex, span: _span(pos, i + 2))),
+          );
+          return i + 2;
+        }
+        if (after == 0x28) {
+          return null;
+        }
+        i += 2;
+        continue;
+      }
+      i++;
+    }
+    _noClosingParenMath = true;
+    return null;
   }
 
   int _handleInlineMath(int pos) {
@@ -1932,7 +1987,7 @@ final class _InlineScanner {
     int cur = opener.nextActive;
     while (cur != -1) {
       final _InlineItem childItem = _items[cur];
-      final MarkdownInlineNode n = childItem.node;
+      final MarkdownInlineNode n = childItem.materializeNode();
       if (childItem.inlineDepth > maxChildDepth) {
         maxChildDepth = childItem.inlineDepth;
       }
@@ -2356,7 +2411,7 @@ final class _InlineScanner {
       final List<MarkdownInlineNode> rawChildren = <MarkdownInlineNode>[];
       cur = opener.nextActive;
       while (cur != -1 && cur != closerItemIdx) {
-        final MarkdownInlineNode n = _items[cur].node;
+        final MarkdownInlineNode n = _items[cur].materializeNode();
         if (n is! TextNode || n.text.isNotEmpty) {
           rawChildren.add(n);
         }
@@ -2429,7 +2484,7 @@ final class _InlineScanner {
     int cur = headIdx;
     while (cur != -1) {
       final _InlineItem item = _items[cur];
-      final MarkdownInlineNode n = item.node;
+      final MarkdownInlineNode n = item.materializeNode();
       if (n is! TextNode || n.text.isNotEmpty) {
         result.add(n);
       }

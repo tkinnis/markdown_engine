@@ -86,17 +86,17 @@ void main() {
   });
 
   testWidgets(
-    'Preset switching loads Alerts, Security, and 500-Section Stress with outline jump',
+    'Preset switching loads Kitchen Sink, Alerts, Security, and 500-Section Stress with built-in math & Mermaid',
     (WidgetTester tester) async {
       _setDesktopViewport(tester);
+      await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
 
       await tester.pumpWidget(const MarkdownStudioApp());
-      await tester.pump();
+      await tester.pumpAndSettle();
 
-      // Default showcase renders custom math and diagram hook cards.
+      // Default showcase renders built-in TexMath and VectorGraphic Mermaid widgets.
       expect(find.text('CommonMark & GFM Showcase'), findsWidgets);
 
-      // Scroll preview down to confirm custom mathBlockBuilder & diagramBuilder.
       final Finder previewScrollable = find
           .descendant(
             of: find.byType(MarkdownView),
@@ -104,21 +104,60 @@ void main() {
           )
           .first;
       await tester.scrollUntilVisible(
-        find.text('Display Math · mathBlockBuilder'),
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.textContaining('Display equations render natively'),
+        ),
         300.0,
         scrollable: previewScrollable,
       );
-      expect(find.text('Display Math · mathBlockBuilder'), findsOneWidget);
+      await tester.pumpAndSettle();
+      final Finder texMathFinder = find.descendant(
+        of: find.byType(MarkdownView),
+        matching: find.byWidgetPredicate(
+          (Widget w) => '${w.runtimeType}' == 'TexMath',
+        ),
+      );
+      expect(texMathFinder, findsWidgets);
 
+      final Finder mermaidGraphicFinder = find.descendant(
+        of: find.byType(MarkdownView),
+        matching: find.byWidgetPredicate(
+          (Widget w) => '${w.runtimeType}' == 'VectorGraphic',
+        ),
+      );
       await tester.scrollUntilVisible(
-        find.text('Diagram Card · diagramBuilder (mermaid)'),
+        mermaidGraphicFinder,
         300.0,
         scrollable: previewScrollable,
       );
-      expect(
-        find.text('Diagram Card · diagramBuilder (mermaid)'),
-        findsOneWidget,
+      expect(mermaidGraphicFinder, findsOneWidget);
+
+      // Non-mermaid Dart code fence uses Studio's syntax-highlighted codeBlockBuilder.
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.text('Code & Definition Lists'),
+        ),
+        300.0,
+        scrollable: previewScrollable,
       );
+      await tester.pumpAndSettle();
+      final Finder dartBadgeFinder = find.descendant(
+        of: find.byType(MarkdownView),
+        matching: find.text('dart'),
+      );
+      expect(dartBadgeFinder, findsOneWidget);
+      expect(find.text('Copy'), findsWidgets);
+
+      // Switch to Kitchen Sink (Visual Parity) preset.
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Kitchen Sink (Visual Parity)').last);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Kitchen Sink Visual Parity'), findsWidgets);
+      expect(texMathFinder, findsWidgets);
 
       // Switch to Alerts, Frontmatter & HTML preset.
       await tester.tap(find.byKey(const Key('studio-preset-dropdown')));

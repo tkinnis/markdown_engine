@@ -14,6 +14,18 @@ List<T> freezeList<T>(List<T> list) {
   return UnmodifiableListView<T>(List<T>.of(list, growable: false));
 }
 
+/// Wraps an already-fixed-length, non-escaped [fixedList] directly in an
+/// [UnmodifiableListView] without allocating a duplicate copy.
+List<T> wrapFixedUnmodifiableList<T>(List<T> fixedList) {
+  if (fixedList.isEmpty) {
+    return const <Never>[];
+  }
+  if (fixedList is UnmodifiableListView<T>) {
+    return fixedList;
+  }
+  return UnmodifiableListView<T>(fixedList);
+}
+
 /// Returns an unmodifiable map view of [map] in O(1), avoiding redundant wrapping.
 Map<K, V> freezeMap<K, V>(Map<K, V> map) {
   if (map.isEmpty) {

@@ -4,6 +4,8 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 
+import 'built_in_math.dart';
+import 'built_in_mermaid.dart';
 import 'controller.dart';
 import 'delegates.dart';
 import 'inline_renderer.dart';
@@ -22,6 +24,7 @@ final class MarkdownBlockRenderContext {
     this.listDepth = 0,
     this.remoteImagesApproved = false,
     this.onRequestLoadRemoteImages,
+    this.streamingNormalizedSource,
   });
 
   /// Active visual theme.
@@ -48,6 +51,10 @@ final class MarkdownBlockRenderContext {
   /// Callback invoked when the user approves remote images in `ask` mode.
   final VoidCallback? onRequestLoadRemoteImages;
 
+  /// Normalized source text for unfinished active-tail streaming blocks, or
+  /// `null` for settled or complete documents.
+  final String? streamingNormalizedSource;
+
   /// Returns a derived context with selected fields overridden.
   MarkdownBlockRenderContext copyWith({
     MarkdownThemeData? theme,
@@ -63,6 +70,7 @@ final class MarkdownBlockRenderContext {
       listDepth: listDepth ?? this.listDepth,
       remoteImagesApproved: remoteImagesApproved,
       onRequestLoadRemoteImages: onRequestLoadRemoteImages,
+      streamingNormalizedSource: streamingNormalizedSource,
     );
   }
 
@@ -77,7 +85,8 @@ final class MarkdownBlockRenderContext {
           textAlign == other.textAlign &&
           listDepth == other.listDepth &&
           remoteImagesApproved == other.remoteImagesApproved &&
-          onRequestLoadRemoteImages == other.onRequestLoadRemoteImages;
+          onRequestLoadRemoteImages == other.onRequestLoadRemoteImages &&
+          streamingNormalizedSource == other.streamingNormalizedSource;
 
   @override
   int get hashCode => Object.hash(
@@ -89,6 +98,7 @@ final class MarkdownBlockRenderContext {
     listDepth,
     remoteImagesApproved,
     onRequestLoadRemoteImages,
+    streamingNormalizedSource,
   );
 }
 
@@ -119,6 +129,15 @@ final class MarkdownTopLevelBlockWidget extends StatefulWidget {
 
 final class _MarkdownTopLevelBlockWidgetState
     extends State<MarkdownTopLevelBlockWidget> {
+  Widget? _cachedInnerBlock;
+  Widget? _cachedPaddedBlock;
+  MarkdownBlockNode? _cachedNode;
+  MarkdownBlockRenderContext? _cachedRenderContext;
+  double? _cachedBottomSpacing;
+  TextScaler? _cachedTextScaler;
+  TextDirection? _cachedTextDirection;
+  bool? _cachedHasSelectionContainer;
+
   @override
   void initState() {
     super.initState();
@@ -126,6 +145,13 @@ final class _MarkdownTopLevelBlockWidgetState
       widget.node.blockId,
       context,
     );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _cachedInnerBlock = null;
+    _cachedPaddedBlock = null;
   }
 
   @override
@@ -149,6 +175,8 @@ final class _MarkdownTopLevelBlockWidgetState
 
   @override
   void dispose() {
+    _cachedInnerBlock = null;
+    _cachedPaddedBlock = null;
     widget.renderContext.controller?.unregisterBlock(
       widget.node.blockId,
       context,
@@ -158,18 +186,45 @@ final class _MarkdownTopLevelBlockWidgetState
 
   @override
   Widget build(BuildContext context) {
-    final Widget blockWidget = buildMarkdownBlockWidget(
-      context,
-      widget.node,
-      widget.renderContext,
-    );
-    if (widget.bottomSpacing <= 0.0) {
-      return blockWidget;
+    final TextScaler? textScaler = MediaQuery.maybeTextScalerOf(context);
+    final TextDirection? textDirection = Directionality.maybeOf(context);
+    final bool hasSelectionContainer =
+        SelectionContainer.maybeOf(context) != null;
+
+    final bool innerValid =
+        _cachedInnerBlock != null &&
+        identical(widget.node, _cachedNode) &&
+        widget.renderContext == _cachedRenderContext &&
+        textScaler == _cachedTextScaler &&
+        textDirection == _cachedTextDirection &&
+        hasSelectionContainer == _cachedHasSelectionContainer;
+
+    if (innerValid &&
+        _cachedPaddedBlock != null &&
+        widget.bottomSpacing == _cachedBottomSpacing) {
+      return _cachedPaddedBlock!;
     }
-    return Padding(
-      padding: EdgeInsets.only(bottom: widget.bottomSpacing),
-      child: blockWidget,
-    );
+
+    final Widget blockWidget = innerValid
+        ? _cachedInnerBlock!
+        : buildMarkdownBlockWidget(context, widget.node, widget.renderContext);
+
+    final Widget result = widget.bottomSpacing <= 0.0
+        ? blockWidget
+        : Padding(
+            padding: EdgeInsets.only(bottom: widget.bottomSpacing),
+            child: blockWidget,
+          );
+
+    _cachedInnerBlock = blockWidget;
+    _cachedPaddedBlock = result;
+    _cachedNode = widget.node;
+    _cachedRenderContext = widget.renderContext;
+    _cachedBottomSpacing = widget.bottomSpacing;
+    _cachedTextScaler = textScaler;
+    _cachedTextDirection = textDirection;
+    _cachedHasSelectionContainer = hasSelectionContainer;
+    return result;
   }
 }
 
@@ -508,6 +563,19 @@ Widget _buildCodeBlock(
     if (diagram != null) {
       return diagram;
     }
+  }
+
+  if (renderContext.delegates.enableBuiltInMermaid &&
+      node.language?.toLowerCase() == 'mermaid') {
+    final String? streamSource = renderContext.streamingNormalizedSource;
+    final bool isStreamingIncomplete =
+        streamSource != null && !isFencedCodeBlockClosed(streamSource, node);
+    return BuiltInMermaidDiagram(
+      key: ValueKey<String>('mermaid-${node.blockId}'),
+      node: node,
+      theme: renderContext.theme,
+      isStreamingIncomplete: isStreamingIncomplete,
+    );
   }
 
   final MarkdownCodeBlockBuilder? codeBuilder =
@@ -1218,6 +1286,15 @@ Widget _buildMathBlock(
   if (builder != null) {
     return builder(context, node);
   }
+  if (renderContext.delegates.enableBuiltInMath) {
+    return buildBuiltInMathBlockWidget(
+      context: context,
+      node: node,
+      theme: renderContext.theme,
+      delegates: renderContext.delegates,
+      urlPolicy: renderContext.urlPolicy,
+    );
+  }
   final MarkdownThemeData theme = renderContext.theme;
   return Semantics(
     container: true,
@@ -1453,7 +1530,107 @@ Widget _buildHtmlBlockFallback(
   if (stripped.isEmpty) {
     return const SizedBox.shrink();
   }
-  return Text(stripped, style: theme.bodyTextStyle(color: theme.muted));
+  final String decoded = _decodeHtmlEntities(stripped);
+  return Text(decoded, style: theme.bodyTextStyle(color: theme.muted));
+}
+
+const Map<String, String> _namedHtmlEntities = <String, String>{
+  'amp': '&',
+  'lt': '<',
+  'gt': '>',
+  'quot': '"',
+  'apos': '\'',
+  'nbsp': '\u00A0',
+  'ndash': '\u2013',
+  'mdash': '\u2014',
+  'hellip': '\u2026',
+  'lsquo': '\u2018',
+  'rsquo': '\u2019',
+  'ldquo': '\u201C',
+  'rdquo': '\u201D',
+  'laquo': '\u00AB',
+  'raquo': '\u00BB',
+  'copy': '\u00A9',
+  'reg': '\u00AE',
+  'trade': '\u2122',
+  'times': '\u00D7',
+  'divide': '\u00F7',
+  'plusmn': '\u00B1',
+  'minus': '\u2212',
+  'bull': '\u2022',
+  'middot': '\u00B7',
+  'deg': '\u00B0',
+  'sect': '\u00A7',
+  'para': '\u00B6',
+  'larr': '\u2190',
+  'uarr': '\u2191',
+  'rarr': '\u2192',
+  'darr': '\u2193',
+  'harr': '\u2194',
+  'le': '\u2264',
+  'ge': '\u2265',
+  'ne': '\u2260',
+  'asymp': '\u2248',
+  'infin': '\u221E',
+};
+
+String _decodeHtmlEntities(String input) {
+  if (!input.contains('&')) {
+    return input;
+  }
+  StringBuffer? out;
+  int last = 0;
+  int i = 0;
+  final int len = input.length;
+  while (i < len) {
+    if (input.codeUnitAt(i) != 0x26) {
+      i++;
+      continue;
+    }
+    final int semi = input.indexOf(';', i + 1);
+    if (semi == -1 || semi - i > 16) {
+      i++;
+      continue;
+    }
+    final String body = input.substring(i + 1, semi);
+    String? replacement;
+    if (body.startsWith('#')) {
+      final int? cp;
+      if (body.length > 2 && (body[1] == 'x' || body[1] == 'X')) {
+        cp = int.tryParse(body.substring(2), radix: 16);
+      } else if (body.length > 1) {
+        cp = int.tryParse(body.substring(1), radix: 10);
+      } else {
+        cp = null;
+      }
+      if (cp != null) {
+        final bool valid =
+            cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF);
+        replacement = valid ? String.fromCharCode(cp) : '\uFFFD';
+      }
+    } else {
+      replacement =
+          _namedHtmlEntities[body] ?? _namedHtmlEntities[body.toLowerCase()];
+    }
+    if (replacement != null) {
+      out ??= StringBuffer();
+      if (i > last) {
+        out.write(input.substring(last, i));
+      }
+      out.write(replacement);
+      i = semi + 1;
+      last = i;
+    } else {
+      i++;
+    }
+  }
+  if (out == null) {
+    return input;
+  }
+  if (last < len) {
+    out.write(input.substring(last));
+  }
+  return out.toString();
 }
 
 TextAlign _textAlignForTableAlignment(TableAlignment alignment) {

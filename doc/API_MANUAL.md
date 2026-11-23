@@ -8,7 +8,7 @@ This manual documents every public symbol exported by **`package:markdown_engine
 # Pure Dart (requires Dart ^3.8.0, package:meta only)
 dart pub add markdown_engine
 
-# Flutter (requires Dart ^3.8.0 and Flutter >=3.32.0)
+# Flutter (requires Dart ^3.13.0 and Flutter >=3.47.0)
 flutter pub add markdown_engine_flutter
 ```
 
@@ -61,9 +61,9 @@ Pure-Dart **CommonMark** and *GFM* with `code`, ~~old~~, and ==highlight==.
 
 | Preset Constructor | Enabled Feature Set |
 | :--- | :--- |
-| `const MarkdownOptions(...)` | Default GFM core flags (`gfmTables`, `gfmStrikethrough`, `gfmTaskLists`, `gfmAutolinks`, `gfmTagFilter`) plus `headingSlugs: true` enabled; optional extensions off; `sanitizeUrls: true`, `sanitizeHtml: false`, `urlPolicy: const MarkdownUrlPolicy.strict()`. |
-| `const MarkdownOptions.commonMark(...)` | Strict CommonMark `0.31.2` compliance with all GFM and optional extensions disabled; `sanitizeUrls: true`, `sanitizeHtml: false`, `urlPolicy: const MarkdownUrlPolicy()`. |
-| `const MarkdownOptions.gfm(...)` | Standard GitHub Flavored Markdown (`0.29.0.gfm.13`): enables all five core GFM flags plus `footnotes: true` and `headingSlugs: true` by default; `urlPolicy: const MarkdownUrlPolicy()`; individual extensions remain overridable. |
+| `const MarkdownOptions(...)` | Default GFM core flags (`gfmTables`, `gfmStrikethrough`, `gfmTaskLists`, `gfmAutolinks`, `gfmTagFilter`) plus `math: true` and `headingSlugs: true` enabled; remaining optional extensions off; `sanitizeUrls: true`, `sanitizeHtml: false`, `urlPolicy: const MarkdownUrlPolicy.strict()`. |
+| `const MarkdownOptions.commonMark(...)` | Strict CommonMark `0.31.2` compliance with all GFM and optional extensions (including `math: false`) disabled; `sanitizeUrls: true`, `sanitizeHtml: false`, `urlPolicy: const MarkdownUrlPolicy()`. |
+| `const MarkdownOptions.gfm(...)` | Standard GitHub Flavored Markdown (`0.29.0.gfm.13`): enables all five core GFM flags plus `footnotes: true` and `headingSlugs: true` by default (`math: false`); `urlPolicy: const MarkdownUrlPolicy()`; individual extensions remain overridable. |
 | `const MarkdownOptions.extended(...)` | Enables GFM plus every optional block and inline extension (`footnotes`, `alerts`, `frontmatter`, `definitionLists`, `math`, `headingSlugs`, `highlight`, `subscript`, `superscript`, `emoji`, `smartPunctuation`, `explicitHeadingIds`, `detailsBlocks`, `figureBlocks`, `alignedBlocks`, `kbd`, `abbreviations`, `inlineBreaks`) with `urlPolicy: const MarkdownUrlPolicy.strict()`. |
 
 ### Complete Option Reference
@@ -79,7 +79,7 @@ Pure-Dart **CommonMark** and *GFM* with `code`, ~~old~~, and ==highlight==.
 | `alerts` | `bool` | `false` | Enables GitHub-style blockquote alerts (`[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`). |
 | `frontmatter` | `bool` | `false` | Extracts leading YAML (`---`) or TOML (`+++`) frontmatter into `FrontmatterNode` and `MarkdownDocument.frontmatter`. |
 | `definitionLists` | `bool` | `false` | Parses PHP Markdown Extra style definition lists (`DefinitionListNode`). |
-| `math` | `bool` | `false` | Parses inline (`$...$`) and display (`$$...$$`) LaTeX math into `MathInlineNode` and `MathBlockNode`. |
+| `math` | `bool` | `true` (`false` in `.commonMark()` / `.gfm()`) | Parses inline (`$...$`, `\(...\)`) and display (`$$...$$`, `\[...\]`) LaTeX math into `MathInlineNode` and `MathBlockNode`. |
 | `headingSlugs` | `bool` | `true` (`false` in `.commonMark()`) | Populates deduplicated GitHub-style anchor slugs on `HeadingNode.slug` and `MarkdownDocument.outline`. |
 | `highlight` | `bool` | `false` | Parses `==text==` into `HighlightNode` (`<mark>`). |
 | `subscript` | `bool` | `false` | Parses `~text~` into `SubscriptNode` (`<sub>`) without breaking `~~strike~~`. |
@@ -205,7 +205,7 @@ Accumulate chunked token streams while freezing settled prefix blocks and re-par
 | `finish` | `MarkdownDocument finish()` | Finalizes the stream, producing the exact same semantic AST and HTML as `MarkdownEngine.parse(buffer)` while preserving safe settled blocks and notifying listeners. |
 | `reset` | `void reset()` | Clears buffered text, settled blocks, and active blocks back to an empty state and notifies listeners. |
 | `addListener` / `removeListener` / `dispose` | `void addListener(void Function() listener)` | Pure-Dart push listener registration notified synchronously whenever `append`, `replaceText`, `finish`, or `reset` updates state. |
-| Read-only getters | `effectiveOptions`, `buffer`, `currentDocument`, `document`, `settledBlocks`, `activeBlocks`, `settledBlockCount`, `isFinished`, `html` | Inspect current stream state without triggering extra parses (`html` renders `currentDocument.toHtml()`). |
+| Read-only getters | `effectiveOptions`, `buffer`, `currentDocument`, `document`, `settledBlocks`, `activeBlocks`, `settledBlockCount`, `settledPrefixBlockCount`, `isFinished`, `html` | Inspect current stream state without triggering extra parses (`settledPrefixBlockCount` gives the exact prefix length of `currentDocument.blocks` whose frozen objects remain `identical` across tail chunks, returning `0` while definitions force full reparsing and equaling `currentDocument.blocks.length` after `finish()`; `html` renders `currentDocument.toHtml()`). |
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -259,7 +259,7 @@ Every `MarkdownBlockNode` exposes `blockId`, `span`, `toPlainText()`, and `shift
 | `DetailsBlockNode` | `summary`, `summaryInlines`, `initiallyOpen`, `children` | Collapsible `<details>` / `<summary>` disclosure block. |
 | `AlignedBlockNode` | `alignment` (`TableAlignment`), `children` | Explicitly aligned container (`<div align="...">`). |
 | `FigureBlockNode` | `children`, `caption`, `captionInlines` | `<figure>` container with optional `<figcaption>`. |
-| `MathBlockNode` | `latex` | Display LaTeX math block (`$$...$$`). |
+| `MathBlockNode` | `latex` | Display LaTeX math block (`$$...$$` or `\[...\]`). |
 | `DefinitionListNode` | `groups` (`List<DefinitionGroup>`) | PHP Markdown Extra definition list (`<dl>`). |
 | `FootnoteDefinitionNode` | `label`, `index`, `referenceCount`, `children` | Individual footnote definition (`[^label]: ...`). |
 | `FootnoteSectionNode` | `definitions` (`List<FootnoteDefinitionNode>`) | Appended footnotes footer (`<section class="footnotes">`). |
@@ -282,7 +282,7 @@ Every `MarkdownInlineNode` exposes `span`, `toPlainText()`, and `shiftSpan(offse
 | `SuperscriptNode` | `children` | Superscript span (`^text^` -> `<sup>`). |
 | `LinkNode` | `destination`, `title`, `children`, `isAutolink` | Inline, reference, or autolink hyperlink (`<a>`). |
 | `ImageNode` | `destination`, `alt`, `title`, `width`, `height`, `children` | Markdown or sized image (`<img>`). |
-| `MathInlineNode` | `latex` | Inline LaTeX math (`$...$`). |
+| `MathInlineNode` | `latex` | Inline LaTeX math (`$...$` or `\(...\)`). |
 | `FootnoteRefNode` | `label`, `index`, `occurrenceIndex` | Inline footnote citation (`[^label]`). |
 | `KbdInlineNode` | `children` | Keyboard key tag (`<kbd>`). |
 | `AbbrInlineNode` | `title`, `children` | Expanded abbreviation (`<abbr title="...">`). |
@@ -338,7 +338,7 @@ Generate deterministic GitHub-style heading anchor slugs directly outside a full
 
 ## 7. Flutter Package (`package:markdown_engine_flutter/markdown_engine_flutter.dart`)
 
-`markdown_engine_flutter` wraps the pure-Dart engine in zero-reparse widgets, lazy virtualized slivers, widgets-first and Material theming, background isolate document loading, `SelectionArea` integration, and security-gated builders (requiring Dart `^3.8.0` and Flutter `>=3.32.0`).
+`markdown_engine_flutter` wraps the pure-Dart engine in zero-reparse widgets, built-in native OpenType TeX math (`tex_math_flutter`) and Mermaid diagram (`pele_dart` + `vector_graphics`) renderers, lazy virtualized slivers, widgets-first and Material theming, background isolate document loading, `SelectionArea` integration, and security-gated builders (requiring Dart `^3.13.0` and Flutter `>=3.47.0`).
 
 Importing `package:markdown_engine_flutter/markdown_engine_flutter.dart` also re-exports 19 core types from `markdown_engine` (`AlertKind`, `CodeBlockNode`, `ImageNode`, `IncrementalMarkdownParser`, `IncrementalParseResult`, `MarkdownBlockNode`, `MarkdownBudgets`, `MarkdownDocument`, `MarkdownEngine`, `MarkdownFrontmatter`, `MarkdownInlineNode`, `MarkdownOptions`, `MarkdownOutlineItem`, `MarkdownUrlPolicy`, `MathBlockNode`, `MathInlineNode`, `SourceSpan`, `StreamingMarkdownController`, and `TableAlignment`).
 
@@ -346,10 +346,10 @@ Importing `package:markdown_engine_flutter/markdown_engine_flutter.dart` also re
 
 | Symbol | Constructors / Key Members | Behavior |
 | :--- | :--- | :--- |
-| `MarkdownView` | `const MarkdownView(String data, {options, engine, controller, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Parses `data` once in widget state, applies `IncrementalMarkdownParser` automatically on compatible `data` edits, performs zero AST re-parses across Light/Dark `MarkdownTheme` flips, guards `SelectionArea` / `SelectableRegion` for `MaterialApp` and `WidgetsApp`, and exports full `toPlainText()` on Select All (`Cmd+A`) across virtualized slivers. |
+| `MarkdownView` | `const MarkdownView(String data, {options, engine, controller, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Parses `data` once in widget state, applies `IncrementalMarkdownParser` automatically on compatible `data` edits, performs zero AST re-parses across Light/Dark `MarkdownTheme` flips, memoizes top-level block and inline `RichText` subtrees, guards `SelectionArea` / `SelectableRegion` for `MaterialApp` and `WidgetsApp`, and exports full `toPlainText()` on Select All (`Cmd+A`) across virtualized slivers. |
 | `MarkdownView.document` | `const MarkdownView.document({required MarkdownDocument document, controller, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Renders a pre-parsed `MarkdownDocument` (for example from `MarkdownDocumentReader` or `IncrementalMarkdownParser`) with zero parsing work inside the widget. |
-| `MarkdownView.streaming` | `const MarkdownView.streaming({required StreamingMarkdownController controller, MarkdownController? markdownController, Listenable? listenable, Duration? pollInterval, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Binds directly to `StreamingMarkdownController` via push listeners (`addListener`/`removeListener`) with zero polling timers (`pollInterval` is a deprecated compatibility no-op), rendering frozen `settledBlocks` alongside updating `activeBlocks` and supporting post-`finish()` `reset()` / `append()` reuse. |
-| `SliverMarkdownDocument` | `const SliverMarkdownDocument({required MarkdownDocument document, theme, delegates, controller, showFrontmatter = true, padding, addAutomaticKeepAlives = true, addRepaintBoundaries = true, remoteImagesApproved = false, onRequestLoadRemoteImages})` | Stateful virtualized sliver built on `SliverChildBuilderDelegate` keyed by `ValueKey<String>(block.blockId)` with `findChildIndexCallback`, cached `idToIndex` lookup, and `addAutomaticKeepAlives = true` by default so active off-screen drag selections persist across scroll; exposes `visibleBlocksFor(document, showFrontmatter: ...)`. |
+| `MarkdownView.streaming` | `const MarkdownView.streaming({required StreamingMarkdownController controller, MarkdownController? markdownController, Listenable? listenable, Duration? pollInterval, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Binds directly to `StreamingMarkdownController` via push listeners (`addListener`/`removeListener`) with zero polling timers (`pollInterval` is a deprecated compatibility no-op) and splits `CustomScrollView` into a settled-prefix `SliverMarkdownDocument` (sliced at `settledPrefixBlockCount` before frontmatter filtering) plus an active tail sliver so trailing chunk appends never rebuild settled prefix blocks, while supporting post-`finish()` `reset()` / `append()` reuse. |
+| `SliverMarkdownDocument` | `const SliverMarkdownDocument({required MarkdownDocument document, theme, delegates, controller, showFrontmatter = true, padding, addAutomaticKeepAlives = true, addRepaintBoundaries = true, remoteImagesApproved = false, onRequestLoadRemoteImages, startBlockIndex = 0, endBlockIndex, trailingBlockSpacing = false, streamingNormalizedSource})` | Stateful virtualized sliver built on `SliverChildBuilderDelegate` keyed by `ValueKey<String>(block.blockId)` with `findChildIndexCallback`, cached `idToIndex` lookup, built-sliver memoization, optional `[startBlockIndex, endBlockIndex)` prefix slicing, and `addAutomaticKeepAlives = true` by default so active off-screen drag selections persist across scroll; exposes `visibleBlocksFor(document, showFrontmatter: ..., startBlockIndex: ..., endBlockIndex: ...)`. |
 
 ### 7.2 Theming (`MarkdownTheme`, `MarkdownThemeData`, `MarkdownAlertPalette`, `MarkdownAlertColors`)
 
@@ -368,21 +368,23 @@ Importing `package:markdown_engine_flutter/markdown_engine_flutter.dart` also re
 | `MarkdownReadingPlace` | `const MarkdownReadingPlace({required int blockIndex, String? blockId, double offsetFraction = 0.0})`, `MarkdownReadingPlace.start`, `copyWith(...)` | Immutable reading position recording active top-level block index, stable `blockId`, and normalized `0.0..1.0` scroll progress within the block. |
 | `MarkdownDocumentReader` | `MarkdownDocumentReader({MarkdownEngine engine = const MarkdownEngine(), int syncThreshold = defaultSyncThreshold, MarkdownDocument? initialDocument})`, `defaultSyncThreshold` (`4096`), `document`, `value`, `hasRead`, `isParsing`, `lastError`, `lastStackTrace`, `parseCount`, `backgroundParseCount`, `update(source, {options})`, `clear()` | `ChangeNotifier` implementing `ValueListenable<MarkdownDocument>` that parses sources shorter than `syncThreshold` (`4096` UTF-16 code units by default) synchronously and offloads larger documents to `Isolate.run` (falling back synchronously on `IsolateSpawnException`) with in-flight deduplication and latest-wins coalescing. |
 
-### 7.4 Pluggable Builders, Security Delegates & Companion Adapters
+### 7.4 Built-In Renderers, Pluggable Builders & Security Delegates
 
 | Symbol | Values / Signature | Behavior |
 | :--- | :--- | :--- |
 | `MarkdownImagePolicy` | `block`, `ask`, `load` | Controls whether remote/external images render a non-network placeholder (`block`, default for privacy), prompt for user consent (`ask`), or load automatically (`load`). |
-| `MarkdownBuilderDelegates` | `const MarkdownBuilderDelegates({imagePolicy = MarkdownImagePolicy.block, remoteImagesApproved = false, onLoadRemoteImages, autoScrollToAnchors = true, mathInlineBuilder, mathBlockBuilder, diagramBuilder, codeBlockBuilder, imageBuilder, onTapLink, onOpenWebLink, urlPolicy})`, `copyWith(...)`, `resolveUrlPolicy(fallback)`, `normalizeUrlDestination(destination)`, `isRemoteImageUrl(destination)` | Bundles pluggable custom widget/span renderers with URL and remote image security policies; interactive links are gated by `MarkdownUrlPolicy` before firing `onTapLink` or `onOpenWebLink`, and `#fragment` links automatically scroll attached controllers when `autoScrollToAnchors` is `true`. |
-| `MarkdownMathInlineBuilder` | `InlineSpan Function(BuildContext context, MathInlineNode node, TextStyle style, GestureRecognizer? linkRecognizer)` | Renders inline `$...$` math nodes (for example via `tex_math_flutter`'s `TexMathSpan`), receiving the enclosing `linkRecognizer` when nested inside a sanitized hyperlink. |
-| `MarkdownMathBlockBuilder` | `Widget Function(BuildContext context, MathBlockNode node)` | Renders display `$$...$$` math blocks (for example via `tex_math_flutter`'s `TexMath`). |
-| `MarkdownDiagramBuilder` | `Widget? Function(BuildContext context, CodeBlockNode node)` | Inspected before `codeBlockBuilder` for fenced code blocks (such as `language == 'mermaid'` via `pele_dart`); returning `null` falls back to code block rendering. |
+| `MarkdownBuiltInRenderers` | `warmUp()`, `clearCaches()`, `dispose()`, `mathLayoutCount`, `mathCacheHitCount`, `mathCacheLength`, `mermaidRenderCount`, `mermaidCacheHitCount`, `mermaidCacheLength`, `debugForceAsyncMermaidInTests` (`@visibleForTesting`) | Lifecycle, pre-warming, cache reset, and telemetry API for the built-in `tex_math_flutter` math renderer (`256`-entry LRU cache) and `pele_dart` + `vector_graphics` Mermaid renderer (`128`-entry LRU cache); `warmUp()` pre-loads `NewCMMath-Regular.otf` and primes `pele_dart` off the UI thread. |
+| `MarkdownBuilderDelegates` | `const MarkdownBuilderDelegates({imagePolicy = MarkdownImagePolicy.block, remoteImagesApproved = false, onLoadRemoteImages, autoScrollToAnchors = true, enableBuiltInMath = true, enableBuiltInMermaid = true, mathInlineBuilder, mathBlockBuilder, diagramBuilder, codeBlockBuilder, imageBuilder, onTapLink, onOpenWebLink, urlPolicy})`, `copyWith(...)`, `resolveUrlPolicy(fallback)`, `normalizeUrlDestination(destination)`, `isRemoteImageUrl(destination)` | Bundles built-in math/Mermaid opt-outs (`enableBuiltInMath`, `enableBuiltInMermaid`), custom override builders (`mathInlineBuilder`, `mathBlockBuilder`, `diagramBuilder`, `codeBlockBuilder`, `imageBuilder`), and URL/image security policies; interactive links are gated by `MarkdownUrlPolicy` before firing `onTapLink` or `onOpenWebLink`, and `#fragment` links automatically scroll attached controllers when `autoScrollToAnchors` is `true`. |
+| `MarkdownMathInlineBuilder` | `InlineSpan Function(BuildContext context, MathInlineNode node, TextStyle style, GestureRecognizer? linkRecognizer)` | Optional custom override for inline `$...$` / `\(...\)` math nodes (takes precedence over built-in `tex_math_flutter` rendering), receiving the enclosing `linkRecognizer` when nested inside a sanitized hyperlink. |
+| `MarkdownMathBlockBuilder` | `Widget Function(BuildContext context, MathBlockNode node)` | Optional custom override for display `$$...$$` / `\[...\]` math blocks (takes precedence over built-in `tex_math_flutter` rendering). |
+| `MarkdownDiagramBuilder` | `Widget? Function(BuildContext context, CodeBlockNode node)` | Optional custom diagram builder inspected before built-in Mermaid (`enableBuiltInMermaid`) and `codeBlockBuilder`; returning `null` falls back to built-in Mermaid rendering for `mermaid` fences or to code block rendering otherwise. |
 | `MarkdownCodeBlockBuilder` | `Widget Function(BuildContext context, CodeBlockNode node)` | Overrides the built-in fenced/indented code block widget (which includes language badges and copy-to-clipboard buttons). |
 | `MarkdownImageBuilder` | `Widget Function(BuildContext context, ImageNode node)` | Custom renderer invoked for images allowed by `imagePolicy` and `MarkdownUrlPolicy`. |
 | `MarkdownLinkTapCallback` | `void Function(String destination, String? title)` | Callback fired when a user taps any policy-allowed link destination. |
 | `MarkdownWebLinkCallback` | `void Function(Uri uri)` | Callback fired when a user taps a policy-allowed `http` or `https` web URI. |
 
 ```dart
+import 'dart:async' show unawaited;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
@@ -392,10 +394,13 @@ Widget buildIntegratedMarkdownView(
   MarkdownController controller,
   String source,
 ) {
+  // Optional warm-up pre-loads NewCMMath-Regular.otf and primes pele_dart.
+  unawaited(MarkdownBuiltInRenderers.warmUp());
+
   return MarkdownTheme(
     data: MarkdownThemeData.fromTheme(context),
     child: MarkdownView(
-      source,
+      source, // Renders TeX math ($...$, \(...\), $$...$$, \[...\]) & Mermaid out of the box.
       options: const MarkdownOptions.extended(),
       controller: controller,
       delegates: MarkdownBuilderDelegates(
@@ -408,23 +413,11 @@ Widget buildIntegratedMarkdownView(
         onOpenWebLink: (Uri uri) {
           // Open validated http/https links externally.
         },
-        mathInlineBuilder: (
-          BuildContext ctx,
-          MathInlineNode node,
-          TextStyle style,
-          GestureRecognizer? linkRecognizer,
-        ) {
-          // Delegate to tex_math_flutter's TexMathSpan when installed.
-          return TextSpan(text: node.latex, style: style, recognizer: linkRecognizer);
-        },
-        mathBlockBuilder: (BuildContext ctx, MathBlockNode node) {
-          // Delegate to tex_math_flutter's TexMath when installed.
-          return Text(node.latex);
-        },
+        // Optional override for custom non-Mermaid fences; returning null preserves
+        // built-in pele_dart rendering for `mermaid` blocks.
         diagramBuilder: (BuildContext ctx, CodeBlockNode node) {
-          if (node.language == 'mermaid') {
-            // Delegate to pele_dart SVG rendering when installed.
-            return Text('Mermaid diagram (${node.literal.length} chars)');
+          if (node.language == 'graphviz') {
+            return Text('Custom diagram (${node.literal.length} chars)');
           }
           return null;
         },

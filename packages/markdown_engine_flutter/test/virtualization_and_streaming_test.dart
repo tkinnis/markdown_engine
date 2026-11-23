@@ -337,53 +337,50 @@ void main() {
       expect(reader.document, same(doc));
     });
 
-    test(
-      'parses large documents (>= 4096 code units) in a background isolate with latest-wins coalescing',
-      () async {
-        final MarkdownDocumentReader reader = MarkdownDocumentReader(
-          engine: const MarkdownEngine(defaultOptions: MarkdownOptions.gfm()),
-        );
-        addTearDown(reader.dispose);
+    test('parses large documents (>= 4096 code units) in a background isolate with latest-wins coalescing', () async {
+      final MarkdownDocumentReader reader = MarkdownDocumentReader(
+        engine: const MarkdownEngine(defaultOptions: MarkdownOptions.gfm()),
+      );
+      addTearDown(reader.dispose);
 
-        String makeLargeDoc(String tag) {
-          final StringBuffer sb = StringBuffer('# Document $tag\n\n');
-          for (int i = 0; i < 140; i++) {
-            sb.writeln(
-              'Paragraph $i in $tag with **bold** and `code` text to exceed threshold.\n',
-            );
-          }
-          return sb.toString();
+      String makeLargeDoc(String tag) {
+        final StringBuffer sb = StringBuffer('# Document $tag\n\n');
+        for (int i = 0; i < 140; i++) {
+          sb.writeln(
+            'Paragraph $i in $tag with **bold** and `code` text to exceed threshold.\n',
+          );
         }
+        return sb.toString();
+      }
 
-        final String docA = makeLargeDoc('Alpha');
-        final String docB = makeLargeDoc('Beta');
-        final String docC = makeLargeDoc('Gamma');
-        expect(docA.length, greaterThanOrEqualTo(4096));
-        expect(docC.length, greaterThanOrEqualTo(4096));
+      final String docA = makeLargeDoc('Alpha');
+      final String docB = makeLargeDoc('Beta');
+      final String docC = makeLargeDoc('Gamma');
+      expect(docA.length, greaterThanOrEqualTo(4096));
+      expect(docC.length, greaterThanOrEqualTo(4096));
 
-        final List<bool> parsingStates = <bool>[];
-        reader.addListener(() => parsingStates.add(reader.isParsing));
+      final List<bool> parsingStates = <bool>[];
+      reader.addListener(() => parsingStates.add(reader.isParsing));
 
-        final Future<MarkdownDocument> fA = reader.update(docA);
-        final Future<MarkdownDocument> fB = reader.update(docB);
-        final Future<MarkdownDocument> fC = reader.update(docC);
+      final Future<MarkdownDocument> fA = reader.update(docA);
+      final Future<MarkdownDocument> fB = reader.update(docB);
+      final Future<MarkdownDocument> fC = reader.update(docC);
 
-        expect(reader.isParsing, isTrue);
+      expect(reader.isParsing, isTrue);
 
-        final List<MarkdownDocument> results = await Future.wait(
-          <Future<MarkdownDocument>>[fA, fB, fC],
-        );
+      final List<MarkdownDocument> results = await Future.wait(
+        <Future<MarkdownDocument>>[fA, fB, fC],
+      );
 
-        expect(reader.isParsing, isFalse);
-        expect(reader.lastError, isNull);
-        expect(reader.backgroundParseCount, greaterThanOrEqualTo(1));
-        expect(reader.document.source, docC);
-        expect(results.last.source, docC);
-        expect(reader.document.outline.first.text, 'Document Gamma');
-        expect(parsingStates, contains(true));
-        expect(parsingStates.last, isFalse);
-      },
-    );
+      expect(reader.isParsing, isFalse);
+      expect(reader.lastError, isNull);
+      expect(reader.backgroundParseCount, greaterThanOrEqualTo(1));
+      expect(reader.document.source, docC);
+      expect(results.last.source, docC);
+      expect(reader.document.outline.first.text, 'Document Gamma');
+      expect(parsingStates, contains(true));
+      expect(parsingStates.last, isFalse);
+    });
 
     test('captures parse budget errors cleanly in lastError', () async {
       final MarkdownDocumentReader reader = MarkdownDocumentReader();
@@ -740,61 +737,57 @@ $tail
       },
     );
 
-    test(
-      'MarkdownDocumentReader implements ValueListenable, dedups active in-flight work, avoids spurious finally notify, and falls back on IsolateSpawnException',
-      () async {
-        final MarkdownDocumentReader reader = MarkdownDocumentReader(
-          syncThreshold: 128,
-        );
-        addTearDown(reader.dispose);
+    test('MarkdownDocumentReader implements ValueListenable, dedups active in-flight work, avoids spurious finally notify, and falls back on IsolateSpawnException', () async {
+      final MarkdownDocumentReader reader = MarkdownDocumentReader(
+        syncThreshold: 128,
+      );
+      addTearDown(reader.dispose);
 
-        expect(reader, isA<ValueListenable<MarkdownDocument>>());
-        expect(reader.hasRead, isFalse);
-        expect(reader.value, same(reader.document));
+      expect(reader, isA<ValueListenable<MarkdownDocument>>());
+      expect(reader.hasRead, isFalse);
+      expect(reader.value, same(reader.document));
 
-        final String largeA = 'Paragraph A ' * 20;
-        expect(largeA.length, greaterThanOrEqualTo(128));
+      final String largeA = 'Paragraph A ' * 20;
+      expect(largeA.length, greaterThanOrEqualTo(128));
 
-        // Duplicate concurrent update on the exact same in-flight source reuses active parse.
-        final Future<MarkdownDocument> f1 = reader.update(largeA);
-        final Future<MarkdownDocument> f2 = reader.update(largeA);
-        final List<MarkdownDocument> sameResults = await Future.wait(
-          <Future<MarkdownDocument>>[f1, f2],
-        );
-        expect(sameResults[0], same(sameResults[1]));
-        expect(reader.backgroundParseCount, 1);
-        expect(reader.hasRead, isTrue);
-        expect(reader.value, same(reader.document));
+      // Duplicate concurrent update on the exact same in-flight source reuses active parse.
+      final Future<MarkdownDocument> f1 = reader.update(largeA);
+      final Future<MarkdownDocument> f2 = reader.update(largeA);
+      final List<MarkdownDocument> sameResults = await Future.wait(
+        <Future<MarkdownDocument>>[f1, f2],
+      );
+      expect(sameResults[0], same(sameResults[1]));
+      expect(reader.backgroundParseCount, 1);
+      expect(reader.hasRead, isTrue);
+      expect(reader.value, same(reader.document));
 
-        // Sync update superseding active background parse must not fire spurious finally notify.
-        int notifications = 0;
-        reader.addListener(() => notifications++);
-        final String largeB = 'Paragraph B ' * 20;
-        final Future<MarkdownDocument> bg = reader.update(largeB);
-        await reader.update('Short override');
-        final int countAfterSync = notifications;
-        await bg;
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        expect(notifications, countAfterSync);
-        expect(reader.document.source, 'Short override');
+      // Sync update superseding active background parse must not fire spurious finally notify.
+      int notifications = 0;
+      reader.addListener(() => notifications++);
+      final String largeB = 'Paragraph B ' * 20;
+      final Future<MarkdownDocument> bg = reader.update(largeB);
+      await reader.update('Short override');
+      final int countAfterSync = notifications;
+      await bg;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(notifications, countAfterSync);
+      expect(reader.document.source, 'Short override');
 
-        reader.clear();
-        expect(reader.hasRead, isFalse);
+      reader.clear();
+      expect(reader.hasRead, isFalse);
 
-        // IsolateSpawnException fallback executes synchronous parse cleanly.
-        final MarkdownDocument fallbackDoc =
-            await parseMarkdownWithIsolateRunner(
-              const MarkdownEngine(),
-              '# Fallback Heading',
-              const MarkdownOptions(),
-              runIsolate: (MarkdownDocument Function() _) async {
-                throw IsolateSpawnException('Simulated spawn block');
-              },
-            );
-        expect(fallbackDoc.blocks.length, 1);
-        expect(fallbackDoc.outline.first.text, 'Fallback Heading');
-      },
-    );
+      // IsolateSpawnException fallback executes synchronous parse cleanly.
+      final MarkdownDocument fallbackDoc = await parseMarkdownWithIsolateRunner(
+        const MarkdownEngine(),
+        '# Fallback Heading',
+        const MarkdownOptions(),
+        runIsolate: (MarkdownDocument Function() _) async {
+          throw IsolateSpawnException('Simulated spawn block');
+        },
+      );
+      expect(fallbackDoc.blocks.length, 1);
+      expect(fallbackDoc.outline.first.text, 'Fallback Heading');
+    });
 
     testWidgets(
       'MarkdownDocumentReader defers notifyListeners safely during widget build phase',

@@ -51,6 +51,7 @@ final class MarkdownEngine {
       linkDefinitions: phase1.linkDefinitions,
       abbreviations: phase1.abbreviations,
       normalizedSource: phase1.normalizedSource,
+      idGeneration: 0,
     );
   }
 

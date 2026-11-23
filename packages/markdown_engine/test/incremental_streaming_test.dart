@@ -266,11 +266,132 @@ Tail paragraph.
           stream.append(chunk);
         }
         expect(stream.settledBlockCount, 5);
+        expect(stream.settledPrefixBlockCount, 5);
         final Set<String> streamIds = stream.currentDocument.blocks
             .map((MarkdownBlockNode b) => b.blockId)
             .toSet();
         expect(streamIds.length, stream.currentDocument.blocks.length);
         expect(stream.finish().toHtml(), parsed.toHtml());
+      },
+    );
+
+    test(
+      'settledPrefixBlockCount aligns with currentDocument.blocks across frontmatter, definitions, and finish',
+      () {
+        // 1. Leading frontmatter + normal blocks preserve exact identical() prefix.
+        final StreamingMarkdownController fmStream =
+            StreamingMarkdownController(
+              options: const MarkdownOptions(frontmatter: true),
+            );
+        fmStream.append('---\ntitle: Stream\n---\n\n');
+        expect(fmStream.settledPrefixBlockCount, 0);
+        expect(fmStream.currentDocument.blocks.single, isA<FrontmatterNode>());
+
+        fmStream.append('First paragraph\n\nSecond paragraph');
+        expect(fmStream.settledPrefixBlockCount, 2);
+        expect(fmStream.settledBlockCount, 2);
+        final List<MarkdownBlockNode> settledSnap = fmStream.settledBlocks;
+        final List<MarkdownBlockNode> docSnap1 =
+            fmStream.currentDocument.blocks;
+        for (int i = 0; i < fmStream.settledPrefixBlockCount; i++) {
+          expect(identical(docSnap1[i], settledSnap[i]), isTrue);
+        }
+        expect(
+          docSnap1.sublist(fmStream.settledPrefixBlockCount),
+          fmStream.activeBlocks,
+        );
+
+        fmStream.append(' updated');
+        final List<MarkdownBlockNode> docSnap2 =
+            fmStream.currentDocument.blocks;
+        for (int i = 0; i < fmStream.settledPrefixBlockCount; i++) {
+          expect(identical(docSnap2[i], settledSnap[i]), isTrue);
+        }
+
+        // 2. Definitions / footnotes drop settledPrefixBlockCount to 0 during active streaming.
+        final StreamingMarkdownController fnStream =
+            StreamingMarkdownController(options: const MarkdownOptions.gfm());
+        fnStream.append('Intro paragraph[^1]\n\nMiddle paragraph\n\nTail');
+        expect(fnStream.settledPrefixBlockCount, 2);
+
+        fnStream.append('\n\n[^1]: Footnote text');
+        expect(fnStream.settledPrefixBlockCount, 0);
+        expect(fnStream.settledBlockCount, 0);
+        expect(
+          fnStream.activeBlocks.length,
+          fnStream.currentDocument.blocks.length,
+        );
+        expect(
+          fnStream.currentDocument.blocks.last,
+          isA<FootnoteSectionNode>(),
+        );
+
+        final MarkdownDocument finishedFn = fnStream.finish();
+        expect(fnStream.isFinished, isTrue);
+        expect(fnStream.settledPrefixBlockCount, finishedFn.blocks.length);
+        expect(fnStream.activeBlocks, isEmpty);
+
+        // Resuming append after finish resets prefix count cleanly when definitions exist.
+        fnStream.append(' continued');
+        expect(fnStream.isFinished, isFalse);
+        expect(fnStream.settledPrefixBlockCount, 0);
+        expect(
+          fnStream.finish().toHtml(),
+          engine.renderToHtml(fnStream.buffer),
+        );
+      },
+    );
+
+    test(
+      'incremental parser maintains parity without editStartOffset, on CRLF edits, and across consecutive edits',
+      () {
+        final List<String> sections = List<String>.generate(
+          30,
+          (int i) =>
+              '## Heading $i\n\nParagraph $i with *alpha* text.\n\n- Item ${i}a\n- Item ${i}b',
+        );
+        final String docText = '${sections.join('\n\n')}\n';
+        IncrementalParseResult res = incremental.parseIncremental(docText);
+
+        // Edit without editStartOffset.
+        final String v2 = docText.replaceFirst(
+          'Paragraph 15 with *alpha* text.',
+          'Paragraph 15 EDITED with **beta** text.',
+        );
+        res = incremental.parseIncremental(v2, previousResult: res);
+        expect(res.reusedBlockCount, greaterThan(80));
+        expect(res.document.toHtml(), engine.renderToHtml(v2));
+
+        // Edit with only editStartOffset (and CRLF inside edited slice).
+        final int offset = v2.indexOf('Paragraph 15 EDITED');
+        final String v3 = v2.replaceFirst(
+          'Paragraph 15 EDITED with **beta** text.',
+          'Paragraph 15 CRLF\r\nsecond line.',
+        );
+        res = incremental.parseIncremental(
+          v3,
+          previousResult: res,
+          editStartOffset: offset,
+        );
+        expect(res.document.toHtml(), engine.renderToHtml(v3));
+
+        // Consecutive edit with full coordinates preserves unique blockIds.
+        final int off3 = v3.indexOf('Paragraph 20 with');
+        const String oldSeg = 'Paragraph 20 with *alpha* text.';
+        const String newSeg = 'Paragraph 20 THIRD EDIT.';
+        final String v4 = v3.replaceFirst(oldSeg, newSeg);
+        res = incremental.parseIncremental(
+          v4,
+          previousResult: res,
+          editStartOffset: off3,
+          editOldEndOffset: off3 + oldSeg.length,
+          editNewEndOffset: off3 + newSeg.length,
+        );
+        expect(res.document.toHtml(), engine.renderToHtml(v4));
+        final Set<String> ids = res.document.blocks
+            .map((MarkdownBlockNode b) => b.blockId)
+            .toSet();
+        expect(ids.length, res.document.blocks.length);
       },
     );
   });

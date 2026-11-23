@@ -78,6 +78,27 @@ final class StreamingMarkdownController {
   /// Count of settled top-level blocks currently frozen.
   int get settledBlockCount => _settledBlocks.length;
 
+  /// Exact prefix length of `currentDocument.blocks` whose block objects are
+  /// frozen and identical by reference across subsequent active-tail chunks.
+  ///
+  /// Returns `0` when no blocks have settled yet or when link, footnote, or
+  /// abbreviation definitions force full-document reparsing during active
+  /// streaming (`!isFinished`). When positive, `0 <= settledPrefixBlockCount <=
+  /// currentDocument.blocks.length`, every index `0 <= i < settledPrefixBlockCount`
+  /// satisfies `identical(currentDocument.blocks[i], settledBlocks[i])`
+  /// (inclusive of any leading [FrontmatterNode] when `options.frontmatter` is
+  /// enabled), and `currentDocument.blocks.sublist(settledPrefixBlockCount)`
+  /// matches `activeBlocks`. After [finish] completes without a subsequent
+  /// [append], [replaceText], or [reset], this equals
+  /// `currentDocument.blocks.length`.
+  int get settledPrefixBlockCount {
+    if (_hasDefinitions && !_isFinished) {
+      return 0;
+    }
+    final int docLen = rawDocumentBlocks(_currentDocument).length;
+    return _settledBlocks.length <= docLen ? _settledBlocks.length : docLen;
+  }
+
   /// Whether [finish] has been called without a subsequent [reset].
   bool get isFinished => _isFinished;
 

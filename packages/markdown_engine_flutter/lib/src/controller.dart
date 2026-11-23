@@ -408,6 +408,15 @@ final class MarkdownController extends ChangeNotifier {
           sc.position.viewportDimension * 0.5,
           48.0,
         );
+        if (candidate <= sc.offset + 1.0 && highIdx < visibleCount - 1) {
+          // Recover from stale upper brackets if earlier async widgets resized.
+          highIdx = visibleCount - 1;
+          highOffset = maxExt;
+          final double resetFrac =
+              (targetVisibleIdx - lowIdx) / math.max(1, highIdx - lowIdx);
+          candidate =
+              lowOffset + resetFrac * math.max(0.0, highOffset - lowOffset);
+        }
         if (candidate <= sc.offset + 1.0) {
           candidate = math.min(maxExt, sc.offset + minStep);
         }
@@ -429,6 +438,15 @@ final class MarkdownController extends ChangeNotifier {
           sc.position.viewportDimension * 0.5,
           48.0,
         );
+        if (candidate >= sc.offset - 1.0 && lowIdx > 0) {
+          // Recover from stale lower brackets if earlier async widgets resized.
+          lowIdx = 0;
+          lowOffset = minExt;
+          final double resetFrac =
+              (targetVisibleIdx - lowIdx) / math.max(1, highIdx - lowIdx);
+          candidate =
+              lowOffset + resetFrac * math.max(0.0, highOffset - lowOffset);
+        }
         if (candidate >= sc.offset - 1.0) {
           candidate = math.max(minExt, sc.offset - minStep);
         }

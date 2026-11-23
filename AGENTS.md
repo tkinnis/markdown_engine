@@ -11,10 +11,10 @@ This document defines the architectural invariants, monorepo boundaries, referen
 | Path | Role | SDK / Publishing |
 | :--- | :--- | :--- |
 | `packages/markdown_engine/` | Pure-Dart block and inline parser, immutable AST, HTML/text/JSON exporters, GFM and Markdown extensions, streaming diff engine, security sanitization, and budget guards. | Pure Dart (`^3.8.0`), `meta` only, published to pub.dev. |
-| `packages/markdown_engine_flutter/` | Flutter `MarkdownView` / sliver / selection / theming widgets, streaming controller, and interactive hooks built atop `markdown_engine`. | Flutter (`>=3.32.0`, Dart `^3.8.0`), depends on `markdown_engine`, published to pub.dev. |
-| `packages/markdown_engine_flutter/example/` | Standalone Flutter example app exercising `MarkdownView` and `MarkdownTheme`. | Flutter (`>=3.32.0`), `publish_to: none`. |
+| `packages/markdown_engine_flutter/` | Flutter `MarkdownView` / sliver / selection / theming widgets, built-in `tex_math_flutter` OpenType math & `pele_dart` + `vector_graphics` Mermaid renderers, streaming controller, and interactive hooks built atop `markdown_engine`. | Flutter (`>=3.47.0`, Dart `^3.13.0`), depends on `markdown_engine`, `tex_math_flutter`, `pele_dart`, `vector_graphics`, and `vector_graphics_compiler`, published to pub.dev. |
+| `packages/markdown_engine_flutter/example/` | Standalone Flutter example app exercising `MarkdownView`, built-in math/Mermaid rendering, custom builder overrides, and `MarkdownTheme`. | Flutter (`>=3.47.0`, Dart `^3.13.0`), `publish_to: none`. |
 | `studio/` | macOS desktop comparison and inspection workbench (`studio/macos/`). | Flutter (`>=3.47.0`, Dart `^3.13.0`), `publish_to: none`. |
-| `tool/` | Lockstep version checks (`check_versions.dart`), spec verification and coverage generation (`verify_spec.dart`), reference hash checks (`sync_reference.dart`), and native AOT benchmarks (`benchmark_suite.dart`). | Dart CLI dev tooling. |
+| `tool/` | Lockstep version checks (`check_versions.dart`), spec verification and coverage generation (`verify_spec.dart`), reference hash checks (`sync_reference.dart`), native AOT benchmarks (`benchmark_suite.dart`), macOS profile benchmark runner (`run_macos_profile_benchmark.dart`), and head-to-head comparison suite (`tool/compare/`). | Dart CLI dev tooling. |
 | `corpus/` | Vendored official `CommonMark 0.31.2` (`652` examples) and `GFM 0.29.0.gfm.13` (`672` spec + `30` extension examples) fixtures plus extension, security, and streaming test suites. | Verification fixtures. |
 | `doc/` | Engineering documentation and Docsify portal (`ARCHITECTURE.md`, `API_MANUAL.md`, `COVERAGE.md`, `BENCHMARKS.md`, `STUDIO_GUIDE.md`, `REFERENCE_SYNC.md`, `RELEASING.md`). | GitHub Pages site source. |
 
@@ -27,11 +27,11 @@ This document defines the architectural invariants, monorepo boundaries, referen
 * **Strict Core Imports**: Code under `packages/markdown_engine/lib/` must never import `package:flutter`, `dart:ui`, `dart:io`, `dart:html`, or `dart:js*`.
 * **Minimal Dependencies**: `packages/markdown_engine/pubspec.yaml` `dependencies:` contains strictly `meta: ^1.16.0`. Do not add third-party parser, HTML, or DOM packages to `packages/markdown_engine`.
 * **Zero File I/O & Determinism**: `MarkdownEngine` runs synchronously on caller-provided strings with zero filesystem access, zero network calls, and zero global mutable state across parses.
-* **Dart `^3.8.0` Syntax Compatibility**: Never use Dart 3.12+ private named-parameter shorthands (`this._field`) in `packages/markdown_engine` or `packages/markdown_engine_flutter`; use explicit initializer lists instead.
+* **Dart `^3.8.0` Syntax Compatibility**: Never use Dart 3.12+ private named-parameter shorthands (`this._field`) in `packages/markdown_engine`; use explicit initializer lists instead.
 
 ### B. Flutter Compatibility & Integration (`packages/markdown_engine_flutter/lib/`)
 
-* **Flutter `3.50+` Import Scoping**: Import `package:flutter/widgets.dart` as the primary UI layer and scope any `package:flutter/material.dart` imports (`ColorScheme`, `Theme`, `SelectionArea`) with explicit `show` clauses and `// ignore: deprecated_member_use` while maintaining compatibility down to Flutter `>=3.32.0`.
+* **Flutter `>=3.47.0` & `widgets.dart`-First Layering**: Import `package:flutter/widgets.dart` as the primary UI layer and scope any `package:flutter/material.dart` imports (`ColorScheme`, `Theme`, `SelectionArea`, `Tooltip`) with explicit `show` clauses while targeting Flutter `>=3.47.0` and Dart `^3.13.0` (compatible through Flutter `3.50+`). Built-in OpenType math (`tex_math_flutter`) and vector Mermaid (`pele_dart` + `vector_graphics`) rendering are verified by both widget tests and deterministic golden pixel tests (`packages/markdown_engine_flutter/test/golden_rendering_test.dart` and `packages/markdown_engine_flutter/test/goldens/`).
 
 ### C. Spec Parity, Security & Standards
 

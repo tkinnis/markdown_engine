@@ -3,8 +3,8 @@ description: Standalone comparison benchmark package for markdown_engine vs Dart
 publish_to: none
 
 environment:
-  sdk: ^3.8.0
-  flutter: ">=3.32.0"
+  sdk: ^3.13.0
+  flutter: ">=3.47.0"
 
 dependencies:
   flutter:

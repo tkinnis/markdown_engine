@@ -4,12 +4,14 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
+import 'package:tex_math_flutter/tex_math_flutter.dart' show TexMath;
 
 void main() {
   group('Enclosing link tap targets', () {
     testWidgets(
       'tapping bold, code, highlight, and inline math children inside a link invokes onTapLink',
       (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
         final List<(String, String?)> tapped = <(String, String?)>[];
         final MarkdownController controller = MarkdownController();
         addTearDown(controller.dispose);
@@ -64,8 +66,9 @@ void main() {
         await tapSubstring('code');
         await tapSubstring('hl');
 
-        // Tap the inline math WidgetSpan child (`x`).
-        await tester.tap(find.text('x'));
+        // Tap the inline math WidgetSpan child (`TexMath`).
+        expect(find.byType(TexMath), findsOneWidget);
+        await tester.tapAt(tester.getCenter(find.byType(TexMath)));
         await tester.pump();
 
         expect(tapped, <(String, String?)>[
@@ -634,6 +637,7 @@ Logo: <picture><source media="(prefers-color-scheme: dark)" srcset="https://exam
     testWidgets(
       'renders default inline math with baseline alignment and works inside pure WidgetsApp',
       (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
         final MarkdownController controller = MarkdownController();
         addTearDown(controller.dispose);
 
@@ -658,7 +662,7 @@ Logo: <picture><source media="(prefers-color-scheme: dark)" srcset="https://exam
           ),
         );
 
-        expect(find.text('E = mc^2'), findsOneWidget);
+        expect(find.byType(TexMath), findsOneWidget);
         expect(find.text('Quoted paragraph'), findsOneWidget);
         expect(find.text('Ordered one'), findsOneWidget);
         expect(find.text('1.'), findsOneWidget);
@@ -882,12 +886,11 @@ Logo: <picture><source media="(prefers-color-scheme: dark)" srcset="https://exam
                 <T>(RouteSettings settings, WidgetBuilder builder) =>
                     PageRouteBuilder<T>(
                       settings: settings,
-                      pageBuilder:
-                          (
-                            BuildContext ctx,
-                            Animation<double> a,
-                            Animation<double> b,
-                          ) => builder(ctx),
+                      pageBuilder: (
+                        BuildContext ctx,
+                        Animation<double> a,
+                        Animation<double> b,
+                      ) => builder(ctx),
                     ),
             home: const MarkdownTheme(
               data: MarkdownThemeData.light(),
@@ -1020,6 +1023,7 @@ Inside details body[^1].
     testWidgets(
       'verifies headingLevel, table headers, single-speak abbr, linked WidgetSpan semantics, and FocusableActionDetector keyboard activation',
       (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
         final SemanticsHandle semanticsHandle = tester.ensureSemantics();
         try {
           String? copiedCode;
@@ -1156,7 +1160,7 @@ Hidden keyboard body[^k1].
           // Linked WidgetSpan exposes Semantics(link: true).
           expect(
             find.ancestor(
-              of: find.text('x'),
+              of: find.byType(TexMath),
               matching: find.byWidgetPredicate(
                 (Widget w) => w is Semantics && w.properties.link == true,
               ),

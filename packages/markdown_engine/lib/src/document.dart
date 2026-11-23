@@ -13,8 +13,9 @@ import 'options.dart';
 final class MarkdownDocument {
   /// Creates a parsed [MarkdownDocument].
   ///
-  /// When [abbreviations] or [normalizedSource] are supplied by the parser,
-  /// incremental updates reuse them directly without re-normalizing [source].
+  /// When [abbreviations], [normalizedSource], or [idGeneration] are supplied
+  /// by the parser, incremental updates reuse them directly without
+  /// re-normalizing [source] or scanning block IDs.
   const MarkdownDocument({
     required this.source,
     this.options = const MarkdownOptions(),
@@ -28,6 +29,7 @@ final class MarkdownDocument {
     Map<String, String> abbreviations = const <String, String>{},
     String? normalizedSource,
     String? html,
+    int? idGeneration,
     // ignore: prefer_initializing_formals
   }) : _blocks = blocks,
        _outline = outline,
@@ -36,7 +38,8 @@ final class MarkdownDocument {
        _linkDefinitions = linkDefinitions,
        _abbreviations = abbreviations,
        _normalizedSource = normalizedSource,
-       _html = html;
+       _html = html,
+       _idGeneration = idGeneration;
 
   /// Original Markdown source string passed to the parser.
   final String source;
@@ -56,6 +59,7 @@ final class MarkdownDocument {
   final Map<String, String> _abbreviations;
   final String? _normalizedSource;
   final String? _html;
+  final int? _idGeneration;
 
   /// Ordered top-level AST block nodes produced by parsing.
   List<MarkdownBlockNode> get blocks => _unmodifiableList(_blocks);
@@ -182,6 +186,10 @@ final class MarkdownDocument {
 /// Package-internal accessor returning the cached normalized source string if
 /// previously computed for [doc].
 String? cachedNormalizedSource(MarkdownDocument doc) => doc._normalizedSource;
+
+/// Package-internal accessor returning the cached incremental ID generation
+/// counter for [doc], or `null` if constructed externally.
+int? cachedIdGeneration(MarkdownDocument doc) => doc._idGeneration;
 
 /// Package-internal accessor returning the raw top-level blocks list of [doc].
 List<MarkdownBlockNode> rawDocumentBlocks(MarkdownDocument doc) => doc._blocks;

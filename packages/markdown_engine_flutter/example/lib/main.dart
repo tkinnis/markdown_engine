@@ -6,12 +6,14 @@ import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
 
 /// Entry point for the `markdown_engine_flutter` example application.
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  unawaited(MarkdownBuiltInRenderers.warmUp());
   runApp(const MarkdownExampleApp());
 }
 
 /// Interactive standalone example showcasing zero-reparse Light/Dark switching,
-/// virtualized GFM/extensions rendering, LLM streaming simulation, and
-/// pluggable math/diagram/code hooks.
+/// out-of-the-box `tex_math_flutter` OpenType math and `pele_dart` Mermaid
+/// diagrams, LLM streaming simulation, and optional custom builder overrides.
 final class MarkdownExampleApp extends StatefulWidget {
   /// Creates the example application.
   const MarkdownExampleApp({super.key});
@@ -25,15 +27,34 @@ final class _MarkdownExampleAppState extends State<MarkdownExampleApp> {
 ---
 title: markdown_engine_flutter Showcase
 spec: CommonMark 0.31.2 + GFM 0.29
-tags: [flutter, slivers, zero-reparse, streaming]
+tags: [flutter, slivers, tex-math, mermaid, streaming]
 ---
 
 # Native Flutter Markdown Rendering
 
-This document renders directly into Flutter slivers with **zero WebViews**, native `SelectionArea`, and **zero re-parses** when toggling Light and Dark themes.
+This document renders directly into Flutter slivers with **zero WebViews**, built-in OpenType TeX math (`tex_math_flutter`), offline vector Mermaid diagrams (`pele_dart`), native `SelectionArea`, and **zero re-parses** when toggling Light and Dark themes.
+
+## Out-of-the-Box Math & Mermaid (Zero Custom Builders)
+
+Inline formulas align on the alphabetic baseline automatically: Euler's identity $e^{i\pi} + 1 = 0$ and \(\alpha + \beta = \gamma\) sit inline with surrounding prose.
+
+Display equations render natively from `NewCMMath-Regular.otf` glyph paths:
+
+$$
+\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}
+$$
+
+Fenced `mermaid` blocks render offline via `pele_dart` and `vector_graphics` with zero builder configuration:
+
+```mermaid
+flowchart LR
+  Source["Markdown Text"] --> Parser["Pure-Dart AST"]
+  Parser --> Math["tex_math_flutter"]
+  Parser --> Mermaid["pele_dart Vector"]
+```
 
 > [!NOTE]
-> Toggling the sun/moon theme button updates `MarkdownTheme` colors immediately while keeping `controller.parseCount` at `1`.
+> Toggling the sun/moon theme button updates `MarkdownTheme`, TeX math colors, and Mermaid palettes immediately while keeping `controller.parseCount` at `1`.
 
 > [!TIP]
 > Press <kbd>Cmd</kbd>+<kbd>C</kbd> after dragging across paragraphs, tables, or inline `code` spans to copy clean text.
@@ -45,34 +66,34 @@ This document renders directly into Flutter slivers with **zero WebViews**, nati
 > Remote images default to `MarkdownImagePolicy.block` or `ask` so untrusted Markdown never leaks network requests.
 
 > [!CAUTION]
-> Always pass `MarkdownOptions.extended()` when enabling alerts, frontmatter, math, `<details>`, and abbreviations.
+> Always pass `MarkdownOptions.extended()` when enabling frontmatter, alerts, `<details>`, and abbreviations (`MarkdownOptions()` already enables `math: true` by default).
 
 ## GFM Table & Task List
 
-| Capability | Alignment | Status |
+| Capability | Engine | Status |
 | :--- | :---: | ---: |
-| Sliver Virtualization | Center | Ready |
-| Incremental Streaming | Center | Ready |
-| URL & Image Gating | Center | Active |
+| Sliver Virtualization | `SliverMarkdownDocument` | Ready |
+| Built-in TeX Math | `tex_math_flutter` | Active |
+| Built-in Mermaid | `pele_dart` + `vector_graphics` | Active |
 
 - [x] CommonMark 0.31.2 & GFM 0.29 parity
-- [x] Baseline-aligned inline math & `<kbd>` chips
-- [ ] Connect your `tex_math_flutter` and `pele_dart` builders
+- [x] Out-of-the-box OpenType TeX math & vector Mermaid diagrams
+- [x] Baseline-aligned `<kbd>` chips, ==highlights==, H~2~O, and 2^10^
 
 ## Collapsible Details, Definitions & Footnotes
 
 <details>
 <summary>Inspect interactive disclosure block</summary>
 
-Expanded body content supports **rich formatting**, inline `code`, and ==highlighted text== with H~2~O and 2^10^ notation[^1].
+Expanded body content supports **rich formatting**, inline `code`, inline math $\sum_{i=1}^n i = \frac{n(n+1)}{2}$, and ==highlighted text==[^1].
 
 </details>
 
 `MarkdownView`
 : Virtualized Flutter widget with default, `.document`, and `.streaming` constructors.
 
-`SliverMarkdownDocument`
-: Lazily builds visible top-level blocks keyed by `node.blockId`.
+`MarkdownBuiltInRenderers`
+: Pre-warms `NewCMMath-Regular.otf` and the `pele_dart` diagram registry cleanly via `warmUp()`.
 
 Visit [the project documentation](https://tkinnis.github.io/markdown_engine/) or inspect AST abbreviations with tooltip semantics.
 
@@ -82,7 +103,7 @@ Visit [the project documentation](https://tkinnis.github.io/markdown_engine/) or
 
 ```dart
 final MarkdownEngine engine = MarkdownEngine(
-  defaultOptions: MarkdownOptions.extended(),
+  defaultOptions: const MarkdownOptions.extended(),
 );
 final MarkdownDocument doc = engine.parse('# Pure Dart');
 ```
@@ -91,28 +112,31 @@ final MarkdownDocument doc = engine.parse('# Pure Dart');
 ''';
 
   static const String _hooksMarkdown = r'''
-# Pluggable Math, Diagram & Code Hooks
+# Optional Custom Renderer Overrides
 
-Inline math plugs into `mathInlineBuilder` with alphabetic baseline alignment: Euler's identity $e^{i\pi} + 1 = 0$ sits inline with surrounding prose.
+Out-of-the-box TeX math (`tex_math_flutter`) and Mermaid vector diagrams (`pele_dart`) require **zero builders** (`enableBuiltInMath: true` and `enableBuiltInMermaid: true` by default). Pass `MarkdownBuilderDelegates` overrides only when your app needs bespoke styling, compact pills, or custom callout decorators:
 
-Display equations plug into `mathBlockBuilder`:
+Inline math overridden via `mathInlineBuilder`: Euler's identity $e^{i\pi} + 1 = 0$ renders here inside a custom compact chip.
+
+Display math overridden via `mathBlockBuilder`:
 
 $$
 \int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}
 $$
 
-Fenced diagram blocks (such as `mermaid`) route to `diagramBuilder` before falling back to `codeBlockBuilder`:
+Diagram blocks overridden via `diagramBuilder` (return `null` for any language to fall through cleanly to `BuiltInMermaidDiagram` or `codeBlockBuilder`):
 
 ```mermaid
 flowchart LR
-  Source[Markdown Text] --> AST[Sealed AST]
-  AST --> Sliver[SliverMarkdownDocument]
+  Source["Markdown Text"] --> AST["Sealed AST"]
+  AST --> Hook["Optional diagramBuilder"]
 ```
 
 Non-diagram languages fall through cleanly to `codeBlockBuilder`:
 
 ```dart
 Widget buildView(String source) {
+  // Zero builders needed for built-in OpenType math & Mermaid diagrams!
   return MarkdownView(
     source,
     options: const MarkdownOptions.extended(),
@@ -124,9 +148,20 @@ Widget buildView(String source) {
   static const List<String> _streamChunks = <String>[
     '# Streaming Assistant Response\n\n',
     'Incoming chunks freeze completed prefix blocks ',
-    'while re-parsing only the active trailing slice.\n\n',
+    'while re-parsing only the active trailing slice ',
+    'with built-in math like ',
+    r'$O(|T|)$ ',
+    'complexity.\n\n',
     '> [!TIP]\n> Settled blocks preserve their `blockId` keys across ',
     'every frame.\n\n',
+    '\$\$\n',
+    r'\Delta t_{\text{chunk}} \propto |T|',
+    '\n\$\$\n\n',
+    '```mermaid\n',
+    'flowchart LR\n',
+    '  Chunk["Token Chunk"] --> Tail["Active Tail"]\n',
+    '  Tail --> Settled["Frozen Prefix"]\n',
+    '```\n\n',
     '| Phase | Behavior |\n| :--- | :--- |\n',
     '| Settled | Frozen immutable AST |\n',
     '| Active tail | Reparsed incrementally |\n\n',
@@ -140,10 +175,13 @@ Widget buildView(String source) {
   String? _statusMessage;
 
   late final MarkdownController _showcaseController;
+  MarkdownBuilderDelegates? _cachedShowcaseDelegates;
+  bool? _cachedRemoteApproved;
 
   @override
   void initState() {
     super.initState();
+    unawaited(MarkdownBuiltInRenderers.warmUp());
     _showcaseController = MarkdownController();
   }
 
@@ -163,6 +201,34 @@ Widget buildView(String source) {
     setState(() {
       _statusMessage = message;
     });
+  }
+
+  void _handleShowcaseLinkTap(String destination, String? title) {
+    _setStatus('Tapped safe link: $destination');
+  }
+
+  void _handleShowcaseLoadRemoteImages() {
+    setState(() {
+      _showcaseRemoteImagesApproved = true;
+      _statusMessage = 'Remote image loading approved for showcase view.';
+    });
+  }
+
+  MarkdownBuilderDelegates get _showcaseDelegates {
+    final MarkdownBuilderDelegates? cached = _cachedShowcaseDelegates;
+    if (cached != null &&
+        _cachedRemoteApproved == _showcaseRemoteImagesApproved) {
+      return cached;
+    }
+    final MarkdownBuilderDelegates next = MarkdownBuilderDelegates(
+      imagePolicy: MarkdownImagePolicy.ask,
+      remoteImagesApproved: _showcaseRemoteImagesApproved,
+      onLoadRemoteImages: _handleShowcaseLoadRemoteImages,
+      onTapLink: _handleShowcaseLinkTap,
+    );
+    _cachedShowcaseDelegates = next;
+    _cachedRemoteApproved = _showcaseRemoteImagesApproved;
+    return next;
   }
 
   @override
@@ -227,7 +293,7 @@ Widget buildView(String source) {
                   children: <Widget>[
                     _buildShowcaseTab(),
                     const _ExampleStreamingTab(chunks: _streamChunks),
-                    _buildHooksTab(markdownTheme),
+                    _buildHooksTab(),
                   ],
                 ),
               ),
@@ -269,140 +335,141 @@ Widget buildView(String source) {
       options: const MarkdownOptions.extended(),
       controller: _showcaseController,
       padding: const EdgeInsets.all(20.0),
-      delegates: MarkdownBuilderDelegates(
-        imagePolicy: MarkdownImagePolicy.ask,
-        remoteImagesApproved: _showcaseRemoteImagesApproved,
-        onLoadRemoteImages: () {
-          setState(() {
-            _showcaseRemoteImagesApproved = true;
-            _statusMessage = 'Remote image loading approved for showcase view.';
-          });
-        },
-        onTapLink: (String destination, String? title) =>
-            _setStatus('Tapped safe link: $destination'),
-      ),
+      delegates: _showcaseDelegates,
     );
   }
 
-  Widget _buildHooksTab(MarkdownThemeData theme) {
-    return MarkdownView(
+  static const MarkdownBuilderDelegates _hooksDelegates =
+      MarkdownBuilderDelegates(
+        mathInlineBuilder: _buildCustomInlineMathChip,
+        mathBlockBuilder: _buildCustomMathCallout,
+        diagramBuilder: _buildCustomDiagramDecorator,
+        codeBlockBuilder: _buildCustomCodeBlock,
+      );
+
+  Widget _buildHooksTab() {
+    return const MarkdownView(
       _hooksMarkdown,
-      options: const MarkdownOptions.extended(),
-      padding: const EdgeInsets.all(20.0),
-      delegates: MarkdownBuilderDelegates(
-        mathInlineBuilder:
-            (
-              BuildContext context,
-              MathInlineNode node,
-              TextStyle style,
-              GestureRecognizer? linkRecognizer,
-            ) {
-              return WidgetSpan(
-                alignment: PlaceholderAlignment.baseline,
-                baseline: TextBaseline.alphabetic,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6.0,
-                    vertical: 2.0,
-                  ),
-                  decoration: BoxDecoration(
-                    color: theme.accent.withValues(alpha: 0.14),
-                    borderRadius: BorderRadius.circular(5.0),
-                  ),
-                  child: Text(
-                    'TeX(${node.latex})',
-                    style: style.copyWith(
-                      color: theme.accent,
-                      fontWeight: FontWeight.w600,
-                      fontSize: (style.fontSize ?? theme.fontSize) * 0.9,
-                    ),
-                  ),
-                ),
-              );
-            },
-        mathBlockBuilder: (BuildContext context, MathBlockNode node) {
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(14.0),
-            decoration: BoxDecoration(
-              color: theme.accent.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(8.0),
-              border: Border.all(color: theme.accent.withValues(alpha: 0.35)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: <Widget>[
-                Text(
-                  'Custom Display Math Hook',
-                  style: TextStyle(
-                    color: theme.accent,
-                    fontSize: 12.0,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 6.0),
-                Text(node.latex, style: theme.codeTextStyle()),
-              ],
-            ),
-          );
-        },
-        diagramBuilder: (BuildContext context, CodeBlockNode node) {
-          if (node.language != 'mermaid') {
-            return null;
-          }
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(14.0),
-            decoration: BoxDecoration(
-              color: theme.alertPalette.tip.background,
-              borderRadius: BorderRadius.circular(8.0),
-              border: Border.all(color: theme.alertPalette.tip.border),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  'Diagram Hook (mermaid)',
-                  style: TextStyle(
-                    color: theme.alertPalette.tip.foreground,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 6.0),
-                Text(node.literal.trim(), style: theme.codeTextStyle()),
-              ],
-            ),
-          );
-        },
-        codeBlockBuilder: (BuildContext context, CodeBlockNode node) {
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12.0),
-            decoration: BoxDecoration(
-              color: theme.codeBackground,
-              borderRadius: BorderRadius.circular(8.0),
-              border: Border.all(color: theme.accent.withValues(alpha: 0.4)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  'Custom Code Hook (${node.language ?? 'plain'})',
-                  style: TextStyle(
-                    color: theme.accent,
-                    fontSize: 12.0,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 6.0),
-                Text(node.literal.trim(), style: theme.codeTextStyle()),
-              ],
-            ),
-          );
-        },
-      ),
+      options: MarkdownOptions.extended(),
+      padding: EdgeInsets.all(20.0),
+      delegates: _hooksDelegates,
     );
   }
+}
+
+InlineSpan _buildCustomInlineMathChip(
+  BuildContext context,
+  MathInlineNode node,
+  TextStyle style,
+  GestureRecognizer? linkRecognizer,
+) {
+  final MarkdownThemeData theme = MarkdownTheme.of(context);
+  return WidgetSpan(
+    alignment: PlaceholderAlignment.baseline,
+    baseline: TextBaseline.alphabetic,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 2.0),
+      decoration: BoxDecoration(
+        color: theme.accent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(5.0),
+        border: Border.all(color: theme.accent.withValues(alpha: 0.32)),
+      ),
+      child: Text(
+        'TeX(${node.latex})',
+        style: style.copyWith(
+          color: theme.accent,
+          fontWeight: FontWeight.w600,
+          fontSize: (style.fontSize ?? theme.fontSize) * 0.88,
+        ),
+      ),
+    ),
+  );
+}
+
+Widget _buildCustomMathCallout(BuildContext context, MathBlockNode node) {
+  final MarkdownThemeData theme = MarkdownTheme.of(context);
+  return Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(14.0),
+    decoration: BoxDecoration(
+      color: theme.accent.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(8.0),
+      border: Border.all(color: theme.accent.withValues(alpha: 0.35)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: <Widget>[
+        Text(
+          'Custom Display Math Hook',
+          style: TextStyle(
+            color: theme.accent,
+            fontSize: 12.0,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 6.0),
+        Text(node.latex.trim(), style: theme.codeTextStyle()),
+      ],
+    ),
+  );
+}
+
+Widget? _buildCustomDiagramDecorator(BuildContext context, CodeBlockNode node) {
+  if (node.language != 'mermaid') {
+    return null;
+  }
+  final MarkdownThemeData theme = MarkdownTheme.of(context);
+  return Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(14.0),
+    decoration: BoxDecoration(
+      color: theme.alertPalette.tip.background,
+      borderRadius: BorderRadius.circular(8.0),
+      border: Border.all(color: theme.alertPalette.tip.border),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          'Custom Diagram Decorator (mermaid)',
+          style: TextStyle(
+            color: theme.alertPalette.tip.foreground,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 6.0),
+        Text(node.literal.trim(), style: theme.codeTextStyle()),
+      ],
+    ),
+  );
+}
+
+Widget _buildCustomCodeBlock(BuildContext context, CodeBlockNode node) {
+  final MarkdownThemeData theme = MarkdownTheme.of(context);
+  return Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(12.0),
+    decoration: BoxDecoration(
+      color: theme.codeBackground,
+      borderRadius: BorderRadius.circular(8.0),
+      border: Border.all(color: theme.accent.withValues(alpha: 0.4)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          'Custom Code Hook (${node.language ?? 'plain'})',
+          style: TextStyle(
+            color: theme.accent,
+            fontSize: 12.0,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 6.0),
+        Text(node.literal.trim(), style: theme.codeTextStyle()),
+      ],
+    ),
+  );
 }
 
 final class _ExampleStreamingTab extends StatefulWidget {

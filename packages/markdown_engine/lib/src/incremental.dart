@@ -92,7 +92,7 @@ final class IncrementalMarkdownParser {
       );
     }
 
-    if (prevDoc.source == newSource) {
+    if (identical(prevDoc.source, newSource)) {
       return IncrementalParseResult(
         document: prevDoc,
         reusedBlockCount: prevDoc.blocks.length,
@@ -103,20 +103,14 @@ final class IncrementalMarkdownParser {
     final String oldNorm =
         cachedNormalizedSource(prevDoc) ??
         normalizeMarkdownSource(prevDoc.source);
-    final String newNorm = normalizeMarkdownSource(newSource);
-    final bool normUnchanged =
-        identical(oldNorm, prevDoc.source) && identical(newNorm, newSource);
+    final bool oldNormUnchanged = identical(oldNorm, prevDoc.source);
 
-    // Compute exact common prefix and non-overlapping common suffix, skipping
-    // O(N) prefix/suffix scans when exact edit coordinates are supplied.
-    final int minLen = oldNorm.length < newNorm.length
-        ? oldNorm.length
-        : newNorm.length;
+    late final String newNorm;
     int prefixLen;
     int oldDirtyEndLimit;
     int newDirtyEndLimit;
 
-    if (normUnchanged &&
+    if (oldNormUnchanged &&
         editStartOffset != null &&
         editOldEndOffset != null &&
         editNewEndOffset != null &&
@@ -124,43 +118,118 @@ final class IncrementalMarkdownParser {
         editStartOffset <= editOldEndOffset &&
         editStartOffset <= editNewEndOffset &&
         editOldEndOffset <= oldNorm.length &&
-        editNewEndOffset <= newNorm.length &&
+        editNewEndOffset <= newSource.length &&
         oldNorm.length - editOldEndOffset ==
-            newNorm.length - editNewEndOffset) {
+            newSource.length - editNewEndOffset &&
+        _hasNoCrOrNul(newSource, editStartOffset, editNewEndOffset)) {
+      if (editStartOffset == editOldEndOffset &&
+          editStartOffset == editNewEndOffset &&
+          prevDoc.source == newSource) {
+        return IncrementalParseResult(
+          document: prevDoc,
+          reusedBlockCount: prevDoc.blocks.length,
+          reparsedBlockCount: 0,
+        );
+      }
+      newNorm = newSource;
       prefixLen = editStartOffset;
       oldDirtyEndLimit = editOldEndOffset;
       newDirtyEndLimit = editNewEndOffset;
-    } else if (normUnchanged &&
+    } else if (oldNormUnchanged &&
         editStartOffset != null &&
+        editOldEndOffset == null &&
+        editNewEndOffset == null &&
         editStartOffset >= 0 &&
-        editStartOffset <= minLen) {
-      prefixLen = editStartOffset;
-      int suffixLen = 0;
-      final int maxSuffix = minLen - prefixLen;
-      while (suffixLen < maxSuffix &&
-          oldNorm.codeUnitAt(oldNorm.length - 1 - suffixLen) ==
-              newNorm.codeUnitAt(newNorm.length - 1 - suffixLen)) {
-        suffixLen++;
+        editStartOffset <= oldNorm.length &&
+        editStartOffset <= newSource.length) {
+      final int minLen = oldNorm.length < newSource.length
+          ? oldNorm.length
+          : newSource.length;
+      final int suffixLen = _commonSuffixLen(
+        oldNorm,
+        newSource,
+        minLen - editStartOffset,
+      );
+      final int candidateNewDirtyEnd = newSource.length - suffixLen;
+      if (_hasNoCrOrNul(newSource, editStartOffset, candidateNewDirtyEnd)) {
+        newNorm = newSource;
+        prefixLen = editStartOffset;
+        oldDirtyEndLimit = oldNorm.length - suffixLen;
+        newDirtyEndLimit = candidateNewDirtyEnd;
+      } else {
+        newNorm = normalizeMarkdownSource(newSource);
+        final int normMinLen = oldNorm.length < newNorm.length
+            ? oldNorm.length
+            : newNorm.length;
+        prefixLen = _commonPrefixLen(oldNorm, newNorm);
+        if (editStartOffset < prefixLen) {
+          prefixLen = editStartOffset;
+        }
+        final int normSuffixLen = _commonSuffixLen(
+          oldNorm,
+          newNorm,
+          normMinLen - prefixLen,
+        );
+        oldDirtyEndLimit = oldNorm.length - normSuffixLen;
+        newDirtyEndLimit = newNorm.length - normSuffixLen;
       }
-      oldDirtyEndLimit = oldNorm.length - suffixLen;
-      newDirtyEndLimit = newNorm.length - suffixLen;
+    } else if (oldNormUnchanged && editStartOffset == null) {
+      prefixLen = _commonPrefixLen(oldNorm, newSource);
+      if (prefixLen == oldNorm.length && oldNorm.length == newSource.length) {
+        return IncrementalParseResult(
+          document: prevDoc,
+          reusedBlockCount: prevDoc.blocks.length,
+          reparsedBlockCount: 0,
+        );
+      }
+      final int minLen = oldNorm.length < newSource.length
+          ? oldNorm.length
+          : newSource.length;
+      final int suffixLen = _commonSuffixLen(
+        oldNorm,
+        newSource,
+        minLen - prefixLen,
+      );
+      final int candidateNewDirtyEnd = newSource.length - suffixLen;
+      if (_hasNoCrOrNul(newSource, prefixLen, candidateNewDirtyEnd)) {
+        newNorm = newSource;
+        oldDirtyEndLimit = oldNorm.length - suffixLen;
+        newDirtyEndLimit = candidateNewDirtyEnd;
+      } else {
+        newNorm = normalizeMarkdownSource(newSource);
+        final int normMinLen = oldNorm.length < newNorm.length
+            ? oldNorm.length
+            : newNorm.length;
+        prefixLen = _commonPrefixLen(oldNorm, newNorm);
+        final int normSuffixLen = _commonSuffixLen(
+          oldNorm,
+          newNorm,
+          normMinLen - prefixLen,
+        );
+        oldDirtyEndLimit = oldNorm.length - normSuffixLen;
+        newDirtyEndLimit = newNorm.length - normSuffixLen;
+      }
     } else {
-      prefixLen = 0;
-      while (prefixLen < minLen &&
-          oldNorm.codeUnitAt(prefixLen) == newNorm.codeUnitAt(prefixLen)) {
-        prefixLen++;
+      newNorm = normalizeMarkdownSource(newSource);
+      if (oldNorm == newNorm && prevDoc.source == newSource) {
+        return IncrementalParseResult(
+          document: prevDoc,
+          reusedBlockCount: prevDoc.blocks.length,
+          reparsedBlockCount: 0,
+        );
       }
+      final int minLen = oldNorm.length < newNorm.length
+          ? oldNorm.length
+          : newNorm.length;
+      prefixLen = _commonPrefixLen(oldNorm, newNorm);
       if (editStartOffset != null && editStartOffset < prefixLen) {
         prefixLen = editStartOffset < 0 ? 0 : editStartOffset;
       }
-
-      int suffixLen = 0;
-      final int maxSuffix = minLen - prefixLen;
-      while (suffixLen < maxSuffix &&
-          oldNorm.codeUnitAt(oldNorm.length - 1 - suffixLen) ==
-              newNorm.codeUnitAt(newNorm.length - 1 - suffixLen)) {
-        suffixLen++;
-      }
+      final int suffixLen = _commonSuffixLen(
+        oldNorm,
+        newNorm,
+        minLen - prefixLen,
+      );
       oldDirtyEndLimit = oldNorm.length - suffixLen;
       newDirtyEndLimit = newNorm.length - suffixLen;
     }
@@ -341,12 +410,16 @@ final class IncrementalMarkdownParser {
       }
     }
 
-    final String dirtyIdPrefix = _pickDisjointIdPrefix(
-      prevBlocks,
-      prefixCount,
-      suffixStartIdx,
-      searchLimit,
-    );
+    final int? prevIdGen = cachedIdGeneration(prevDoc);
+    final int nextIdGen = prevIdGen != null ? prevIdGen + 1 : 0;
+    final String dirtyIdPrefix = prevIdGen != null
+        ? 'inc$nextIdGen-'
+        : _pickDisjointIdPrefix(
+            prevBlocks,
+            prefixCount,
+            suffixStartIdx,
+            searchLimit,
+          );
 
     // Parse only the dirty slice (avoiding frontmatter unless dirtyStart == 0).
     final MarkdownOptions sliceOptions = dirtyNewStart == 0
@@ -387,12 +460,36 @@ final class IncrementalMarkdownParser {
     final int newDirtyLines = _countNewlines(newDirtySlice);
     final int lineDelta = newDirtyLines - oldDirtyLines;
 
-    final List<MarkdownBlockNode> combined = <MarkdownBlockNode>[
-      for (int i = 0; i < prefixCount; i++) prevBlocks[i],
-      ...dirtyPhase2.blocks,
-      for (int i = suffixStartIdx; i < searchLimit; i++)
-        prevBlocks[i].shiftSpan(offsetDelta, lineDelta),
-    ];
+    final List<MarkdownBlockNode> dirtyBlocks = dirtyPhase2.blocks;
+    final int dirtyCount = dirtyBlocks.length;
+    final int totalLen = prefixCount + dirtyCount + suffixCount;
+    final List<MarkdownBlockNode> combined;
+    if (totalLen == 0) {
+      combined = const <MarkdownBlockNode>[];
+    } else {
+      final MarkdownBlockNode sentinel = prefixCount > 0
+          ? prevBlocks[0]
+          : (dirtyCount > 0 ? dirtyBlocks[0] : prevBlocks[suffixStartIdx]);
+      final List<MarkdownBlockNode> fixed = List<MarkdownBlockNode>.filled(
+        totalLen,
+        sentinel,
+        growable: false,
+      );
+      for (int i = 0; i < prefixCount; i++) {
+        fixed[i] = prevBlocks[i];
+      }
+      for (int i = 0; i < dirtyCount; i++) {
+        fixed[prefixCount + i] = dirtyBlocks[i];
+      }
+      final int suffixDest = prefixCount + dirtyCount;
+      for (int i = 0; i < suffixCount; i++) {
+        fixed[suffixDest + i] = prevBlocks[suffixStartIdx + i].shiftSpan(
+          offsetDelta,
+          lineDelta,
+        );
+      }
+      combined = fixed;
+    }
 
     bool oldMiddleHadHeading = false;
     for (int i = prefixCount; i < suffixStartIdx; i++) {
@@ -402,12 +499,12 @@ final class IncrementalMarkdownParser {
       }
     }
     final bool headingsChanged =
-        oldMiddleHadHeading || containsHeadingInBlocks(dirtyPhase2.blocks);
+        oldMiddleHadHeading || containsHeadingInBlocks(dirtyBlocks);
 
     final List<MarkdownBlockNode> finalBlocks;
     final List<MarkdownOutlineItem> outline;
     if (!headingsChanged) {
-      finalBlocks = freezeList(combined);
+      finalBlocks = wrapFixedUnmodifiableList(combined);
       outline = _shiftUnchangedOutline(
         rawDocumentOutline(prevDoc),
         dirtyOldStart: dirtyOldStart,
@@ -424,20 +521,27 @@ final class IncrementalMarkdownParser {
       finalBlocks = freezeList(rebuilt.blocks);
       outline = freezeList(rebuilt.outline);
     } else {
-      finalBlocks = freezeList(combined);
+      finalBlocks = wrapFixedUnmodifiableList(combined);
       outline = freezeList(
         collectOutlineFromBlocks(combined, options: effective),
       );
     }
 
-    final List<String> oldMiddleImages = collectRemoteImagesFromBlocks(
-      prevBlocks.sublist(prefixCount, suffixStartIdx),
-    );
+    final List<String> prevRemoteImages = rawDocumentRemoteImages(prevDoc);
     final List<String> remoteImages;
-    if (oldMiddleImages.isEmpty && dirtyPhase2.remoteImageAddresses.isEmpty) {
-      remoteImages = rawDocumentRemoteImages(prevDoc);
+    if (prevRemoteImages.isEmpty && dirtyPhase2.remoteImageAddresses.isEmpty) {
+      remoteImages = const <String>[];
     } else {
-      remoteImages = freezeList(collectRemoteImagesFromBlocks(finalBlocks));
+      final List<String> oldMiddleImages = suffixStartIdx > prefixCount
+          ? collectRemoteImagesFromBlocks(
+              prevBlocks.sublist(prefixCount, suffixStartIdx),
+            )
+          : const <String>[];
+      if (oldMiddleImages.isEmpty && dirtyPhase2.remoteImageAddresses.isEmpty) {
+        remoteImages = prevRemoteImages;
+      } else {
+        remoteImages = freezeList(collectRemoteImagesFromBlocks(finalBlocks));
+      }
     }
 
     final MarkdownDocument resultDoc = MarkdownDocument(
@@ -451,13 +555,14 @@ final class IncrementalMarkdownParser {
       linkDefinitions: prevDoc.linkDefinitions,
       abbreviations: prevDoc.abbreviations,
       normalizedSource: newNorm,
+      idGeneration: prevIdGen != null ? nextIdGen : null,
     );
 
     final int _ = newDirtyEndLimit;
     return IncrementalParseResult(
       document: resultDoc,
       reusedBlockCount: prefixCount + suffixCount,
-      reparsedBlockCount: dirtyPhase2.blocks.length,
+      reparsedBlockCount: dirtyCount,
     );
   }
 
@@ -708,24 +813,112 @@ final class IncrementalMarkdownParser {
     required int offsetDelta,
     required int lineDelta,
   }) {
-    if (prevOutline.isEmpty) {
-      return const <MarkdownOutlineItem>[];
-    }
-    if (offsetDelta == 0 && lineDelta == 0) {
+    if (prevOutline.isEmpty ||
+        (offsetDelta == 0 && lineDelta == 0) ||
+        prevOutline.last.span.startOffset < dirtyOldEnd) {
       return prevOutline;
     }
-    final List<MarkdownOutlineItem> out = <MarkdownOutlineItem>[
-      for (final MarkdownOutlineItem item in prevOutline)
-        item.span.startOffset >= dirtyOldEnd
-            ? MarkdownOutlineItem(
-                text: item.text,
-                level: item.level,
-                line: item.line + lineDelta,
-                slug: item.slug,
-                span: item.span.shift(offsetDelta, lineDelta),
-              )
-            : item,
-    ];
-    return freezeList(out);
+    final int len = prevOutline.length;
+    final List<MarkdownOutlineItem> out = List<MarkdownOutlineItem>.filled(
+      len,
+      prevOutline[0],
+      growable: false,
+    );
+    for (int i = 0; i < len; i++) {
+      final MarkdownOutlineItem item = prevOutline[i];
+      out[i] = item.span.startOffset >= dirtyOldEnd
+          ? MarkdownOutlineItem(
+              text: item.text,
+              level: item.level,
+              line: item.line + lineDelta,
+              slug: item.slug,
+              span: item.span.shift(offsetDelta, lineDelta),
+            )
+          : item;
+    }
+    return wrapFixedUnmodifiableList(out);
   }
+}
+
+bool _hasNoCrOrNul(String text, int start, int end) {
+  for (int i = start; i < end; i++) {
+    final int cu = text.codeUnitAt(i);
+    if (cu == 0x0D || cu == 0x00) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int _commonPrefixLen(String a, String b) {
+  final int minLen = a.length < b.length ? a.length : b.length;
+  int p = 0;
+  if (minLen >= 16384) {
+    const int step = 8192;
+    while (p + step <= minLen && b.startsWith(a.substring(p, p + step), p)) {
+      p += step;
+    }
+  }
+  final int minLen8 = minLen - 7;
+  while (p < minLen8) {
+    final int diff =
+        (a.codeUnitAt(p) ^ b.codeUnitAt(p)) |
+        (a.codeUnitAt(p + 1) ^ b.codeUnitAt(p + 1)) |
+        (a.codeUnitAt(p + 2) ^ b.codeUnitAt(p + 2)) |
+        (a.codeUnitAt(p + 3) ^ b.codeUnitAt(p + 3)) |
+        (a.codeUnitAt(p + 4) ^ b.codeUnitAt(p + 4)) |
+        (a.codeUnitAt(p + 5) ^ b.codeUnitAt(p + 5)) |
+        (a.codeUnitAt(p + 6) ^ b.codeUnitAt(p + 6)) |
+        (a.codeUnitAt(p + 7) ^ b.codeUnitAt(p + 7));
+    if (diff != 0) {
+      break;
+    }
+    p += 8;
+  }
+  while (p < minLen && a.codeUnitAt(p) == b.codeUnitAt(p)) {
+    p++;
+  }
+  return p;
+}
+
+int _commonSuffixLen(String a, String b, int maxSuffix) {
+  if (maxSuffix <= 0) {
+    return 0;
+  }
+  final int aLen = a.length;
+  final int bLen = b.length;
+  int s = 0;
+  if (maxSuffix >= 16384) {
+    const int step = 8192;
+    while (s + step <= maxSuffix &&
+        b.startsWith(a.substring(aLen - s - step, aLen - s), bLen - s - step)) {
+      s += step;
+    }
+  }
+  int ai = aLen - 1 - s;
+  int bi = bLen - 1 - s;
+  final int maxS8 = maxSuffix - 7;
+  while (s < maxS8) {
+    final int diff =
+        (a.codeUnitAt(ai) ^ b.codeUnitAt(bi)) |
+        (a.codeUnitAt(ai - 1) ^ b.codeUnitAt(bi - 1)) |
+        (a.codeUnitAt(ai - 2) ^ b.codeUnitAt(bi - 2)) |
+        (a.codeUnitAt(ai - 3) ^ b.codeUnitAt(bi - 3)) |
+        (a.codeUnitAt(ai - 4) ^ b.codeUnitAt(bi - 4)) |
+        (a.codeUnitAt(ai - 5) ^ b.codeUnitAt(bi - 5)) |
+        (a.codeUnitAt(ai - 6) ^ b.codeUnitAt(bi - 6)) |
+        (a.codeUnitAt(ai - 7) ^ b.codeUnitAt(bi - 7));
+    if (diff != 0) {
+      break;
+    }
+    s += 8;
+    ai -= 8;
+    bi -= 8;
+  }
+  while (s < maxSuffix && a.codeUnitAt(ai) == b.codeUnitAt(bi)) {
+    s++;
+    ai--;
+    bi--;
+  }
+  return s;
 }
