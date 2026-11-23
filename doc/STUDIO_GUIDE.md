@@ -19,12 +19,12 @@ flowchart LR
 
 | Module | Role |
 | :--- | :--- |
-| `studio/lib/main.dart` | Root `MarkdownStudioApp` coordinating presets, instant Light/Dark `MarkdownThemeData` switching, `MarkdownController` parse telemetry, streaming timer playback, outline sidebar/drawer breakpoints, and status banners/snackbars. |
+| `studio/lib/main.dart` | Root `MarkdownStudioApp` coordinating presets, instant Light/Dark `MarkdownThemeData` switching, cursor-isolated editor text notifications (`_editorTextNotifier`), `MarkdownController` parse telemetry, push-based `StreamingMarkdownController` playback, `readingPlaceNotifier`-isolated outline highlighting, memoized link-policy auditing, `remoteImagesApproved` state, and status banners/snackbars. |
 | `studio/lib/studio_presets.dart` | Defines `StudioPresetId` and `studioPresets`: `CommonMark & GFM Showcase`, `Alerts, Frontmatter & HTML`, `Security & Sanitization`, and `500-Section Virtualization Stress`. |
 | `studio/lib/studio_streaming_pane.dart` | Implements `StudioStreamingPane` with Play, Pause, Step, Finish, and Reset controls, an adjustable chunk interval slider (`20..400 ms`), live `settledBlockCount`, total/active tail block counts, per-chunk and average parse microseconds, and highlighted live buffer view. |
-| `studio/lib/studio_outline_panel.dart` | Implements `StudioOutlinePanel`, subscribing to `MarkdownController` to highlight the active reading section and jump to any heading slug via `controller.scrollToAnchor`. |
-| `studio/lib/studio_builders.dart` | Supplies demo `MarkdownBuilderDelegates` (`mathInlineBuilder`, `mathBlockBuilder`, `diagramBuilder`) and `auditDocumentLinks` / `StudioLinkAudit` for live `MarkdownUrlPolicy` allowed vs. blocked link counts. |
-| `studio/lib/studio_inspector.dart` | Implements `StudioInspectorPane` with `StudioInspectorTab` tabs for an expandable AST and `SourceSpan` tree (`blockId`, node type, 1-based line ranges, UTF-16 offsets, and jump-to-block), `document.toHtml()`, and `document.toPlainText()` with clipboard copy. |
+| `studio/lib/studio_outline_panel.dart` | Implements `StudioOutlinePanel`, listening to `MarkdownController.readingPlaceNotifier` to highlight the active reading section without scroll-frame document rebuilds and jump to any heading slug via `controller.scrollToAnchor`. |
+| `studio/lib/studio_builders.dart` | Supplies demo `MarkdownBuilderDelegates` (`mathInlineBuilder`, `mathBlockBuilder`, `diagramBuilder`, `onLoadRemoteImages`) and memoized `auditDocumentLinks` / `StudioLinkAudit` for live `MarkdownUrlPolicy` allowed vs. blocked link counts. |
+| `studio/lib/studio_inspector.dart` | Implements `StudioInspectorPane` with `StudioInspectorTab` tabs for an expandable AST and `SourceSpan` tree (`blockId`, node type, 1-based line ranges, UTF-16 offsets, and jump-to-block), memoized `document.toHtml()`, and memoized `document.toPlainText()` with clipboard copy. |
 
 ---
 
@@ -32,8 +32,8 @@ flowchart LR
 
 * **Preset Sample Selector**: Switch between `CommonMark & GFM Showcase`, `Alerts, Frontmatter & HTML`, `Security & Sanitization` (enabling `sanitizeHtml: true` and `sanitizeUrls: true`), and `500-Section Virtualization Stress` (exercising lazy `SliverMarkdownDocument` rendering and outline navigation).
 * **Zero-Reparse Theme Toggle**: Toggling Light and Dark mode switches `MarkdownThemeData` instantaneously while displaying the live `Parses: <controller.parseCount>` chip so you can verify zero AST re-parses occur on theme updates.
-* **LLM Streaming Simulator**: Enabling **Streaming Mode** binds `MarkdownView.streaming` to `StreamingMarkdownController` (`MarkdownOptions.extended()`), allowing you to step chunk-by-chunk or stream at `20..400 ms/chunk` while observing `settledBlockCount` grow and per-chunk parse latency stay bounded.
-* **Custom Companion Hooks & Link Policy Audit**: The preview pane renders inline/display math cards via `mathInlineBuilder` / `mathBlockBuilder` and Mermaid diagram cards via `diagramBuilder`, displays live `StudioLinkAudit` allowed/blocked badge counts, and reports link taps through a status banner and `SnackBar`.
+* **LLM Streaming Simulator**: Enabling **Streaming Mode** binds `MarkdownView.streaming` directly to `StreamingMarkdownController` (`MarkdownOptions.extended()`) via pure-Dart push listeners (zero UI polling timers), allowing you to step chunk-by-chunk or stream at `20..400 ms/chunk` while observing `settledBlockCount` grow and per-chunk parse latency stay bounded.
+* **Custom Companion Hooks, Remote Image Consent & Link Policy Audit**: The preview pane renders inline/display math cards via `mathInlineBuilder` / `mathBlockBuilder` and Mermaid diagram cards via `diagramBuilder`, wires `MarkdownImagePolicy.ask` consent cleanly via `remoteImagesApproved` and `onLoadRemoteImages`, displays live memoized `StudioLinkAudit` allowed/blocked badge counts, and reports link taps through a status banner and `SnackBar`.
 * **AST, HTML & Plain-Text Inspector**: Switch `StudioInspectorPane` between the virtualized expandable AST tree (with exact `blockId` and `SourceSpan` line/offset ranges), raw `document.toHtml()` markup, and `document.toPlainText()` output.
 
 ---

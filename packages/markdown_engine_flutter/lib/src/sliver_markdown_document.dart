@@ -9,7 +9,7 @@ import 'theme.dart';
 /// Virtualized sliver rendering top-level blocks of a [MarkdownDocument] on
 /// demand via [SliverChildBuilderDelegate], keyed by
 /// [MarkdownBlockNode.blockId] for state preservation across incremental edits.
-final class SliverMarkdownDocument extends StatelessWidget {
+final class SliverMarkdownDocument extends StatefulWidget {
   /// Creates a [SliverMarkdownDocument].
   const SliverMarkdownDocument({
     super.key,
@@ -19,7 +19,7 @@ final class SliverMarkdownDocument extends StatelessWidget {
     this.controller,
     this.showFrontmatter = true,
     this.padding,
-    this.addAutomaticKeepAlives = false,
+    this.addAutomaticKeepAlives = true,
     this.addRepaintBoundaries = true,
     this.remoteImagesApproved = false,
     this.onRequestLoadRemoteImages,
@@ -31,7 +31,7 @@ final class SliverMarkdownDocument extends StatelessWidget {
   /// Optional theme overriding the ambient [MarkdownTheme].
   final MarkdownThemeData? theme;
 
-  /// Pluggable builders and security delegates for links, math, diagrams, code,
+  /// Pluggable builders and security callbacks for links, math, diagrams, code,
   /// and images.
   final MarkdownBuilderDelegates delegates;
 
@@ -46,7 +46,8 @@ final class SliverMarkdownDocument extends StatelessWidget {
 
   /// Whether off-screen block widgets are kept alive automatically.
   ///
-  /// Defaults to `false` so large documents release off-screen subtrees cleanly.
+  /// Defaults to `true` so `_SelectionKeepAlive` preserves active off-screen
+  /// drag selections cleanly across sliver scrolling.
   final bool addAutomaticKeepAlives;
 
   /// Whether each top-level block is wrapped in a [RepaintBoundary].
@@ -79,31 +80,59 @@ final class SliverMarkdownDocument extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final List<MarkdownBlockNode> blocks = visibleBlocksFor(
-      document,
-      showFrontmatter: showFrontmatter,
+  State<SliverMarkdownDocument> createState() => _SliverMarkdownDocumentState();
+}
+
+final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
+  late List<MarkdownBlockNode> _visibleBlocks;
+  late Map<String, int> _idToIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _rebuildIndexCache();
+  }
+
+  @override
+  void didUpdateWidget(SliverMarkdownDocument oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.document, widget.document) ||
+        oldWidget.showFrontmatter != widget.showFrontmatter) {
+      _rebuildIndexCache();
+    }
+  }
+
+  void _rebuildIndexCache() {
+    _visibleBlocks = SliverMarkdownDocument.visibleBlocksFor(
+      widget.document,
+      showFrontmatter: widget.showFrontmatter,
     );
+    _idToIndex = <String, int>{
+      for (int i = 0; i < _visibleBlocks.length; i++)
+        _visibleBlocks[i].blockId: i,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<MarkdownBlockNode> blocks = _visibleBlocks;
     if (blocks.isEmpty) {
       return const SliverToBoxAdapter(child: SizedBox.shrink());
     }
 
-    final MarkdownThemeData resolvedTheme = theme ?? MarkdownTheme.of(context);
-    final MarkdownUrlPolicy resolvedPolicy = delegates.resolveUrlPolicy(
-      document.options.urlPolicy,
+    final MarkdownThemeData resolvedTheme =
+        widget.theme ?? MarkdownTheme.of(context);
+    final MarkdownUrlPolicy resolvedPolicy = widget.delegates.resolveUrlPolicy(
+      widget.document.options.urlPolicy,
     );
     final MarkdownBlockRenderContext renderContext = MarkdownBlockRenderContext(
       theme: resolvedTheme,
-      delegates: delegates,
+      delegates: widget.delegates,
       urlPolicy: resolvedPolicy,
-      controller: controller,
-      remoteImagesApproved: remoteImagesApproved,
-      onRequestLoadRemoteImages: onRequestLoadRemoteImages,
+      controller: widget.controller,
+      remoteImagesApproved: widget.remoteImagesApproved,
+      onRequestLoadRemoteImages: widget.onRequestLoadRemoteImages,
     );
-
-    final Map<String, int> idToIndex = <String, int>{
-      for (int i = 0; i < blocks.length; i++) blocks[i].blockId: i,
-    };
 
     final Widget sliver = SliverList(
       delegate: SliverChildBuilderDelegate(
@@ -118,18 +147,18 @@ final class SliverMarkdownDocument extends StatelessWidget {
           );
         },
         childCount: blocks.length,
-        addAutomaticKeepAlives: addAutomaticKeepAlives,
-        addRepaintBoundaries: addRepaintBoundaries,
+        addAutomaticKeepAlives: widget.addAutomaticKeepAlives,
+        addRepaintBoundaries: widget.addRepaintBoundaries,
         findChildIndexCallback: (Key key) {
           if (key is ValueKey<String>) {
-            return idToIndex[key.value];
+            return _idToIndex[key.value];
           }
           return null;
         },
       ),
     );
 
-    final EdgeInsetsGeometry? pad = padding;
+    final EdgeInsetsGeometry? pad = widget.padding;
     if (pad != null) {
       return SliverPadding(padding: pad, sliver: sliver);
     }

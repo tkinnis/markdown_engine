@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
 
@@ -148,9 +149,11 @@ MarkdownBuilderDelegates buildStudioDelegates({
   required MarkdownUrlPolicy urlPolicy,
   required MarkdownLinkTapCallback onTapLink,
   required VoidCallback onLoadRemoteImages,
+  bool remoteImagesApproved = false,
 }) {
   return MarkdownBuilderDelegates(
     imagePolicy: MarkdownImagePolicy.ask,
+    remoteImagesApproved: remoteImagesApproved,
     urlPolicy: urlPolicy,
     onTapLink: onTapLink,
     onLoadRemoteImages: onLoadRemoteImages,
@@ -201,11 +204,28 @@ MarkdownBuilderDelegates buildStudioDelegates({
           );
 
           final Widget interactive = linkRecognizer is TapGestureRecognizer
-              ? MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: linkRecognizer.onTap,
-                    child: pill,
+              ? Semantics(
+                  link: true,
+                  child: FocusableActionDetector(
+                    mouseCursor: SystemMouseCursors.click,
+                    shortcuts: const <ShortcutActivator, Intent>{
+                      SingleActivator(LogicalKeyboardKey.enter):
+                          ActivateIntent(),
+                      SingleActivator(LogicalKeyboardKey.space):
+                          ActivateIntent(),
+                    },
+                    actions: <Type, Action<Intent>>{
+                      ActivateIntent: CallbackAction<ActivateIntent>(
+                        onInvoke: (ActivateIntent _) {
+                          linkRecognizer.onTap?.call();
+                          return null;
+                        },
+                      ),
+                    },
+                    child: GestureDetector(
+                      onTap: linkRecognizer.onTap,
+                      child: pill,
+                    ),
                   ),
                 )
               : pill;

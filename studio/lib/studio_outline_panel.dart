@@ -32,12 +32,6 @@ final class StudioOutlinePanel extends StatelessWidget {
       listenable: controller,
       builder: (BuildContext context, Widget? child) {
         final List<MarkdownOutlineItem> outline = controller.outline;
-        final int activeBlockIndex = controller.readingPlace.blockIndex;
-        final List<MarkdownBlockNode> blocks = controller.document.blocks;
-        final int activeLine =
-            activeBlockIndex >= 0 && activeBlockIndex < blocks.length
-            ? blocks[activeBlockIndex].span.startLine
-            : 0;
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -98,102 +92,139 @@ final class StudioOutlinePanel extends StatelessWidget {
               )
             else
               Expanded(
-                child: ListView.builder(
-                  key: const Key('studio-outline-list'),
-                  padding: const EdgeInsets.symmetric(vertical: 6.0),
-                  itemCount: outline.length,
-                  itemBuilder: (BuildContext context, int index) {
-                    final MarkdownOutlineItem item = outline[index];
-                    final bool isActive =
-                        activeLine > 0 && item.line == activeLine;
-                    final double indent = ((item.level - 1).clamp(0, 5)) * 10.0;
+                child: ValueListenableBuilder<MarkdownReadingPlace>(
+                  valueListenable: controller.readingPlaceNotifier,
+                  builder:
+                      (
+                        BuildContext context,
+                        MarkdownReadingPlace place,
+                        Widget? child,
+                      ) {
+                        final List<MarkdownBlockNode> blocks =
+                            controller.document.blocks;
+                        final int activeBlockIndex = place.blockIndex;
+                        final int activeLine =
+                            activeBlockIndex >= 0 &&
+                                activeBlockIndex < blocks.length
+                            ? blocks[activeBlockIndex].span.startLine
+                            : 0;
+                        int activeOutlineIndex = -1;
+                        if (activeLine > 0) {
+                          for (int i = 0; i < outline.length; i++) {
+                            if (outline[i].line <= activeLine) {
+                              activeOutlineIndex = i;
+                            } else {
+                              break;
+                            }
+                          }
+                        }
 
-                    return InkWell(
-                      key: ValueKey<String>('outline-item-${item.slug}-$index'),
-                      onTap: () {
-                        unawaited(controller.scrollToAnchor(item.slug));
-                        onJumpToHeading(item);
-                      },
-                      child: Container(
-                        padding: EdgeInsets.fromLTRB(
-                          10.0 + indent,
-                          6.0,
-                          10.0,
-                          6.0,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isActive
-                              ? scheme.primaryContainer.withValues(alpha: 0.45)
-                              : null,
-                          border: Border(
-                            left: BorderSide(
-                              width: 2.5,
-                              color: isActive
-                                  ? scheme.primary
-                                  : Colors.transparent,
-                            ),
-                          ),
-                        ),
-                        child: Row(
-                          children: <Widget>[
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 4.5,
-                                vertical: 1.0,
+                        return ListView.builder(
+                          key: const Key('studio-outline-list'),
+                          padding: const EdgeInsets.symmetric(vertical: 6.0),
+                          itemCount: outline.length,
+                          itemBuilder: (BuildContext context, int index) {
+                            final MarkdownOutlineItem item = outline[index];
+                            final bool isActive = index == activeOutlineIndex;
+                            final double indent =
+                                ((item.level - 1).clamp(0, 5)) * 10.0;
+
+                            return InkWell(
+                              key: ValueKey<String>(
+                                'outline-item-${item.slug}-$index',
                               ),
-                              decoration: BoxDecoration(
-                                color: scheme.surfaceContainerHighest,
-                                borderRadius: BorderRadius.circular(4.0),
-                              ),
-                              child: Text(
-                                'H${item.level}',
-                                style: TextStyle(
-                                  fontSize: 10.0,
-                                  fontWeight: FontWeight.w700,
-                                  color: scheme.primary,
-                                  fontFamily: 'SF Mono',
-                                  fontFamilyFallback:
-                                      MarkdownThemeData.defaultCodeFontFallback,
+                              onTap: () {
+                                unawaited(controller.scrollToAnchor(item.slug));
+                                onJumpToHeading(item);
+                              },
+                              child: Container(
+                                padding: EdgeInsets.fromLTRB(
+                                  10.0 + indent,
+                                  6.0,
+                                  10.0,
+                                  6.0,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isActive
+                                      ? scheme.primaryContainer.withValues(
+                                          alpha: 0.45,
+                                        )
+                                      : null,
+                                  border: Border(
+                                    left: BorderSide(
+                                      width: 2.5,
+                                      color: isActive
+                                          ? scheme.primary
+                                          : Colors.transparent,
+                                    ),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: <Widget>[
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 4.5,
+                                        vertical: 1.0,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: scheme.surfaceContainerHighest,
+                                        borderRadius: BorderRadius.circular(
+                                          4.0,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        'H${item.level}',
+                                        style: TextStyle(
+                                          fontSize: 10.0,
+                                          fontWeight: FontWeight.w700,
+                                          color: scheme.primary,
+                                          fontFamily: 'SF Mono',
+                                          fontFamilyFallback: MarkdownThemeData
+                                              .defaultCodeFontFallback,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6.0),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: <Widget>[
+                                          Text(
+                                            item.text,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontSize: 12.5,
+                                              fontWeight: item.level <= 2
+                                                  ? FontWeight.w600
+                                                  : FontWeight.w400,
+                                              color: scheme.onSurface,
+                                            ),
+                                          ),
+                                          Text(
+                                            '#${item.slug} · L${item.line}',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontSize: 10.5,
+                                              color: scheme.onSurfaceVariant,
+                                              fontFamily: 'SF Mono',
+                                              fontFamilyFallback:
+                                                  MarkdownThemeData
+                                                      .defaultCodeFontFallback,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 6.0),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: <Widget>[
-                                  Text(
-                                    item.text,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 12.5,
-                                      fontWeight: item.level <= 2
-                                          ? FontWeight.w600
-                                          : FontWeight.w400,
-                                      color: scheme.onSurface,
-                                    ),
-                                  ),
-                                  Text(
-                                    '#${item.slug} · L${item.line}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 10.5,
-                                      color: scheme.onSurfaceVariant,
-                                      fontFamily: 'SF Mono',
-                                      fontFamilyFallback: MarkdownThemeData
-                                          .defaultCodeFontFallback,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
+                            );
+                          },
+                        );
+                      },
                 ),
               ),
           ],

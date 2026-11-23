@@ -32,6 +32,7 @@ final class MarkdownEngine {
         source: source,
         options: effective,
         blocks: const <MarkdownBlockNode>[],
+        normalizedSource: '',
         html: '',
       );
     }
@@ -48,6 +49,8 @@ final class MarkdownEngine {
       footnotes: phase2.footnotes,
       remoteImageAddresses: phase2.remoteImageAddresses,
       linkDefinitions: phase1.linkDefinitions,
+      abbreviations: phase1.abbreviations,
+      normalizedSource: phase1.normalizedSource,
     );
   }
 

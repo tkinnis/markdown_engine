@@ -1,0 +1,823 @@
+import 'dart:convert';
+import 'dart:io';
+
+/// Parsed CommonMark or GFM specification fixture case.
+final class SpecFixtureCase {
+  /// Creates a specification fixture case.
+  const SpecFixtureCase({
+    required this.suite,
+    required this.exampleNumber,
+    required this.section,
+    required this.markdown,
+    required this.expectedHtml,
+    this.tag = '',
+    this.ignored = false,
+    this.disabled = false,
+  });
+
+  /// Suite identifier (`commonmark`, `gfm_spec`, or `gfm_extensions`).
+  final String suite;
+
+  /// 1-based example number within the suite.
+  final int exampleNumber;
+
+  /// Specification section title.
+  final String section;
+
+  /// Raw Markdown input fixture.
+  final String markdown;
+
+  /// Expected HTML output from the specification.
+  final String expectedHtml;
+
+  /// Optional cmark-gfm extension tag (`table`, `autolink`, etc.).
+  final String tag;
+
+  /// Whether expected output is `<IGNORE>` (crash-regression fixture).
+  final bool ignored;
+
+  /// Whether the upstream example is marked `disabled`.
+  final bool disabled;
+}
+
+/// Large 5,000-line fixture paired with a single mid-document paragraph edit.
+final class LargeEditFixture {
+  /// Creates a [LargeEditFixture].
+  const LargeEditFixture({
+    required this.baseSource,
+    required this.editedSource,
+    required this.editStartOffset,
+    required this.editOldEndOffset,
+    required this.editNewEndOffset,
+    required this.editedLineNumber,
+    required this.lineCount,
+  });
+
+  /// Original ~5,000-line document text.
+  final String baseSource;
+
+  /// Modified document text with a single mid-document paragraph updated.
+  final String editedSource;
+
+  /// UTF-16 start offset of the edited paragraph.
+  final int editStartOffset;
+
+  /// UTF-16 end offset of the edited paragraph in [baseSource].
+  final int editOldEndOffset;
+
+  /// UTF-16 end offset of the edited paragraph in [editedSource].
+  final int editNewEndOffset;
+
+  /// 1-based line number where the edit starts.
+  final int editedLineNumber;
+
+  /// Total line count of [baseSource].
+  final int lineCount;
+}
+
+/// Chunked streaming Markdown fixture.
+final class StreamingPayloadFixture {
+  /// Creates a [StreamingPayloadFixture].
+  const StreamingPayloadFixture({
+    required this.fullSource,
+    required this.chunks,
+  });
+
+  /// Complete concatenated Markdown source.
+  final String fullSource;
+
+  /// Ordered token/chunk slices summing to [fullSource].
+  final List<String> chunks;
+}
+
+/// Statistical summary of repeated latency measurements.
+final class LatencyStats {
+  /// Creates a [LatencyStats] measurement summary.
+  const LatencyStats({
+    required this.label,
+    required this.payloadBytes,
+    required this.samples,
+    required this.batchIterations,
+    required this.unitDivisor,
+    required this.meanUs,
+    required this.medianUs,
+    required this.p95Us,
+    required this.minUs,
+    required this.maxUs,
+    required this.throughputMbPerSec,
+  });
+
+  /// Descriptive label for the measured operation.
+  final String label;
+
+  /// UTF-8 byte size of the primary payload.
+  final int payloadBytes;
+
+  /// Number of timed sample windows.
+  final int samples;
+
+  /// Iterations executed per timed sample window.
+  final int batchIterations;
+
+  /// Sub-units per iteration (e.g. chunk count for streaming averages).
+  final int unitDivisor;
+
+  /// Arithmetic mean latency in microseconds.
+  final double meanUs;
+
+  /// Median (p50) latency in microseconds.
+  final double medianUs;
+
+  /// 95th percentile latency in microseconds.
+  final double p95Us;
+
+  /// Minimum observed latency in microseconds.
+  final double minUs;
+
+  /// Maximum observed latency in microseconds.
+  final double maxUs;
+
+  /// Throughput in MiB/s computed from median latency.
+  final double throughputMbPerSec;
+
+  /// Serializes this measurement summary to a JSON-compatible map.
+  Map<String, Object?> toJson() => <String, Object?>{
+    'label': label,
+    'payloadBytes': payloadBytes,
+    'samples': samples,
+    'batchIterations': batchIterations,
+    'unitDivisor': unitDivisor,
+    'meanUs': meanUs,
+    'medianUs': medianUs,
+    'p95Us': p95Us,
+    'minUs': minUs,
+    'maxUs': maxUs,
+    'throughputMbPerSec': throughputMbPerSec,
+  };
+}
+
+/// Host hardware and Dart runtime metadata.
+final class HostEnvironmentInfo {
+  /// Creates a [HostEnvironmentInfo].
+  const HostEnvironmentInfo({
+    required this.cpuBrand,
+    required this.arch,
+    required this.os,
+    required this.osVersion,
+    required this.cores,
+    required this.memory,
+    required this.dartVersion,
+  });
+
+  /// CPU brand string.
+  final String cpuBrand;
+
+  /// CPU architecture (e.g. `arm64`, `x86_64`).
+  final String arch;
+
+  /// Operating system identifier.
+  final String os;
+
+  /// Operating system version string.
+  final String osVersion;
+
+  /// Logical processor count.
+  final int cores;
+
+  /// Physical memory summary.
+  final String memory;
+
+  /// Dart SDK version string.
+  final String dartVersion;
+
+  /// Serializes host info to a JSON-compatible map.
+  Map<String, Object?> toJson() => <String, Object?>{
+    'cpuBrand': cpuBrand,
+    'arch': arch,
+    'os': os,
+    'osVersion': osVersion,
+    'cores': cores,
+    'memory': memory,
+    'dartVersion': dartVersion,
+  };
+}
+
+/// Builds the ~1 KB technical Markdown snippet used across parser benchmarks.
+String buildSmallDocument() {
+  return '''# Cache Eviction Policy
+
+The **bounded LRU cache** stores parsed `MarkdownDocument` instances keyed by source text and `MarkdownOptions`. Entries with ~~expired TTL~~ stale signatures are evicted in *O(1)* time via a linked hash map; see the [architecture overview](https://example.com/docs/cache) for details.
+
+```dart
+final MarkdownEngine engine = const MarkdownEngine(
+  defaultOptions: MarkdownOptions.gfm(),
+);
+final MarkdownDocument doc = engine.parse(source);
+final String html = doc.toHtml();
+```
+
+- [x] Deterministic UTF-16 `SourceSpan` tracking across all AST nodes
+- [x] URL allowlist filtering for `javascript:` and `vbscript:` links
+- [x] Bounded table column, row, and container nesting budgets
+- [ ] Optional telemetry hook for custom slab allocators
+
+> Keeping parsing and rendering strictly pure-Dart avoids WebView cold-start latency and guarantees identical HTML output across CLI, server, mobile, and desktop builds.
+''';
+}
+
+/// Builds the ~25 KB multi-section README document used across parser benchmarks.
+String buildMediumDocument() {
+  final StringBuffer out = StringBuffer()
+    ..writeln('# Platform SDK Reference Manual')
+    ..writeln()
+    ..writeln(
+      'A deterministic, pure-Dart **CommonMark 0.31.2** and **GitHub Flavored Markdown** '
+      'pipeline designed for *high-throughput* document rendering, live editors, and '
+      'streaming feeds without WebView overhead. Explore the '
+      '[API docs](https://example.com/api), inspect https://example.com/status, '
+      'or review ~~legacy DOM hooks~~ modern sliver rendering.',
+    )
+    ..writeln();
+
+  for (int section = 1; section <= 19; section++) {
+    out
+      ..writeln('## $section. Subsystem Module $section')
+      ..writeln()
+      ..writeln(
+        'Module **$section** validates incoming payloads against `MarkdownBudgets` '
+        'and produces immutable `MarkdownBlockNode` trees. Every heading, list item, '
+        'and table cell preserves its *1-based line span* and sanitizes unsafe URIs '
+        'such as [safe docs](https://example.com/modules/$section "Module $section Docs") '
+        'while keeping `inline_code_$section()` crisp.',
+      )
+      ..writeln()
+      ..writeln('| Option | Default | Type | Behavior |')
+      ..writeln('| :--- | :---: | :--- | ---: |')
+      ..writeln(
+        '| `gfmTables` | `true` | `bool` | Parses aligned pipe tables in section $section |',
+      )
+      ..writeln(
+        '| `gfmStrikethrough` | `true` | `bool` | Resolves ~~deleted spans~~ into `<del>` |',
+      )
+      ..writeln(
+        '| `sanitizeUrls` | `true` | `bool` | Enforces `MarkdownUrlPolicy` on links & images |',
+      )
+      ..writeln(
+        '| `maxNestingDepth` | `64` | `int` | Caps nested blockquotes and emphasis runs |',
+      )
+      ..writeln()
+      ..writeln('```dart')
+      ..writeln('void runModule$section(MarkdownEngine engine, String input) {')
+      ..writeln(
+        '  final MarkdownDocument doc = engine.parse(input, options: const MarkdownOptions.gfm());',
+      )
+      ..writeln('  final String html = doc.toHtml();')
+      ..writeln('  assert(html.isNotEmpty);')
+      ..writeln('}')
+      ..writeln('```')
+      ..writeln()
+      ..writeln(
+        '- [x] Verified CommonMark phase-1 container closure ($section)',
+      )
+      ..writeln(
+        '- [x] Verified phase-2 delimiter stack resolution with **nested *emphasis***',
+      )
+      ..writeln(
+        '- [ ] Benchmark custom theme tokens for dark/light contrast ($section)',
+      )
+      ..writeln()
+      ..writeln(
+        '> Subsystem $section runs synchronously in memory with zero filesystem I/O and '
+        'deterministic output across Dart VM and native AOT binaries.',
+      )
+      ..writeln();
+  }
+
+  return out.toString();
+}
+
+/// Builds the ~5,000-line (~173 KB) document fixture with a 1-paragraph edit.
+LargeEditFixture buildLargeDocumentFixture() {
+  const int totalSections = 208;
+  const int targetSection = 104;
+
+  final StringBuffer base = StringBuffer()
+    ..writeln('# Enterprise Architecture & Specification Corpus')
+    ..writeln()
+    ..writeln(
+      'This synthetic **5,000-line** technical manual exercises full-document parsing '
+      'and mid-document incremental edits with isolated blank-line block boundaries.',
+    )
+    ..writeln();
+
+  final StringBuffer edited = StringBuffer()..write(base.toString());
+  int editStartOffset = 0;
+  int editOldEndOffset = 0;
+  int editNewEndOffset = 0;
+  int editedLineNumber = 0;
+
+  for (int i = 1; i <= totalSections; i++) {
+    final String heading = '## Section $i: Pipeline Stage & Storage\n\n';
+    final String introParagraph =
+        'Section **$i** explains how containers close across blank lines so '
+        '`IncrementalMarkdownParser` reuses untouched prefix and suffix blocks. '
+        'See [stage $i](https://example.com/s/$i) for span offsets.\n\n';
+
+    final String editableOriginal =
+        'Invariant $i states every `ParagraphNode` keeps a stable `blockId` '
+        'and *monotonic* UTF-16 `SourceSpan` offsets across edits.\n\n';
+    final String editableModified =
+        'Invariant $i confirms every `ParagraphNode` keeps a stable `blockId`, '
+        '*monotonic* UTF-16 `SourceSpan` offsets, and exact HTML parity across edits.\n\n';
+
+    final String table =
+        '| Metric | Stage $i | Budget |\n'
+        '| :--- | :---: | ---: |\n'
+        '| `tokens` | `${i * 12}` | `500000` |\n'
+        '| `blocks` | `${i * 5}` | `50000` |\n'
+        '| `depth` | `${(i % 6) + 1}` | `64` |\n\n';
+
+    final String list =
+        '- Normalize line endings for stage $i\n'
+        '- Apply `MarkdownUrlPolicy` on external links\n'
+        '- Escape entities inside `<pre><code>` blocks\n'
+        '- Preserve ~~legacy~~ compatibility options\n\n';
+
+    final String code =
+        '```dart\n'
+        'final int sum$i = ${i * 31} ^ 0x5A5A;\n'
+        'final String id$i = \'stage-$i\';\n'
+        '```\n\n';
+
+    final String quote =
+        '> Note $i: Pure-Dart execution keeps frame times predictable.\n\n';
+
+    base.write(heading);
+    edited.write(heading);
+
+    base.write(introParagraph);
+    edited.write(introParagraph);
+
+    if (i == targetSection) {
+      editStartOffset = base.length;
+      editedLineNumber = countLines(base.toString());
+      base.write(editableOriginal);
+      edited.write(editableModified);
+      // Exclude the trailing `\n\n` separator so the dirty range stays within
+      // the edited paragraph and preserves all suffix blocks.
+      editOldEndOffset = base.length - 2;
+      editNewEndOffset = edited.length - 2;
+    } else {
+      base.write(editableOriginal);
+      edited.write(editableOriginal);
+    }
+
+    base
+      ..write(table)
+      ..write(list)
+      ..write(code)
+      ..write(quote);
+    edited
+      ..write(table)
+      ..write(list)
+      ..write(code)
+      ..write(quote);
+  }
+
+  final String baseSource = base.toString();
+  final String editedSource = edited.toString();
+  return LargeEditFixture(
+    baseSource: baseSource,
+    editedSource: editedSource,
+    editStartOffset: editStartOffset,
+    editOldEndOffset: editOldEndOffset,
+    editNewEndOffset: editNewEndOffset,
+    editedLineNumber: editedLineNumber,
+    lineCount: countLines(baseSource),
+  );
+}
+
+/// Builds a streaming Markdown payload split into [chunkCount] UTF-16 slices.
+StreamingPayloadFixture buildStreamingFixture({int chunkCount = 50}) {
+  const String full = '''# Streaming Response Walkthrough
+
+When rendering token-by-token responses from an **HTTP SSE stream**, re-parsing the entire transcript from scratch on every token scales quadratically as the answer grows.
+
+## 1. Settled Prefix Freezing
+
+`StreamingMarkdownController` keeps a frozen list of completed top-level blocks (`settledBlocks`) separated by blank-line boundaries. Only the active trailing block slice is re-parsed on each incoming chunk.
+
+- Completed headings and paragraphs never re-run inline resolution.
+- Stable `blockId` values let Flutter `CustomScrollView` slivers preserve selection and scroll offsets.
+- Calling `finish()` reconciles the buffer for exact parity with `MarkdownEngine.parse`.
+
+## 2. Example Streaming Loop
+
+```dart
+final StreamingMarkdownController controller = StreamingMarkdownController(
+  options: const MarkdownOptions.gfm(),
+);
+
+for (final String chunk in tokenStream) {
+  final MarkdownDocument snapshot = controller.append(chunk);
+  renderBlocks(snapshot.blocks);
+}
+
+final MarkdownDocument finalDoc = controller.finish();
+```
+
+## 3. Observed Properties
+
+| Phase | Scope | Allocation Profile |
+| :--- | :--- | :--- |
+| Settled prefix | Frozen `MarkdownBlockNode` list | Zero re-parse per chunk |
+| Active tail | Unsettled trailing blocks only | Bounded by tail block size |
+| Finalization | Full parity reconciliation | Single pass at stream end |
+
+> Because settled prefix blocks stay immutable across `append()` calls, tail latency remains bounded even as long technical explanations accumulate multiple code blocks, lists, and GFM tables.
+
+## 4. Security During Streaming
+
+Even partial chunks enforce `MarkdownUrlPolicy`, GFM `tagfilter`, and `MarkdownBudgets` so untrusted model outputs cannot inject `javascript:` links or exceed nesting caps mid-stream.
+
+- [x] Reject unsafe URL schemes incrementally
+- [x] Escape disallowed raw HTML tags (`<script>`, `<iframe>`, `<style>`)
+- [x] Bound input length and container nesting depth
+
+## 5. Summary
+
+Pairing `StreamingMarkdownController` with sliver-based widgets yields smooth 60/120 fps scrolling across long streaming replies without embedding a browser engine.
+''';
+
+  return StreamingPayloadFixture(
+    fullSource: full,
+    chunks: splitIntoChunks(full, chunkCount),
+  );
+}
+
+/// Builds a ~400-block rich Markdown document for headless widget benchmarks.
+String buildWidget400BlockDocument() {
+  const int sections = 67;
+  final StringBuffer out = StringBuffer()
+    ..writeln('# Widget Rendering Benchmark (400+ Blocks)')
+    ..writeln();
+
+  for (int i = 1; i <= sections; i++) {
+    out
+      ..writeln('## Section $i: Layout & Virtualization')
+      ..writeln()
+      ..writeln(
+        'Section **$i** mixes *inline formatting*, `codeSpan($i)`, and '
+        '[reference link $i](https://example.com/item/$i) across bounded slabs.',
+      )
+      ..writeln()
+      ..writeln('- Bullet A for section $i')
+      ..writeln('- Bullet B with **emphasis** for section $i')
+      ..writeln()
+      ..writeln('| Key | Value | Status |')
+      ..writeln('| :--- | :---: | ---: |')
+      ..writeln('| `id` | `$i` | `ok` |')
+      ..writeln()
+      ..writeln('```dart')
+      ..writeln('final int section$i = $i * 2;')
+      ..writeln('```')
+      ..writeln()
+      ..writeln('> Callout $i: Slivers paint only viewport-visible blocks.')
+      ..writeln();
+  }
+
+  return out.toString();
+}
+
+/// Splits [source] deterministically into [chunkCount] non-empty substrings.
+List<String> splitIntoChunks(String source, int chunkCount) {
+  final int totalLen = source.length;
+  final List<String> chunks = <String>[];
+  for (int i = 0; i < chunkCount; i++) {
+    final int start = (i * totalLen) ~/ chunkCount;
+    final int end = ((i + 1) * totalLen) ~/ chunkCount;
+    if (end > start) {
+      chunks.add(source.substring(start, end));
+    }
+  }
+  return chunks;
+}
+
+/// Builds an adversarial string with [count] unmatched `<` tag prefixes.
+String buildAdversarialUnmatchedLt(int count) => '<a ' * count;
+
+/// Builds an adversarial string with [count] unmatched `*` emphasis delimiters.
+String buildAdversarialUnmatchedStar(int count) => '*a ' * count;
+
+/// Builds an adversarial string with [count] unmatched `$` math delimiters.
+String buildAdversarialUnmatchedDollar(int count) => r'$a ' * count;
+
+/// Builds a ~10 KB deeply nested emphasis string (`*a *a ... core a* a*`).
+String buildAdversarialNestedEmphasis10Kb() {
+  const int pairs = 1706; // 1706 * 6 + 4 = 10,240 UTF-16 code units (10 KiB).
+  return '${'*a ' * pairs}core${' a*' * pairs}';
+}
+
+/// Locates the `corpus/spec/` directory relative to the current working
+/// directory or an explicit override path.
+String resolveCorpusSpecDir({String? overrideDir}) {
+  final List<String> candidates = <String>[
+    if (overrideDir != null && overrideDir.isNotEmpty) overrideDir,
+    'corpus/spec',
+    '../corpus/spec',
+    '../../corpus/spec',
+    '../../../corpus/spec',
+  ];
+  for (final String candidate in candidates) {
+    final File marker = File('$candidate/commonmark_0.31.2.json');
+    if (marker.existsSync()) {
+      return candidate;
+    }
+  }
+  throw StateError(
+    'Unable to locate corpus/spec/commonmark_0.31.2.json from '
+    '${Directory.current.path}. Pass --corpus-dir=<path> if running elsewhere.',
+  );
+}
+
+/// Loads all CommonMark `0.31.2` JSON examples from [specDir].
+List<SpecFixtureCase> loadCommonMarkSpecCases(String specDir) {
+  final File file = File('$specDir/commonmark_0.31.2.json');
+  final List<Object?> rawList =
+      jsonDecode(file.readAsStringSync()) as List<Object?>;
+  final List<SpecFixtureCase> cases = <SpecFixtureCase>[];
+  for (final Object? item in rawList) {
+    final Map<String, Object?> map = item as Map<String, Object?>;
+    cases.add(
+      SpecFixtureCase(
+        suite: 'commonmark',
+        exampleNumber: map['example'] as int,
+        section: map['section'] as String,
+        markdown: map['markdown'] as String,
+        expectedHtml: map['html'] as String,
+      ),
+    );
+  }
+  return cases;
+}
+
+/// Loads cmark-gfm `.txt` examples (`gfm_0.29.0_spec.txt` or
+/// `gfm_0.29.0_extensions.txt`) from [filePath].
+List<SpecFixtureCase> loadCmarkTxtSpecCases(
+  String filePath, {
+  required String suite,
+}) {
+  final List<String> lines = File(filePath).readAsLinesSync();
+  final List<SpecFixtureCase> cases = <SpecFixtureCase>[];
+  final RegExp fenceOpen = RegExp(r'^`{32} example(?:\s+(.*))?$');
+  final RegExp fenceClose = RegExp(r'^`{32}$');
+  final RegExp headingPattern = RegExp(r'^#{1,6}\s+(.+)$');
+
+  String currentSection = 'General';
+  int exampleNumber = 0;
+
+  for (int i = 0; i < lines.length; i++) {
+    final String line = lines[i];
+    final RegExpMatch? fenceMatch = fenceOpen.firstMatch(line);
+    if (fenceMatch != null) {
+      exampleNumber++;
+      final String tag = (fenceMatch.group(1) ?? '').trim();
+      final List<String> mdLines = <String>[];
+      final List<String> htmlLines = <String>[];
+
+      i++;
+      while (i < lines.length && lines[i] != '.') {
+        mdLines.add(lines[i].replaceAll('\u2192', '\t'));
+        i++;
+      }
+      if (i >= lines.length || lines[i] != '.') {
+        throw FormatException(
+          'Missing "." separator in $filePath at line ${i + 1}',
+        );
+      }
+
+      i++;
+      while (i < lines.length && !fenceClose.hasMatch(lines[i])) {
+        htmlLines.add(lines[i].replaceAll('\u2192', '\t'));
+        i++;
+      }
+      if (i >= lines.length) {
+        throw FormatException('Unclosed example block in $filePath at line $i');
+      }
+
+      final String markdown = '${mdLines.join('\n')}\n';
+      final String rawHtml = htmlLines.join('\n');
+      final bool isIgnored = rawHtml.trim() == '<IGNORE>';
+      final String expectedHtml = htmlLines.isEmpty ? '' : '$rawHtml\n';
+
+      cases.add(
+        SpecFixtureCase(
+          suite: suite,
+          exampleNumber: exampleNumber,
+          section: currentSection,
+          markdown: markdown,
+          expectedHtml: expectedHtml,
+          tag: tag,
+          ignored: isIgnored,
+          disabled: tag == 'disabled',
+        ),
+      );
+      continue;
+    }
+
+    final RegExpMatch? headingMatch = headingPattern.firstMatch(line);
+    if (headingMatch != null) {
+      currentSection = headingMatch.group(1)!.trim();
+    }
+  }
+
+  return cases;
+}
+
+/// Benchmarks [operation] with warmup and repeated multi-iteration samples.
+LatencyStats measureLatency({
+  required String label,
+  required int payloadBytes,
+  required int warmupSamples,
+  required int samples,
+  required int batchIterations,
+  required void Function() operation,
+  int unitDivisor = 1,
+  double? throughputBytesPerUnit,
+}) {
+  for (int w = 0; w < warmupSamples; w++) {
+    for (int i = 0; i < batchIterations; i++) {
+      operation();
+    }
+  }
+
+  final Stopwatch sw = Stopwatch();
+  final List<double> perUnitUs = <double>[];
+
+  for (int s = 0; s < samples; s++) {
+    sw
+      ..reset()
+      ..start();
+    for (int i = 0; i < batchIterations; i++) {
+      operation();
+    }
+    sw.stop();
+    perUnitUs.add(sw.elapsedMicroseconds / (batchIterations * unitDivisor));
+  }
+
+  perUnitUs.sort();
+  final double meanUs =
+      perUnitUs.reduce((double a, double b) => a + b) / perUnitUs.length;
+  final double medianUs = _percentile(perUnitUs, 0.50);
+  final double p95Us = _percentile(perUnitUs, 0.95);
+  final double minUs = perUnitUs.first;
+  final double maxUs = perUnitUs.last;
+
+  final double effectiveBytes =
+      throughputBytesPerUnit ?? payloadBytes.toDouble();
+  final double throughputMbPerSec = medianUs > 0
+      ? (effectiveBytes / (1024.0 * 1024.0)) / (medianUs / 1000000.0)
+      : 0.0;
+
+  return LatencyStats(
+    label: label,
+    payloadBytes: payloadBytes,
+    samples: samples,
+    batchIterations: batchIterations,
+    unitDivisor: unitDivisor,
+    meanUs: _round2(meanUs),
+    medianUs: _round2(medianUs),
+    p95Us: _round2(p95Us),
+    minUs: _round2(minUs),
+    maxUs: _round2(maxUs),
+    throughputMbPerSec: _round2(throughputMbPerSec),
+  );
+}
+
+/// Collects host hardware and Dart version details for benchmark reports.
+HostEnvironmentInfo collectHostEnvironmentInfo() {
+  String cpuBrand = '${Platform.operatingSystem} CPU';
+  String arch = 'unknown';
+  String memorySummary = 'unknown';
+
+  try {
+    final ProcessResult unameResult = Process.runSync('uname', <String>['-m']);
+    if (unameResult.exitCode == 0) {
+      arch = (unameResult.stdout as String).trim();
+    }
+  } on ProcessException {
+    arch = 'unknown';
+  }
+
+  if (Platform.isMacOS) {
+    try {
+      final ProcessResult cpuRes = Process.runSync('sysctl', <String>[
+        '-n',
+        'machdep.cpu.brand_string',
+      ]);
+      if (cpuRes.exitCode == 0 && (cpuRes.stdout as String).trim().isNotEmpty) {
+        cpuBrand = (cpuRes.stdout as String).trim();
+      }
+      final ProcessResult memRes = Process.runSync('sysctl', <String>[
+        '-n',
+        'hw.memsize',
+      ]);
+      if (memRes.exitCode == 0) {
+        final int? bytes = int.tryParse((memRes.stdout as String).trim());
+        if (bytes != null && bytes > 0) {
+          final double gib = bytes / (1024 * 1024 * 1024);
+          memorySummary = '${gib.toStringAsFixed(0)} GiB';
+        }
+      }
+    } on ProcessException {
+      // Retain default metadata when sysctl is unavailable.
+    }
+  } else if (Platform.isLinux) {
+    final File cpuInfo = File('/proc/cpuinfo');
+    if (cpuInfo.existsSync()) {
+      for (final String line in cpuInfo.readAsLinesSync()) {
+        if (line.startsWith('model name')) {
+          final int colon = line.indexOf(':');
+          if (colon != -1) {
+            cpuBrand = line.substring(colon + 1).trim();
+            break;
+          }
+        }
+      }
+    }
+    final File memInfo = File('/proc/meminfo');
+    if (memInfo.existsSync()) {
+      for (final String line in memInfo.readAsLinesSync()) {
+        if (line.startsWith('MemTotal:')) {
+          final RegExpMatch? m = RegExp(r'(\d+)').firstMatch(line);
+          if (m != null) {
+            final int kib = int.parse(m.group(1)!);
+            final double gib = kib / (1024 * 1024);
+            memorySummary = '${gib.toStringAsFixed(0)} GiB';
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  final String dartVersion = Platform.version.split(' ').first;
+  return HostEnvironmentInfo(
+    cpuBrand: cpuBrand,
+    arch: arch,
+    os: Platform.operatingSystem,
+    osVersion: Platform.operatingSystemVersion.trim(),
+    cores: Platform.numberOfProcessors,
+    memory: memorySummary,
+    dartVersion: dartVersion,
+  );
+}
+
+/// Counts lines in [text].
+int countLines(String text) {
+  if (text.isEmpty) {
+    return 0;
+  }
+  int count = 0;
+  for (int i = 0; i < text.length; i++) {
+    if (text.codeUnitAt(i) == 0x0A) {
+      count++;
+    }
+  }
+  return text.endsWith('\n') ? count : count + 1;
+}
+
+/// Formats microseconds into readable `us` or `ms` units.
+String formatMicroseconds(double us) {
+  if (us >= 1000.0) {
+    return '${(us / 1000.0).toStringAsFixed(3)} ms';
+  }
+  return '${us.toStringAsFixed(2)} us';
+}
+
+/// Formats byte counts as `B` or `KB`.
+String formatBytes(int bytes) {
+  if (bytes >= 1024) {
+    return '${(bytes / 1024.0).toStringAsFixed(1)} KB';
+  }
+  return '$bytes B';
+}
+
+double _percentile(List<double> sorted, double p) {
+  if (sorted.isEmpty) {
+    return 0.0;
+  }
+  if (sorted.length == 1) {
+    return sorted.first;
+  }
+  final double index = p * (sorted.length - 1);
+  final int lower = index.floor();
+  final int upper = index.ceil();
+  if (lower == upper) {
+    return sorted[lower];
+  }
+  final double fraction = index - lower;
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * fraction;
+}
+
+double _round2(double value) => (value * 100.0).roundToDouble() / 100.0;

@@ -1,9 +1,12 @@
+import 'dart:typed_data';
+
 import 'ast.dart';
 import 'block_parser.dart';
 import 'budgets.dart';
 import 'emoji.dart';
 import 'entities.dart';
 import 'options.dart';
+import 'security.dart';
 import 'slugs.dart';
 import 'unicode.dart';
 import 'url_utils.dart';
@@ -35,15 +38,63 @@ final class Phase2Result {
 
 /// Resolves inline syntax, links, images, emphasis, autolinks, math, footnotes,
 /// slugs, and extensions across a Phase 1 block tree.
-Phase2Result parseInlines(Phase1Result phase1, MarkdownOptions options) {
+Phase2Result parseInlines(
+  Phase1Result phase1,
+  MarkdownOptions options, {
+  HeadingSlugGenerator? slugGenerator,
+}) {
   final _InlineResolver resolver = _InlineResolver(
     options: options,
     budgets: options.effectiveBudgets,
     linkDefinitions: phase1.linkDefinitions,
     rawFootnotes: phase1.footnoteDefinitions,
     abbreviations: phase1.abbreviations,
+    idPrefix: phase1.idPrefix,
+    slugs: slugGenerator ?? HeadingSlugGenerator(),
   );
   return resolver.resolveDocument(phase1.blocks);
+}
+
+const int _maxAbbrPatternKeys = 512;
+
+final Uint8List _postCharFlags = _buildPostCharFlags();
+
+Uint8List _buildPostCharFlags() {
+  final Uint8List flags = Uint8List(128);
+  flags[0x3A] = 1; // ':' (emoji or ://)
+  flags[0x40] = 2; // '@' (email autolink)
+  flags[0x2E] = 4; // '.' (www. or ...)
+  flags[0x22] = 8; // '"' (smart quote)
+  flags[0x27] = 8; // '\'' (smart quote)
+  flags[0x2D] = 16; // '-' (-- / ---)
+  return flags;
+}
+
+Uint8List _buildStructuralLut(MarkdownOptions options) {
+  final Uint8List lut = Uint8List(128);
+  lut[0x0A] = 1; // '\n'
+  lut[0x5C] = 1; // '\\'
+  lut[0x60] = 1; // '`'
+  lut[0x26] = 1; // '&'
+  lut[0x3C] = 1; // '<'
+  lut[0x5B] = 1; // '['
+  lut[0x5D] = 1; // ']'
+  lut[0x21] = 1; // '!'
+  lut[0x2A] = 1; // '*'
+  lut[0x5F] = 1; // '_'
+  if (options.gfmStrikethrough || options.subscript) {
+    lut[0x7E] = 1; // '~'
+  }
+  if (options.highlight) {
+    lut[0x3D] = 1; // '='
+  }
+  if (options.superscript) {
+    lut[0x5E] = 1; // '^'
+  }
+  if (options.math) {
+    lut[0x24] = 1; // '$'
+  }
+  return lut;
 }
 
 final class _InlineResolver {
@@ -53,15 +104,23 @@ final class _InlineResolver {
     required this.linkDefinitions,
     required this.rawFootnotes,
     required this.abbreviations,
-  });
+    required this.idPrefix,
+    required HeadingSlugGenerator slugs,
+  }) : _slugs = slugs,
+       structuralLut = _buildStructuralLut(options) {
+    _scanner = _InlineScanner(resolver: this);
+  }
 
   final MarkdownOptions options;
   final MarkdownBudgets budgets;
   final Map<String, MarkdownLinkDefinition> linkDefinitions;
   final Map<String, RawFootnoteDef> rawFootnotes;
   final Map<String, String> abbreviations;
+  final String idPrefix;
+  final Uint8List structuralLut;
+  late final _InlineScanner _scanner;
 
-  final HeadingSlugGenerator _slugs = HeadingSlugGenerator();
+  final HeadingSlugGenerator _slugs;
   final List<MarkdownOutlineItem> _outline = <MarkdownOutlineItem>[];
   final List<String> _remoteImages = <String>[];
   final Set<String> _remoteImageSet = <String>{};
@@ -74,6 +133,39 @@ final class _InlineResolver {
       <String, FootnoteDefinitionNode>{};
 
   int _synthCounter = 0;
+  int _totalTokens = 0;
+  int _expandedOutputBytes = 0;
+  RegExp? _cachedAbbrPattern;
+
+  RegExp? get abbrPattern {
+    if (_cachedAbbrPattern != null) {
+      return _cachedAbbrPattern;
+    }
+    if (abbreviations.isEmpty) {
+      return null;
+    }
+    final List<String> keys =
+        abbreviations.keys.take(_maxAbbrPatternKeys).toList()
+          ..sort((String a, String b) => b.length.compareTo(a.length));
+    if (keys.isEmpty) {
+      return null;
+    }
+    _cachedAbbrPattern = RegExp(
+      '(?<!\\w)(${keys.map(RegExp.escape).join('|')})(?!\\w)',
+    );
+    return _cachedAbbrPattern;
+  }
+
+  bool tryConsumeExpandedBytes(int bytes) {
+    if (bytes <= 0) {
+      return true;
+    }
+    if (_expandedOutputBytes + bytes > budgets.maxOutputBytes) {
+      return false;
+    }
+    _expandedOutputBytes += bytes;
+    return true;
+  }
 
   Phase2Result resolveDocument(List<RawBlock> rawBlocks) {
     final List<MarkdownBlockNode> resolvedBlocks = _resolveBlockList(rawBlocks);
@@ -122,11 +214,35 @@ final class _InlineResolver {
       ...resolvedBlocks,
     ];
     if (orderedCited.isNotEmpty) {
+      int minStartOffset = orderedCited.first.span.startOffset;
+      int maxEndOffset = orderedCited.first.span.endOffset;
+      int minStartLine = orderedCited.first.span.startLine;
+      int maxEndLine = orderedCited.first.span.endLine;
+      for (int i = 1; i < orderedCited.length; i++) {
+        final SourceSpan s = orderedCited[i].span;
+        if (s.startOffset < minStartOffset) {
+          minStartOffset = s.startOffset;
+        }
+        if (s.endOffset > maxEndOffset) {
+          maxEndOffset = s.endOffset;
+        }
+        if (s.startLine < minStartLine) {
+          minStartLine = s.startLine;
+        }
+        if (s.endLine > maxEndLine) {
+          maxEndLine = s.endLine;
+        }
+      }
       finalBlocks.add(
         FootnoteSectionNode(
-          blockId: 'footnote-section',
-          definitions: orderedCited,
-          span: orderedCited.first.span,
+          blockId: '${idPrefix}footnote-section',
+          definitions: freezeList(orderedCited),
+          span: SourceSpan(
+            startOffset: minStartOffset,
+            endOffset: maxEndOffset,
+            startLine: minStartLine,
+            endLine: maxEndLine,
+          ),
         ),
       );
     }
@@ -152,19 +268,21 @@ final class _InlineResolver {
     }
 
     return Phase2Result(
-      blocks: finalBlocks,
-      outline: _outline,
-      footnotes: allFootnotes,
-      remoteImageAddresses: _remoteImages,
+      blocks: freezeList(finalBlocks),
+      outline: freezeList(_outline),
+      footnotes: freezeList(allFootnotes),
+      remoteImageAddresses: freezeList(_remoteImages),
     );
   }
 
   List<MarkdownBlockNode> _resolveBlockList(List<RawBlock> rawBlocks) {
-    final List<MarkdownBlockNode> out = <MarkdownBlockNode>[];
-    for (final RawBlock raw in rawBlocks) {
-      out.add(_resolveBlock(raw));
+    if (rawBlocks.isEmpty) {
+      return const <MarkdownBlockNode>[];
     }
-    return out;
+    final List<MarkdownBlockNode> out = <MarkdownBlockNode>[
+      for (final RawBlock raw in rawBlocks) _resolveBlock(raw),
+    ];
+    return freezeList(out);
   }
 
   MarkdownBlockNode _resolveBlock(RawBlock raw) {
@@ -257,16 +375,15 @@ final class _InlineResolver {
           start: raw.start,
           tight: raw.tight,
           delimiter: raw.delimiter,
-          items: raw.items
-              .map(
-                (RawListItem item) => ListItemNode(
-                  blockId: item.blockId,
-                  span: item.span,
-                  taskState: item.taskState,
-                  children: _resolveBlockList(item.children),
-                ),
-              )
-              .toList(growable: false),
+          items: freezeList(<ListItemNode>[
+            for (final RawListItem item in raw.items)
+              ListItemNode(
+                blockId: item.blockId,
+                span: item.span,
+                taskState: item.taskState,
+                children: _resolveBlockList(item.children),
+              ),
+          ]),
         );
       case RawListItem():
         return ListItemNode(
@@ -303,31 +420,31 @@ final class _InlineResolver {
               ),
             );
           }
-          rows.add(row);
+          rows.add(freezeList(row));
         }
         return TableNode(
           blockId: raw.blockId,
           span: raw.span,
           alignments: raw.alignments,
-          headers: headers,
-          rows: rows,
+          headers: freezeList(headers),
+          rows: freezeList(rows),
         );
       case RawDefinitionList():
-        final List<DefinitionGroup> groups = raw.groups
-            .map(
-              (RawDefGroup g) => DefinitionGroup(
-                term: _parseInlineString(g.termRaw, g.span),
-                definitions: g.definitions
-                    .map((List<RawBlock> d) => _resolveBlockList(d))
-                    .toList(growable: false),
-                span: g.span,
-              ),
-            )
-            .toList(growable: false);
+        final List<DefinitionGroup> groups = <DefinitionGroup>[
+          for (final RawDefGroup g in raw.groups)
+            DefinitionGroup(
+              term: _parseInlineString(g.termRaw, g.span),
+              definitions: freezeList(<List<MarkdownBlockNode>>[
+                for (final List<RawBlock> d in g.definitions)
+                  _resolveBlockList(d),
+              ]),
+              span: g.span,
+            ),
+        ];
         return DefinitionListNode(
           blockId: raw.blockId,
           span: raw.span,
-          groups: groups,
+          groups: freezeList(groups),
         );
       case RawFootnoteDef():
         return FootnoteDefinitionNode(
@@ -378,12 +495,87 @@ final class _InlineResolver {
     if (input.isEmpty) {
       return const <MarkdownInlineNode>[];
     }
-    final _InlineScanner scanner = _InlineScanner(
-      input: input,
-      blockSpan: blockSpan,
-      resolver: this,
-    );
-    return scanner.parse();
+    if (_totalTokens >= budgets.maxTokens) {
+      return freezeList(<MarkdownInlineNode>[TextNode(input, span: blockSpan)]);
+    }
+
+    // Zero-alloc plain-text pre-scan: skip _InlineScanner when no structural
+    // delimiter/marker exists and detect exact post-processing triggers in 1 pass.
+    final int len = input.length;
+    bool hasStructural = false;
+    bool hasAutolink = false;
+    bool hasEmojiColon = false;
+    bool hasSmartPunct = false;
+    for (int i = 0; i < len; i++) {
+      final int cu = input.codeUnitAt(i);
+      if (cu < 128) {
+        if (structuralLut[cu] != 0) {
+          hasStructural = true;
+          break;
+        }
+        final int pf = _postCharFlags[cu];
+        if (pf != 0) {
+          if (cu == 0x40) {
+            hasAutolink = true;
+          } else if (cu == 0x3A) {
+            hasEmojiColon = true;
+            if (i + 2 < len &&
+                input.codeUnitAt(i + 1) == 0x2F &&
+                input.codeUnitAt(i + 2) == 0x2F) {
+              hasAutolink = true;
+            }
+          } else if (cu == 0x2E) {
+            if (i >= 3 && _matchesWwwPrefixBeforeDot(input, i)) {
+              hasAutolink = true;
+            }
+            if (i + 2 < len &&
+                input.codeUnitAt(i + 1) == 0x2E &&
+                input.codeUnitAt(i + 2) == 0x2E) {
+              hasSmartPunct = true;
+            }
+          } else if (cu == 0x22 || cu == 0x27) {
+            hasSmartPunct = true;
+          } else if (cu == 0x2D) {
+            if (i + 1 < len && input.codeUnitAt(i + 1) == 0x2D) {
+              hasSmartPunct = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (!hasStructural) {
+      _totalTokens++;
+      final bool runAutolinks = options.gfmAutolinks && hasAutolink;
+      final bool runEmoji = options.emoji && hasEmojiColon;
+      final bool runSmart = options.smartPunctuation && hasSmartPunct;
+      final bool runAbbr = options.abbreviations && abbreviations.isNotEmpty;
+      if (!runAutolinks && !runEmoji && !runSmart && !runAbbr) {
+        return freezeList(<MarkdownInlineNode>[
+          TextNode(input, span: blockSpan),
+        ]);
+      }
+      _scanner.reset(input, blockSpan);
+      List<MarkdownInlineNode> nodes = <MarkdownInlineNode>[
+        TextNode(input, span: blockSpan),
+      ];
+      if (runAutolinks) {
+        nodes = _scanner._applyGfmAutolinks(nodes);
+      }
+      if (runEmoji) {
+        nodes = _scanner._applyEmojiShortcodes(nodes);
+      }
+      if (runSmart) {
+        nodes = _scanner._applySmartPunctuation(nodes);
+      }
+      if (runAbbr) {
+        nodes = _scanner._applyAbbreviations(nodes);
+      }
+      return freezeList(_coalesceTextNodes(nodes));
+    }
+
+    _scanner.reset(input, blockSpan);
+    return _scanner.parse();
   }
 
   FootnoteRefNode? _registerFootnoteRef(String label, SourceSpan span) {
@@ -406,6 +598,15 @@ final class _InlineResolver {
     );
   }
 
+  ({String destination, bool blocked}) _resolveDestination(String url) {
+    if (!options.sanitizeUrls) {
+      return (destination: url, blocked: false);
+    }
+    final String safe = options.urlPolicy.sanitize(url);
+    final bool blocked = safe.isEmpty && url.trim().isNotEmpty;
+    return (destination: safe, blocked: blocked);
+  }
+
   String _sanitizeDestination(String url) {
     if (!options.sanitizeUrls) {
       return url;
@@ -413,25 +614,105 @@ final class _InlineResolver {
     return options.urlPolicy.sanitize(url);
   }
 
+  LinkNode _makeLinkNode({
+    required String rawDestination,
+    String? title,
+    required List<MarkdownInlineNode> children,
+    required bool isAutolink,
+    required SourceSpan span,
+  }) {
+    final ({String destination, bool blocked}) resolved = _resolveDestination(
+      rawDestination,
+    );
+    if (resolved.blocked) {
+      return createBlockedLinkNode(
+        title: title,
+        children: children,
+        isAutolink: isAutolink,
+        span: span,
+      );
+    }
+    return LinkNode(
+      destination: resolved.destination,
+      title: title,
+      children: children,
+      isAutolink: isAutolink,
+      span: span,
+    );
+  }
+
+  ImageNode _makeImageNode({
+    required String rawDestination,
+    required String alt,
+    String? title,
+    int? width,
+    int? height,
+    required List<MarkdownInlineNode> children,
+    required SourceSpan span,
+  }) {
+    final ({String destination, bool blocked}) resolved = _resolveDestination(
+      rawDestination,
+    );
+    if (resolved.blocked) {
+      return createBlockedImageNode(
+        alt: alt,
+        title: title,
+        width: width,
+        height: height,
+        children: children,
+        span: span,
+      );
+    }
+    _recordImageUrl(resolved.destination);
+    return ImageNode(
+      destination: resolved.destination,
+      alt: alt,
+      title: title,
+      width: width,
+      height: height,
+      children: children,
+      span: span,
+    );
+  }
+
   void _recordImageUrl(String url) {
     if (url.isEmpty) {
       return;
     }
-    final String lower = url.toLowerCase();
-    if ((lower.startsWith('http://') || lower.startsWith('https://')) &&
-        _remoteImageSet.add(url)) {
-      _remoteImages.add(url);
+    final String cleaned = stripControlAndWhitespaceForUrl(url);
+    if (cleaned.isEmpty) {
+      return;
+    }
+    if (options.sanitizeUrls && !options.urlPolicy.isAllowed(cleaned)) {
+      return;
+    }
+    final String lower = cleaned.toLowerCase();
+    if ((lower.startsWith('http://') ||
+            lower.startsWith('https://') ||
+            lower.startsWith('//')) &&
+        _remoteImageSet.add(cleaned)) {
+      _remoteImages.add(cleaned);
     }
   }
 
   String nextId(String prefix) {
     _synthCounter++;
-    return '$prefix-$_synthCounter';
+    return '$idPrefix$prefix-$_synthCounter';
   }
 }
 
+bool _matchesWwwPrefixBeforeDot(String s, int dotIdx) {
+  final int c0 = s.codeUnitAt(dotIdx - 3);
+  final int c1 = s.codeUnitAt(dotIdx - 2);
+  final int c2 = s.codeUnitAt(dotIdx - 1);
+  return (c0 == 0x77 || c0 == 0x57) &&
+      (c1 == 0x77 || c1 == 0x57) &&
+      (c2 == 0x77 || c2 == 0x57);
+}
+
 final class _InlineItem {
-  _InlineItem.node(this.node) : isText = node is TextNode;
+  _InlineItem.node(this.node, {this.inlineDepth = 0})
+    : isText = node is TextNode;
 
   _InlineItem.delim({
     required this.delimChar,
@@ -441,7 +722,7 @@ final class _InlineItem {
     required this.canClose,
     required SourceSpan span,
   }) : isText = true,
-       node = TextNode(String.fromCharCode(delimChar) * delimCount, span: span);
+       node = TextNode(_repeatDelimChar(delimChar, delimCount), span: span);
 
   MarkdownInlineNode node;
   bool isText;
@@ -455,27 +736,112 @@ final class _InlineItem {
   bool bracketIsImage = false;
   bool bracketActive = true;
   int bracketSourcePos = 0;
+  int delimStackLen = 0;
+  int savedDelimTail = -1;
+  int inlineDepth = 0;
+  int prevActive = -1;
+  int nextActive = -1;
+}
+
+String _repeatDelimChar(int delimChar, int count) {
+  if (count <= 0) {
+    return '';
+  }
+  if (count == 1) {
+    return switch (delimChar) {
+      0x2A => '*',
+      0x5F => '_',
+      0x7E => '~',
+      0x5E => '^',
+      0x3D => '=',
+      _ => String.fromCharCode(delimChar),
+    };
+  }
+  if (count == 2) {
+    return switch (delimChar) {
+      0x2A => '**',
+      0x5F => '__',
+      0x7E => '~~',
+      0x3D => '==',
+      _ => String.fromCharCode(delimChar) * 2,
+    };
+  }
+  if (count == 3 && delimChar == 0x2A) {
+    return '***';
+  }
+  if (count == 3 && delimChar == 0x5F) {
+    return '___';
+  }
+  return String.fromCharCode(delimChar) * count;
 }
 
 final class _InlineScanner {
-  _InlineScanner({
-    required this.input,
-    required this.blockSpan,
-    required this.resolver,
-  });
+  _InlineScanner({required this.resolver});
 
-  final String input;
-  final SourceSpan blockSpan;
   final _InlineResolver resolver;
+
+  late String input;
+  late SourceSpan blockSpan;
 
   final List<_InlineItem> _items = <_InlineItem>[];
   final List<int> _delimiterIndices = <int>[];
+  final List<int> _prevDelim = <int>[];
+  final List<int> _nextDelim = <int>[];
+  int _delimHead = -1;
+  int _delimTail = -1;
+  int _activeHead = -1;
+  int _activeTail = -1;
+
   final List<int> _bracketIndices = <int>[];
   final Set<int> _unmatchedBacktickLengths = <int>{};
-  int _tokenCount = 0;
+
+  int? _cachedLastGtPos;
+  int _noClosingSingleQuoteFrom = 0;
+  int _noClosingDoubleQuoteFrom = 0;
+  Set<int>? _failedAttrBoundaries;
+  bool _noCommentClose = false;
+  bool _noPiClose = false;
+  bool _noCdataClose = false;
+  bool _noValidClosingDollar = false;
+  bool _sawAutolinkCandidate = false;
+  bool _sawEmojiColon = false;
+  bool _sawSmartPunct = false;
 
   MarkdownOptions get options => resolver.options;
   MarkdownBudgets get budgets => resolver.budgets;
+
+  void reset(String nextInput, SourceSpan nextSpan) {
+    input = nextInput;
+    blockSpan = nextSpan;
+    if (_items.length > 1024) {
+      _items.length = 0;
+    } else {
+      _items.clear();
+    }
+    _delimiterIndices.clear();
+    _prevDelim.clear();
+    _nextDelim.clear();
+    _delimHead = -1;
+    _delimTail = -1;
+    _activeHead = -1;
+    _activeTail = -1;
+    _bracketIndices.clear();
+    _unmatchedBacktickLengths.clear();
+    _cachedLastGtPos = null;
+    final int guardPos = nextInput.length + 1;
+    _noClosingSingleQuoteFrom = guardPos;
+    _noClosingDoubleQuoteFrom = guardPos;
+    _failedAttrBoundaries = null;
+    _noCommentClose = false;
+    _noPiClose = false;
+    _noCdataClose = false;
+    _noValidClosingDollar = false;
+    _sawAutolinkCandidate = false;
+    _sawEmojiColon = false;
+    _sawSmartPunct = false;
+  }
+
+  int get _lastGtPos => _cachedLastGtPos ??= input.lastIndexOf('>');
 
   SourceSpan _span(int start, int end) {
     final int base = blockSpan.startOffset;
@@ -487,18 +853,84 @@ final class _InlineScanner {
     );
   }
 
+  int _appendActiveItem(_InlineItem item) {
+    final int idx = _items.length;
+    item.prevActive = _activeTail;
+    item.nextActive = -1;
+    _items.add(item);
+    if (_activeTail != -1) {
+      _items[_activeTail].nextActive = idx;
+    } else {
+      _activeHead = idx;
+    }
+    _activeTail = idx;
+    return idx;
+  }
+
+  void _popActiveTail() {
+    if (_activeTail == -1) {
+      return;
+    }
+    final int prev = _items[_activeTail].prevActive;
+    _items[_activeTail].prevActive = -1;
+    _items[_activeTail].nextActive = -1;
+    if (prev != -1) {
+      _items[prev].nextActive = -1;
+      _activeTail = prev;
+    } else {
+      _activeHead = -1;
+      _activeTail = -1;
+    }
+  }
+
+  void _appendDelimiter(_InlineItem item) {
+    final int itemIdx = _appendActiveItem(item);
+    final int dPos = _delimiterIndices.length;
+    _delimiterIndices.add(itemIdx);
+    _prevDelim.add(_delimTail);
+    _nextDelim.add(-1);
+    if (_delimTail != -1) {
+      _nextDelim[_delimTail] = dPos;
+    } else {
+      _delimHead = dPos;
+    }
+    _delimTail = dPos;
+  }
+
+  void _unlinkDelim(int dPos) {
+    final int p = _prevDelim[dPos];
+    final int n = _nextDelim[dPos];
+    if (p != -1) {
+      _nextDelim[p] = n;
+    } else {
+      _delimHead = n;
+    }
+    if (n != -1) {
+      _prevDelim[n] = p;
+    } else {
+      _delimTail = p;
+    }
+    _prevDelim[dPos] = -1;
+    _nextDelim[dPos] = -1;
+  }
+
   List<MarkdownInlineNode> parse() {
     final int len = input.length;
+    final Uint8List lut = resolver.structuralLut;
     int pos = 0;
 
     while (pos < len) {
-      _tokenCount++;
-      if (_tokenCount > budgets.maxTokens) {
+      resolver._totalTokens++;
+      if (resolver._totalTokens > budgets.maxTokens) {
         _appendText(input.substring(pos), _span(pos, len));
         break;
       }
 
       final int cu = input.codeUnitAt(pos);
+      if (cu >= 128 || lut[cu] == 0) {
+        pos = _scanPlainText(pos);
+        continue;
+      }
 
       switch (cu) {
         case 0x0A: // '\n'
@@ -539,80 +971,94 @@ final class _InlineScanner {
         case 0x5F: // '_'
           pos = _handleDelimiterRun(pos, cu);
         case 0x7E: // '~'
-          if (options.gfmStrikethrough || options.subscript) {
-            pos = _handleDelimiterRun(pos, cu);
-          } else {
-            _appendText('~', _span(pos, pos + 1));
-            pos++;
-          }
+          pos = _handleDelimiterRun(pos, cu);
         case 0x3D: // '='
-          if (options.highlight &&
-              pos + 1 < len &&
-              input.codeUnitAt(pos + 1) == 0x3D) {
+          if (pos + 1 < len && input.codeUnitAt(pos + 1) == 0x3D) {
             pos = _handleDelimiterRun(pos, cu);
           } else {
             _appendText('=', _span(pos, pos + 1));
             pos++;
           }
         case 0x5E: // '^'
-          if (options.superscript) {
-            pos = _handleDelimiterRun(pos, cu);
-          } else {
-            _appendText('^', _span(pos, pos + 1));
-            pos++;
-          }
+          pos = _handleDelimiterRun(pos, cu);
         case 0x24: // '$'
-          if (options.math) {
-            pos = _handleInlineMath(pos);
-          } else {
-            _appendText(r'$', _span(pos, pos + 1));
-            pos++;
-          }
+          pos = _handleInlineMath(pos);
         default:
           pos = _scanPlainText(pos);
       }
     }
 
-    _processEmphasis(-1);
+    if (_delimHead != -1) {
+      _processEmphasis(
+        bottomDelimPos: -1,
+        firstCandidateDelimPos: _delimHead,
+        maxAllowedDepth: budgets.maxNestingDepth,
+      );
+    }
 
-    List<MarkdownInlineNode> nodes = _coalesceTextNodes(
-      _collectActiveNodes(0, _items.length),
-    );
-    if (options.gfmAutolinks) {
+    List<MarkdownInlineNode> nodes = _collectActiveNodesCoalesced(_activeHead);
+    if (options.gfmAutolinks && _sawAutolinkCandidate) {
       nodes = _applyGfmAutolinks(nodes);
     }
-    if (options.emoji) {
+    if (options.emoji && _sawEmojiColon) {
       nodes = _applyEmojiShortcodes(nodes);
     }
-    if (options.smartPunctuation) {
+    if (options.smartPunctuation && _sawSmartPunct) {
       nodes = _applySmartPunctuation(nodes);
     }
     if (options.abbreviations && resolver.abbreviations.isNotEmpty) {
       nodes = _applyAbbreviations(nodes);
     }
-    return _coalesceTextNodes(nodes);
+    return freezeList(_coalesceTextNodes(nodes));
   }
 
   int _scanPlainText(int start) {
-    int i = start + 1;
     final int len = input.length;
+    final Uint8List lut = resolver.structuralLut;
+    int i = start;
     while (i < len) {
       final int cu = input.codeUnitAt(i);
-      if (cu == 0x0A ||
-          cu == 0x5C ||
-          cu == 0x60 ||
-          cu == 0x26 ||
-          cu == 0x3C ||
-          cu == 0x5B ||
-          cu == 0x5D ||
-          cu == 0x21 ||
-          cu == 0x2A ||
-          cu == 0x5F ||
-          ((cu == 0x7E) && (options.gfmStrikethrough || options.subscript)) ||
-          ((cu == 0x3D) && options.highlight) ||
-          ((cu == 0x5E) && options.superscript) ||
-          ((cu == 0x24) && options.math)) {
-        break;
+      if (cu < 128) {
+        if (lut[cu] != 0) {
+          if (i > start) {
+            break;
+          }
+        } else {
+          final int pf = _postCharFlags[cu];
+          if (pf != 0) {
+            if (cu == 0x40) {
+              _sawAutolinkCandidate = true;
+            } else if (cu == 0x3A) {
+              _sawEmojiColon = true;
+              if (!_sawAutolinkCandidate &&
+                  i + 2 < len &&
+                  input.codeUnitAt(i + 1) == 0x2F &&
+                  input.codeUnitAt(i + 2) == 0x2F) {
+                _sawAutolinkCandidate = true;
+              }
+            } else if (cu == 0x2E) {
+              if (!_sawAutolinkCandidate &&
+                  i >= 3 &&
+                  _matchesWwwPrefixBeforeDot(input, i)) {
+                _sawAutolinkCandidate = true;
+              }
+              if (!_sawSmartPunct &&
+                  i + 2 < len &&
+                  input.codeUnitAt(i + 1) == 0x2E &&
+                  input.codeUnitAt(i + 2) == 0x2E) {
+                _sawSmartPunct = true;
+              }
+            } else if (cu == 0x22 || cu == 0x27) {
+              _sawSmartPunct = true;
+            } else if (cu == 0x2D) {
+              if (!_sawSmartPunct &&
+                  i + 1 < len &&
+                  input.codeUnitAt(i + 1) == 0x2D) {
+                _sawSmartPunct = true;
+              }
+            }
+          }
+        }
       }
       i++;
     }
@@ -624,8 +1070,8 @@ final class _InlineScanner {
     if (text.isEmpty) {
       return;
     }
-    if (_items.isNotEmpty) {
-      final _InlineItem last = _items.last;
+    if (_activeTail != -1) {
+      final _InlineItem last = _items[_activeTail];
       if (last.isText && !last.isDelimiter && !last.isBracket) {
         final TextNode prev = last.node as TextNode;
         last.node = TextNode(
@@ -640,13 +1086,12 @@ final class _InlineScanner {
         return;
       }
     }
-    _items.add(_InlineItem.node(TextNode(text, span: span)));
+    _appendActiveItem(_InlineItem.node(TextNode(text, span: span)));
   }
 
   int _handleNewline(int pos) {
-    // Check trailing spaces in preceding plain text item.
-    if (_items.isNotEmpty) {
-      final _InlineItem last = _items.last;
+    if (_activeTail != -1) {
+      final _InlineItem last = _items[_activeTail];
       if (last.isText && !last.isDelimiter && !last.isBracket) {
         final TextNode prev = last.node as TextNode;
         int trailingSpaces = 0;
@@ -663,16 +1108,16 @@ final class _InlineScanner {
             prev.text.length - trailingSpaces,
           );
           if (trimmed.isEmpty) {
-            _items.removeLast();
+            _popActiveTail();
           } else {
             last.node = TextNode(trimmed, span: prev.span);
           }
           if (trailingSpaces >= 2) {
-            _items.add(
+            _appendActiveItem(
               _InlineItem.node(HardBreakNode(span: _span(pos, pos + 1))),
             );
           } else {
-            _items.add(
+            _appendActiveItem(
               _InlineItem.node(SoftBreakNode(span: _span(pos, pos + 1))),
             );
           }
@@ -680,7 +1125,9 @@ final class _InlineScanner {
         }
       }
     }
-    _items.add(_InlineItem.node(SoftBreakNode(span: _span(pos, pos + 1))));
+    _appendActiveItem(
+      _InlineItem.node(SoftBreakNode(span: _span(pos, pos + 1))),
+    );
     return _skipLeadingSpacesAfterNewline(pos + 1);
   }
 
@@ -704,10 +1151,21 @@ final class _InlineScanner {
     }
     final int next = input.codeUnitAt(pos + 1);
     if (next == 0x0A) {
-      _items.add(_InlineItem.node(HardBreakNode(span: _span(pos, pos + 2))));
+      _appendActiveItem(
+        _InlineItem.node(HardBreakNode(span: _span(pos, pos + 2))),
+      );
       return _skipLeadingSpacesAfterNewline(pos + 2);
     }
     if (isAsciiPunctuation(next)) {
+      if (next == 0x3A) {
+        _sawEmojiColon = true;
+        _sawAutolinkCandidate = true;
+      } else if (next == 0x40 || next == 0x2E) {
+        _sawAutolinkCandidate = true;
+        _sawSmartPunct = true;
+      } else if (next == 0x22 || next == 0x27 || next == 0x2D) {
+        _sawSmartPunct = true;
+      }
       _appendText(String.fromCharCode(next), _span(pos, pos + 2));
       return pos + 2;
     }
@@ -751,7 +1209,7 @@ final class _InlineScanner {
               raw = raw.substring(1, raw.length - 1);
             }
           }
-          _items.add(
+          _appendActiveItem(
             _InlineItem.node(CodeSpanNode(raw, span: _span(pos, search))),
           );
           return search;
@@ -771,6 +1229,9 @@ final class _InlineScanner {
       pos,
     );
     if (decoded != null) {
+      _sawAutolinkCandidate = true;
+      _sawEmojiColon = true;
+      _sawSmartPunct = true;
       _appendText(decoded.text, _span(pos, decoded.nextIndex));
       return decoded.nextIndex;
     }
@@ -779,8 +1240,9 @@ final class _InlineScanner {
   }
 
   int _handleInlineMath(int pos) {
-    // Reject `$$` inside inline stream (leave as literal `$`).
-    if (pos + 1 >= input.length || input.codeUnitAt(pos + 1) == 0x24) {
+    if (_noValidClosingDollar ||
+        pos + 1 >= input.length ||
+        input.codeUnitAt(pos + 1) == 0x24) {
       _appendText(r'$', _span(pos, pos + 1));
       return pos + 1;
     }
@@ -806,7 +1268,7 @@ final class _InlineScanner {
         if (!precededBySpace && !followedByDigit && !isDoubleDollar) {
           final String latex = input.substring(pos + 1, i);
           if (latex.isNotEmpty) {
-            _items.add(
+            _appendActiveItem(
               _InlineItem.node(MathInlineNode(latex, span: _span(pos, i + 1))),
             );
             return i + 1;
@@ -815,6 +1277,7 @@ final class _InlineScanner {
       }
       i++;
     }
+    _noValidClosingDollar = true;
     _appendText(r'$', _span(pos, pos + 1));
     return pos + 1;
   }
@@ -824,11 +1287,10 @@ final class _InlineScanner {
     final ({String href, String label, int nextIndex})? auto =
         _matchAngleAutolink(pos);
     if (auto != null) {
-      final String sanitized = resolver._sanitizeDestination(auto.href);
-      _items.add(
+      _appendActiveItem(
         _InlineItem.node(
-          LinkNode(
-            destination: sanitized,
+          resolver._makeLinkNode(
+            rawDestination: auto.href,
             isAutolink: true,
             children: <MarkdownInlineNode>[
               TextNode(auto.label, span: _span(pos + 1, auto.nextIndex - 1)),
@@ -844,51 +1306,32 @@ final class _InlineScanner {
     final int? htmlEnd = _matchRawHtmlInline(pos);
     if (htmlEnd != null) {
       final String rawHtml = input.substring(pos, htmlEnd);
-      if (options.inlineBreaks &&
-          RegExp(r'^<br\s*/?>$', caseSensitive: false).hasMatch(rawHtml)) {
-        _items.add(
+      if (options.inlineBreaks && _isBrTag(rawHtml)) {
+        _appendActiveItem(
           _InlineItem.node(InlineBreakNode(span: _span(pos, htmlEnd))),
         );
         return htmlEnd;
       }
-      if (options.kbd) {
-        final RegExpMatch? kbdMatch = RegExp(
-          r'^<kbd>(.*)</kbd>$',
-          caseSensitive: false,
-          dotAll: true,
-        ).firstMatch(rawHtml);
-        if (kbdMatch != null) {
-          _items.add(
-            _InlineItem.node(
-              KbdInlineNode(
-                children: <MarkdownInlineNode>[TextNode(kbdMatch.group(1)!)],
-                span: _span(pos, htmlEnd),
+      if (options.explicitHeadingIds || options.headingSlugs) {
+        final RegExpMatch? anchorMatch = _anchorTagPattern.firstMatch(rawHtml);
+        if (anchorMatch != null &&
+            _matchesCaseInsensitiveAt(input, htmlEnd, '</a>')) {
+          final String rawId =
+              (anchorMatch.group(1) ?? anchorMatch.group(2)) ?? '';
+          final String id = decodeHtmlEntities(rawId);
+          if (id.isNotEmpty) {
+            _appendActiveItem(
+              _InlineItem.node(
+                AnchorInlineNode(id, span: _span(pos, htmlEnd + 4)),
               ),
-            ),
-          );
-          return htmlEnd;
-        }
-      }
-      if (options.explicitHeadingIds) {
-        final RegExpMatch? anchorMatch = RegExp(
-          r'''^<a\s+id=["']([^"']+)["']\s*>$''',
-          caseSensitive: false,
-        ).firstMatch(rawHtml);
-        if (anchorMatch != null && input.startsWith('</a>', htmlEnd)) {
-          _items.add(
-            _InlineItem.node(
-              AnchorInlineNode(
-                anchorMatch.group(1)!,
-                span: _span(pos, htmlEnd + 4),
-              ),
-            ),
-          );
-          return htmlEnd + 4;
+            );
+            return htmlEnd + 4;
+          }
         }
       }
       if (options.figureBlocks &&
-          rawHtml.toLowerCase().startsWith('<picture')) {
-        final int closePic = input.toLowerCase().indexOf('</picture>', pos);
+          _matchesCaseInsensitiveAt(rawHtml, 0, '<picture')) {
+        final int closePic = _indexOfAsciiIgnoreCase(input, '</picture>', pos);
         if (closePic != -1) {
           final String fullPic = input.substring(pos, closePic + 10);
           final PictureInlineNode? picNode = _tryParsePicture(
@@ -898,16 +1341,34 @@ final class _InlineScanner {
           if (picNode != null) {
             resolver._recordImageUrl(picNode.lightSource);
             resolver._recordImageUrl(picNode.darkSource);
-            _items.add(_InlineItem.node(picNode));
+            _appendActiveItem(_InlineItem.node(picNode));
             return closePic + 10;
           }
         }
       }
-      if (options.kbd && rawHtml.toLowerCase() == '<kbd>') {
-        final int closeKbd = input.toLowerCase().indexOf('</kbd>', htmlEnd);
+      if ((options.figureBlocks || options.kbd || options.headingSlugs) &&
+          rawHtml.length >= 6 &&
+          _matchesCaseInsensitiveAt(rawHtml, 0, '<img')) {
+        final int afterName = rawHtml.codeUnitAt(4);
+        if (afterName == 0x20 ||
+            afterName == 0x09 ||
+            afterName == 0x0A ||
+            afterName == 0x0D) {
+          final ImageNode? imgNode = _tryParseImgTag(
+            rawHtml,
+            _span(pos, htmlEnd),
+          );
+          if (imgNode != null) {
+            _appendActiveItem(_InlineItem.node(imgNode));
+            return htmlEnd;
+          }
+        }
+      }
+      if (options.kbd && _equalsAsciiIgnoreCase(rawHtml, '<kbd>')) {
+        final int closeKbd = _indexOfAsciiIgnoreCase(input, '</kbd>', htmlEnd);
         if (closeKbd != -1) {
           final String inner = input.substring(htmlEnd, closeKbd);
-          _items.add(
+          _appendActiveItem(
             _InlineItem.node(
               KbdInlineNode(
                 children: <MarkdownInlineNode>[
@@ -920,7 +1381,7 @@ final class _InlineScanner {
           return closeKbd + 6;
         }
       }
-      _items.add(
+      _appendActiveItem(
         _InlineItem.node(RawHtmlInlineNode(rawHtml, span: _span(pos, htmlEnd))),
       );
       return htmlEnd;
@@ -931,90 +1392,372 @@ final class _InlineScanner {
   }
 
   PictureInlineNode? _tryParsePicture(String html, SourceSpan span) {
-    final RegExpMatch? darkMatch = RegExp(
-      r'''prefers-color-scheme\s*:\s*dark[^>]*srcset\s*=\s*["']([^"']+)["']''',
-      caseSensitive: false,
-    ).firstMatch(html);
-    final RegExpMatch? imgMatch = RegExp(
-      r'''<img\b[^>]*src\s*=\s*["']([^"']+)["'][^>]*>''',
-      caseSensitive: false,
-    ).firstMatch(html);
+    final RegExpMatch? darkMatch = _pictureDarkSrcsetPattern.firstMatch(html);
+    final RegExpMatch? imgMatch = _pictureImgSrcPattern.firstMatch(html);
     if (darkMatch == null || imgMatch == null) {
       return null;
     }
-    final RegExpMatch? altMatch = RegExp(
-      r'''alt\s*=\s*["']([^"']*)["']''',
-      caseSensitive: false,
-    ).firstMatch(imgMatch.group(0)!);
+    final RegExpMatch? altMatch = _pictureAltPattern.firstMatch(
+      imgMatch.group(0)!,
+    );
+    final String rawLight = decodeHtmlEntities(imgMatch.group(1)!);
+    final String rawDark = decodeHtmlEntities(darkMatch.group(1)!);
+    final String alt = altMatch == null
+        ? ''
+        : decodeHtmlEntities(altMatch.group(1)!);
     return PictureInlineNode(
-      lightSource: resolver._sanitizeDestination(imgMatch.group(1)!),
-      darkSource: resolver._sanitizeDestination(darkMatch.group(1)!),
-      alt: altMatch?.group(1) ?? '',
+      lightSource: resolver._sanitizeDestination(rawLight),
+      darkSource: resolver._sanitizeDestination(rawDark),
+      alt: alt,
+      span: span,
+    );
+  }
+
+  ImageNode? _tryParseImgTag(String rawHtml, SourceSpan span) {
+    final int len = rawHtml.length;
+    int i = 4;
+    String? src;
+    String alt = '';
+    String? title;
+    int? width;
+    int? height;
+
+    while (i < len) {
+      while (i < len && _isInlineHtmlWs(rawHtml.codeUnitAt(i))) {
+        i++;
+      }
+      if (i >= len || rawHtml.codeUnitAt(i) == 0x3E) {
+        break;
+      }
+      if (rawHtml.codeUnitAt(i) == 0x2F) {
+        i++;
+        continue;
+      }
+      final int nameStart = i;
+      while (i < len && _isHtmlAttrNameChar(rawHtml.codeUnitAt(i))) {
+        i++;
+      }
+      if (i == nameStart) {
+        break;
+      }
+      final String name = rawHtml.substring(nameStart, i).toLowerCase();
+      while (i < len && _isInlineHtmlWs(rawHtml.codeUnitAt(i))) {
+        i++;
+      }
+      String value = '';
+      if (i < len && rawHtml.codeUnitAt(i) == 0x3D) {
+        i++;
+        while (i < len && _isInlineHtmlWs(rawHtml.codeUnitAt(i))) {
+          i++;
+        }
+        if (i < len) {
+          final int q = rawHtml.codeUnitAt(i);
+          if (q == 0x22 || q == 0x27) {
+            i++;
+            final int valStart = i;
+            while (i < len && rawHtml.codeUnitAt(i) != q) {
+              i++;
+            }
+            value = rawHtml.substring(valStart, i);
+            if (i < len && rawHtml.codeUnitAt(i) == q) {
+              i++;
+            }
+          } else {
+            final int valStart = i;
+            while (i < len &&
+                !_isInlineHtmlWs(rawHtml.codeUnitAt(i)) &&
+                rawHtml.codeUnitAt(i) != 0x3E) {
+              i++;
+            }
+            if (i > valStart &&
+                rawHtml.codeUnitAt(i - 1) == 0x2F &&
+                i < len &&
+                rawHtml.codeUnitAt(i) == 0x3E) {
+              value = rawHtml.substring(valStart, i - 1);
+            } else {
+              value = rawHtml.substring(valStart, i);
+            }
+          }
+        }
+      }
+      final String decoded = decodeHtmlEntities(value);
+      switch (name) {
+        case 'src':
+          src = decoded;
+        case 'alt':
+          alt = decoded;
+        case 'title':
+          title = decoded;
+        case 'width':
+          width = _parseHtmlDimension(decoded);
+        case 'height':
+          height = _parseHtmlDimension(decoded);
+        default:
+          break;
+      }
+    }
+
+    if (src == null) {
+      return null;
+    }
+    return resolver._makeImageNode(
+      rawDestination: src,
+      alt: alt,
+      title: title,
+      width: width,
+      height: height,
+      children: alt.isEmpty
+          ? const <MarkdownInlineNode>[]
+          : <MarkdownInlineNode>[TextNode(alt, span: span)],
       span: span,
     );
   }
 
   ({String href, String label, int nextIndex})? _matchAngleAutolink(int pos) {
+    if (pos >= _lastGtPos) {
+      return null;
+    }
     final int len = input.length;
-    final int close = input.indexOf('>', pos + 1);
-    if (close == -1) {
+    int close = -1;
+    // Fast fail without scanning to EOF if newline, '<', or control/space occurs
+    // before any closing '>' (neither URI nor email autolinks allow them).
+    for (int i = pos + 1; i < len && i <= _lastGtPos; i++) {
+      final int cu = input.codeUnitAt(i);
+      if (cu == 0x3E) {
+        close = i;
+        break;
+      }
+      if (cu <= 0x20 || cu == 0x7F || cu == 0x3C) {
+        return null;
+      }
+    }
+    if (close <= pos + 1) {
       return null;
     }
     final String inside = input.substring(pos + 1, close);
-    if (inside.contains('<') || inside.contains('\n')) {
-      return null;
-    }
     if (_uriAutolinkPattern.hasMatch(inside)) {
       return (href: inside, label: inside, nextIndex: close + 1);
     }
     if (_emailAutolinkPattern.hasMatch(inside)) {
       return (href: 'mailto:$inside', label: inside, nextIndex: close + 1);
     }
-    final _ = len;
     return null;
   }
 
   int? _matchRawHtmlInline(int pos) {
-    final String sub = input.substring(pos);
-    // 1. HTML comment (CommonMark 0.31.2: `<!-->`, `<!--->`, or `<!--...-->`).
-    if (sub.startsWith('<!-->')) {
-      return pos + 5;
+    if (pos >= _lastGtPos) {
+      return null;
     }
-    if (sub.startsWith('<!--->')) {
-      return pos + 6;
+    final int len = input.length;
+    if (pos + 2 >= len) {
+      return null;
     }
-    if (sub.startsWith('<!--')) {
-      final int end = sub.indexOf('-->', 4);
-      if (end != -1) {
-        return pos + end + 3;
+    final int second = input.codeUnitAt(pos + 1);
+    if (second == 0x21) {
+      // '!'
+      if (input.startsWith('<!-->', pos)) {
+        return pos + 5;
+      }
+      if (input.startsWith('<!--->', pos)) {
+        return pos + 6;
+      }
+      if (input.startsWith('<!--', pos)) {
+        if (_noCommentClose) {
+          return null;
+        }
+        final int end = input.indexOf('-->', pos + 4);
+        if (end != -1) {
+          return end + 3;
+        }
+        _noCommentClose = true;
+        return null;
+      }
+      if (input.startsWith('<![CDATA[', pos)) {
+        if (_noCdataClose) {
+          return null;
+        }
+        final int end = input.indexOf(']]>', pos + 9);
+        if (end != -1) {
+          return end + 3;
+        }
+        _noCdataClose = true;
+        return null;
+      }
+      if (_isHtmlAsciiAlpha(input.codeUnitAt(pos + 2))) {
+        int i = pos + 3;
+        while (i < len && _isHtmlAsciiAlpha(input.codeUnitAt(i))) {
+          i++;
+        }
+        if (i < len && _isInlineHtmlWs(input.codeUnitAt(i))) {
+          final int gt = input.indexOf('>', i + 1);
+          if (gt != -1) {
+            return gt + 1;
+          }
+        }
       }
       return null;
     }
-    // 2. Processing instruction `<?...?>`.
-    if (sub.startsWith('<?')) {
-      final int end = sub.indexOf('?>', 2);
+    if (second == 0x3F) {
+      // '?' Processing instruction `<?...?>`.
+      if (_noPiClose) {
+        return null;
+      }
+      final int end = input.indexOf('?>', pos + 2);
       if (end != -1) {
-        return pos + end + 2;
+        return end + 2;
+      }
+      _noPiClose = true;
+      return null;
+    }
+    return _scanInlineHtmlTagEnd(pos);
+  }
+
+  int? _scanInlineHtmlTagEnd(int pos) {
+    final int len = input.length;
+    int i = pos + 1;
+    if (i >= len) {
+      return null;
+    }
+    final int first = input.codeUnitAt(i);
+    if (first == 0x2F) {
+      // Closing tag `</tagname [ws]*>`
+      i++;
+      if (i >= len || !_isHtmlAsciiAlpha(input.codeUnitAt(i))) {
+        return null;
+      }
+      i++;
+      while (i < len && _isHtmlTagNameChar(input.codeUnitAt(i))) {
+        i++;
+      }
+      while (i < len && _isInlineHtmlWs(input.codeUnitAt(i))) {
+        i++;
+      }
+      if (i < len && input.codeUnitAt(i) == 0x3E) {
+        return i + 1;
       }
       return null;
     }
-    // 3. CDATA `<![CDATA[...]]>`.
-    if (sub.startsWith('<![CDATA[')) {
-      final int end = sub.indexOf(']]>', 9);
-      if (end != -1) {
-        return pos + end + 3;
-      }
+
+    // Opening / self-closing tag `<tagname (attrs)* [ws]* /?>`
+    if (!_isHtmlAsciiAlpha(first)) {
       return null;
     }
-    // 4. Declaration `<!NAME ...>`.
-    final RegExpMatch? decl = _inlineHtmlDeclPattern.firstMatch(sub);
-    if (decl != null) {
-      return pos + decl.end;
+    i++;
+    while (i < len && _isHtmlTagNameChar(input.codeUnitAt(i))) {
+      i++;
     }
-    // 5. Open tag or closing tag.
-    final RegExpMatch? tag = _inlineHtmlTagPattern.firstMatch(sub);
-    if (tag != null) {
-      return pos + tag.end;
+
+    int attrCount = 0;
+    List<int>? visitedBoundaries;
+    int? failFrom;
+    while (i < len) {
+      final int wsStart = i;
+      while (i < len && _isInlineHtmlWs(input.codeUnitAt(i))) {
+        i++;
+      }
+      if (i >= len) {
+        failFrom = wsStart;
+        break;
+      }
+      final int cu = input.codeUnitAt(i);
+      if (cu == 0x2F) {
+        if (i + 1 < len && input.codeUnitAt(i + 1) == 0x3E) {
+          return i + 2;
+        }
+        failFrom = wsStart;
+        break;
+      }
+      if (cu == 0x3E) {
+        return i + 1;
+      }
+      if (i == wsStart || !_isHtmlAttrNameStart(cu)) {
+        failFrom = wsStart;
+        break;
+      }
+      if (_failedAttrBoundaries != null && _failedAttrBoundaries!.contains(i)) {
+        failFrom = wsStart;
+        break;
+      }
+      attrCount++;
+      if (attrCount > 64) {
+        visitedBoundaries ??= <int>[];
+        visitedBoundaries.add(i);
+      }
+
+      i++;
+      while (i < len && _isHtmlAttrNameChar(input.codeUnitAt(i))) {
+        i++;
+      }
+      final int afterName = i;
+      int wsEq = i;
+      while (wsEq < len && _isInlineHtmlWs(input.codeUnitAt(wsEq))) {
+        wsEq++;
+      }
+      if (wsEq < len && input.codeUnitAt(wsEq) == 0x3D) {
+        i = wsEq + 1;
+        while (i < len && _isInlineHtmlWs(input.codeUnitAt(i))) {
+          i++;
+        }
+        if (i >= len) {
+          failFrom = afterName;
+          break;
+        }
+        final int q = input.codeUnitAt(i);
+        if (q == 0x27) {
+          if (i + 1 >= _noClosingSingleQuoteFrom) {
+            failFrom = afterName;
+            break;
+          }
+          final int closeQ = input.indexOf('\'', i + 1);
+          if (closeQ == -1) {
+            if (i + 1 < _noClosingSingleQuoteFrom) {
+              _noClosingSingleQuoteFrom = i + 1;
+            }
+            failFrom = afterName;
+            break;
+          }
+          i = closeQ + 1;
+        } else if (q == 0x22) {
+          if (i + 1 >= _noClosingDoubleQuoteFrom) {
+            failFrom = afterName;
+            break;
+          }
+          final int closeQ = input.indexOf('"', i + 1);
+          if (closeQ == -1) {
+            if (i + 1 < _noClosingDoubleQuoteFrom) {
+              _noClosingDoubleQuoteFrom = i + 1;
+            }
+            failFrom = afterName;
+            break;
+          }
+          i = closeQ + 1;
+        } else {
+          final int valStart = i;
+          while (i < len) {
+            final int ch = input.codeUnitAt(i);
+            if (_isInlineHtmlWs(ch) ||
+                ch == 0x22 ||
+                ch == 0x27 ||
+                ch == 0x3D ||
+                ch == 0x3C ||
+                ch == 0x3E ||
+                ch == 0x60) {
+              break;
+            }
+            i++;
+          }
+          if (i == valStart) {
+            failFrom = afterName;
+            break;
+          }
+        }
+      } else {
+        i = afterName;
+      }
+    }
+
+    if (failFrom != null && visitedBoundaries != null) {
+      (_failedAttrBoundaries ??= <int>{}).addAll(visitedBoundaries);
     }
     return null;
   }
@@ -1033,7 +1776,7 @@ final class _InlineScanner {
           _span(pos, close + 1),
         );
         if (fnRef != null) {
-          _items.add(_InlineItem.node(fnRef));
+          _appendActiveItem(_InlineItem.node(fnRef));
           return close + 1;
         }
       }
@@ -1052,9 +1795,10 @@ final class _InlineScanner {
           )
           ..isBracket = true
           ..bracketIsImage = isImage
-          ..bracketSourcePos = pos;
-    final int idx = _items.length;
-    _items.add(item);
+          ..bracketSourcePos = pos
+          ..delimStackLen = _delimiterIndices.length
+          ..savedDelimTail = _delimTail;
+    final int idx = _appendActiveItem(item);
     _bracketIndices.add(idx);
     return pos + markerLen;
   }
@@ -1092,6 +1836,7 @@ final class _InlineScanner {
     String? destination;
     String? title;
     bool matched = false;
+    bool resolvedByRefDef = false;
 
     // Case 1: Inline link/image `(dest "title")`.
     if (afterBracket < input.length && input.codeUnitAt(afterBracket) == 0x28) {
@@ -1148,7 +1893,16 @@ final class _InlineScanner {
           title = def.title;
           afterBracket = nextAfterRef;
           matched = true;
+          resolvedByRefDef = true;
         }
+      }
+    }
+
+    if (matched && resolvedByRefDef) {
+      final int expandedBytes =
+          (destination?.length ?? 0) + (title?.length ?? 0);
+      if (!resolver.tryConsumeExpandedBytes(expandedBytes)) {
+        matched = false;
       }
     }
 
@@ -1157,39 +1911,74 @@ final class _InlineScanner {
       return pos + 1;
     }
 
-    // Process emphasis strictly inside the bracket slice `[openerItemIdx+1 ..]`.
-    final int delimBottom = _findDelimiterBottomAfter(openerItemIdx);
-    _processEmphasis(delimBottom);
+    final int maxAllowedInside =
+        budgets.maxNestingDepth - _bracketIndices.length - 1;
 
-    // Collect children inside the bracket.
-    final List<MarkdownInlineNode> rawChildren = _collectActiveNodes(
-      openerItemIdx + 1,
-      _items.length,
-    );
-    List<MarkdownInlineNode> children = rawChildren;
-    if (options.gfmAutolinks && isImage == false) {
-      // Do not run autolinks inside LinkNode, so skip here!
+    // Process emphasis strictly inside `[openerItemIdx + 1 ..]` in O(active).
+    final int firstInsideDelim = opener.savedDelimTail == -1
+        ? _delimHead
+        : _nextDelim[opener.savedDelimTail];
+    if (firstInsideDelim != -1) {
+      _processEmphasis(
+        bottomDelimPos: opener.savedDelimTail,
+        firstCandidateDelimPos: firstInsideDelim,
+        maxAllowedDepth: maxAllowedInside < 0 ? 0 : maxAllowedInside,
+      );
     }
-    children = _coalesceTextNodes(children);
 
-    final String safeDest = resolver._sanitizeDestination(destination ?? '');
+    // Collect active nodes strictly after `opener` and measure depth.
+    int maxChildDepth = 0;
+    final List<MarkdownInlineNode> rawChildren = <MarkdownInlineNode>[];
+    int cur = opener.nextActive;
+    while (cur != -1) {
+      final _InlineItem childItem = _items[cur];
+      final MarkdownInlineNode n = childItem.node;
+      if (childItem.inlineDepth > maxChildDepth) {
+        maxChildDepth = childItem.inlineDepth;
+      }
+      if (n is! TextNode || n.text.isNotEmpty) {
+        rawChildren.add(n);
+      }
+      cur = childItem.nextActive;
+    }
+    final List<MarkdownInlineNode> children = freezeList(
+      _coalesceTextNodes(rawChildren),
+    );
 
-    // Remove inner items and opener from `_items` and `_delimiterIndices`.
-    _items.removeRange(openerItemIdx, _items.length);
-    _delimiterIndices.removeWhere((int idx) => idx >= openerItemIdx);
+    // Truncate delimiter lists in O(1) back to opener.delimStackLen.
+    _delimiterIndices.length = opener.delimStackLen;
+    _prevDelim.length = opener.delimStackLen;
+    _nextDelim.length = opener.delimStackLen;
+    _delimTail = opener.savedDelimTail;
+    if (_delimTail != -1) {
+      _nextDelim[_delimTail] = -1;
+    } else {
+      _delimHead = -1;
+    }
 
+    // Unlink `opener` and everything after it from active items in O(1).
+    final int beforeOpener = opener.prevActive;
+    if (beforeOpener != -1) {
+      _items[beforeOpener].nextActive = -1;
+      _activeTail = beforeOpener;
+    } else {
+      _activeHead = -1;
+      _activeTail = -1;
+    }
+
+    final int newDepth = 1 + maxChildDepth;
     if (isImage) {
-      resolver._recordImageUrl(safeDest);
       final String alt = _extractAltText(children);
-      _items.add(
+      _appendActiveItem(
         _InlineItem.node(
-          ImageNode(
-            destination: safeDest,
+          resolver._makeImageNode(
+            rawDestination: destination ?? '',
             alt: alt,
             title: title,
             children: children,
             span: _span(opener.bracketSourcePos, afterBracket),
           ),
+          inlineDepth: newDepth,
         ),
       );
     } else {
@@ -1199,14 +1988,16 @@ final class _InlineScanner {
           _items[bIdx].bracketActive = false;
         }
       }
-      _items.add(
+      _appendActiveItem(
         _InlineItem.node(
-          LinkNode(
-            destination: safeDest,
+          resolver._makeLinkNode(
+            rawDestination: destination ?? '',
             title: title,
             children: children,
+            isAutolink: false,
             span: _span(opener.bracketSourcePos, afterBracket),
           ),
+          inlineDepth: newDepth,
         ),
       );
     }
@@ -1227,12 +2018,10 @@ final class _InlineScanner {
 
     String dest = '';
     if (input.codeUnitAt(i) == 0x29) {
-      // Empty destination `()`.
       return (destination: '', title: null, nextIndex: i + 1);
     }
 
     if (input.codeUnitAt(i) == 0x3C) {
-      // Angle-bracketed destination `<...>`.
       i++;
       final int dStart = i;
       bool foundClose = false;
@@ -1259,7 +2048,6 @@ final class _InlineScanner {
         return null;
       }
     } else {
-      // Unbracketed destination with balanced parentheses (up to 32 levels).
       final int dStart = i;
       int parenDepth = 0;
       while (i < len) {
@@ -1292,7 +2080,6 @@ final class _InlineScanner {
       dest = unescapeMarkdownString(input.substring(dStart, i));
     }
 
-    // Optional whitespace + optional title + closing `)`.
     int wsCount = 0;
     while (i < len && isAsciiWhitespace(input.codeUnitAt(i))) {
       wsCount++;
@@ -1378,11 +2165,6 @@ final class _InlineScanner {
     }
     final int count = end - pos;
 
-    // Handle tilde/equals/caret constraints cleanly:
-    // - GFM strikethrough (`~` without subscript): only runs of length 1 or 2.
-    // - Subscript (`~` with subscript): length 1 = subscript, length 2 = strike, >=3 = literal.
-    // - Highlight (`=`): length 2 only.
-    // - Superscript (`^`): length 1 only.
     if (delimCu == 0x7E && count >= 3) {
       _appendText(input.substring(pos, end), _span(pos, end));
       return end;
@@ -1409,25 +2191,16 @@ final class _InlineScanner {
     final bool rightFlanking =
         !beforeWs && (!beforePunct || afterWs || afterPunct);
 
-    bool canOpen;
-    bool canClose;
+    final bool canOpen;
+    final bool canClose;
 
     if (delimCu == 0x5F) {
-      // '_' intraword rule.
       canOpen = leftFlanking && (!rightFlanking || beforePunct);
       canClose = rightFlanking && (!leftFlanking || afterPunct);
     } else if (delimCu == 0x7E) {
-      // '~' rules: when subscript is enabled and count==1, allow intraword (H~2~O).
-      if (options.subscript && count == 1) {
-        canOpen = leftFlanking;
-        canClose = rightFlanking;
-      } else {
-        // GFM strikethrough uses flanking rules (`~` cannot match inside whitespace).
-        canOpen = leftFlanking;
-        canClose = rightFlanking;
-      }
+      canOpen = leftFlanking;
+      canClose = rightFlanking;
     } else {
-      // '*', '==', '^'
       canOpen = leftFlanking;
       canClose = rightFlanking;
     }
@@ -1440,31 +2213,24 @@ final class _InlineScanner {
       canClose: canClose,
       span: _span(pos, end),
     )..isDelimiter = true;
-    final int idx = _items.length;
-    _items.add(item);
-    _delimiterIndices.add(idx);
+    _appendDelimiter(item);
     return end;
   }
 
-  int _findDelimiterBottomAfter(int bracketItemIdx) {
-    for (int k = _delimiterIndices.length - 1; k >= 0; k--) {
-      if (_delimiterIndices[k] < bracketItemIdx) {
-        return k;
-      }
-    }
-    return -1;
-  }
-
-  void _processEmphasis(int stackBottomDelimListIdx) {
-    // Openers bottom table keyed by (delimChar, closerOrigLen % 3, closerCanOpen).
+  void _processEmphasis({
+    required int bottomDelimPos,
+    required int firstCandidateDelimPos,
+    required int maxAllowedDepth,
+  }) {
     final Map<int, int> openersBottom = <int, int>{};
+    int depthFloorDelimPos = bottomDelimPos;
 
-    int currentPos = stackBottomDelimListIdx + 1;
-    while (currentPos < _delimiterIndices.length) {
+    int currentPos = firstCandidateDelimPos;
+    while (currentPos != -1) {
       final int closerItemIdx = _delimiterIndices[currentPos];
       final _InlineItem closer = _items[closerItemIdx];
       if (!closer.isDelimiter || !closer.canClose || closer.delimCount == 0) {
-        currentPos++;
+        currentPos = _nextDelim[currentPos];
         continue;
       }
 
@@ -1472,10 +2238,13 @@ final class _InlineScanner {
           (closer.delimChar << 4) |
           ((closer.origCount % 3) << 1) |
           (closer.canOpen ? 1 : 0);
-      final int bottomLimit = openersBottom[key] ?? stackBottomDelimListIdx;
+      int bottomLimit = openersBottom[key] ?? bottomDelimPos;
+      if (depthFloorDelimPos > bottomLimit) {
+        bottomLimit = depthFloorDelimPos;
+      }
 
-      int openerPos = currentPos - 1;
-      bool foundOpener = false;
+      int openerPos = _prevDelim[currentPos];
+      int foundOpenerPos = -1;
 
       while (openerPos > bottomLimit) {
         final int openerItemIdx = _delimiterIndices[openerPos];
@@ -1484,48 +2253,79 @@ final class _InlineScanner {
             !opener.canOpen ||
             opener.delimCount == 0 ||
             opener.delimChar != closer.delimChar) {
-          openerPos--;
+          openerPos = _prevDelim[openerPos];
           continue;
         }
 
-        // Exact length check for tilde (`~` vs `~~`), highlight (`==`), and superscript (`^`).
         if (closer.delimChar == 0x7E ||
             closer.delimChar == 0x3D ||
             closer.delimChar == 0x5E) {
           if (opener.origCount != closer.origCount) {
-            openerPos--;
+            openerPos = _prevDelim[openerPos];
             continue;
           }
         }
 
-        // CommonMark Rule 9/10 (multiple of 3 rule) for `*` and `_`.
         if ((closer.delimChar == 0x2A || closer.delimChar == 0x5F) &&
             (opener.canClose || closer.canOpen) &&
             ((opener.origCount + closer.origCount) % 3 == 0) &&
             !(opener.origCount % 3 == 0 && closer.origCount % 3 == 0)) {
-          openerPos--;
+          openerPos = _prevDelim[openerPos];
           continue;
         }
 
-        foundOpener = true;
+        foundOpenerPos = openerPos;
         break;
       }
 
-      if (!foundOpener) {
+      if (foundOpenerPos == -1) {
         openersBottom[key] = currentPos - 1;
+        final int nextPos = _nextDelim[currentPos];
         if (!closer.canOpen) {
           closer.isDelimiter = false;
+          _unlinkDelim(currentPos);
         }
-        currentPos++;
+        currentPos = nextPos;
         continue;
       }
 
-      final int openerItemIdx = _delimiterIndices[openerPos];
+      final int openerItemIdx = _delimiterIndices[foundOpenerPos];
       final _InlineItem opener = _items[openerItemIdx];
+
+      // Measure interior nesting depth BEFORE mutating/unlinking so exceeded
+      // delimiters remain cleanly untouched as literal text in O(N).
+      int maxChildDepth = 0;
+      bool exceedsDepth = false;
+      int cur = opener.nextActive;
+      while (cur != -1 && cur != closerItemIdx) {
+        final int d = _items[cur].inlineDepth;
+        if (d > maxChildDepth) {
+          maxChildDepth = d;
+          if (1 + maxChildDepth > maxAllowedDepth) {
+            exceedsDepth = true;
+            break;
+          }
+        }
+        cur = _items[cur].nextActive;
+      }
+
+      if (exceedsDepth || 1 + maxChildDepth > maxAllowedDepth) {
+        if (foundOpenerPos > depthFloorDelimPos) {
+          depthFloorDelimPos = foundOpenerPos;
+        }
+        openersBottom[key] = currentPos - 1;
+        final int nextPos = _nextDelim[currentPos];
+        if (!closer.canOpen) {
+          closer.isDelimiter = false;
+          _unlinkDelim(currentPos);
+        }
+        currentPos = nextPos;
+        continue;
+      }
 
       final int useCount;
       if (closer.delimChar == 0x7E) {
-        useCount = opener.delimCount; // 1 or 2
+        useCount = opener.delimCount;
       } else if (closer.delimChar == 0x3D) {
         useCount = 2;
       } else if (closer.delimChar == 0x5E) {
@@ -1537,34 +2337,34 @@ final class _InlineScanner {
       opener.delimCount -= useCount;
       closer.delimCount -= useCount;
 
-      final String delimStr = String.fromCharCode(opener.delimChar) * useCount;
+      final String delimStr = _repeatDelimChar(opener.delimChar, useCount);
       opener.node = TextNode(
-        String.fromCharCode(opener.delimChar) * opener.delimCount,
+        _repeatDelimChar(opener.delimChar, opener.delimCount),
         span: opener.node.span,
       );
       closer.node = TextNode(
-        String.fromCharCode(closer.delimChar) * closer.delimCount,
+        _repeatDelimChar(closer.delimChar, closer.delimCount),
         span: closer.node.span,
       );
 
-      // Deactivate any leftover delimiters strictly between opener and closer.
-      for (int k = openerPos + 1; k < currentPos; k++) {
-        final _InlineItem mid = _items[_delimiterIndices[k]];
-        mid.isDelimiter = false;
-        mid.canOpen = false;
-        mid.canClose = false;
-      }
+      // Drop all interior delimiters strictly between foundOpenerPos and
+      // currentPos in O(1) via doubly-linked delimiter chain.
+      _nextDelim[foundOpenerPos] = currentPos;
+      _prevDelim[currentPos] = foundOpenerPos;
 
-      // Collect children between openerItemIdx and closerItemIdx.
-      final List<MarkdownInlineNode> children = _coalesceTextNodes(
-        _collectActiveNodes(openerItemIdx + 1, closerItemIdx),
-      );
-      // Clear consumed interior items so subsequent scans don't revisit them.
-      for (int idx = openerItemIdx + 1; idx < closerItemIdx; idx++) {
-        _items[idx].node = const TextNode('');
-        _items[idx].isText = false;
-        _items[idx].isDelimiter = false;
+      // Collect interior active nodes between openerItemIdx and closerItemIdx.
+      final List<MarkdownInlineNode> rawChildren = <MarkdownInlineNode>[];
+      cur = opener.nextActive;
+      while (cur != -1 && cur != closerItemIdx) {
+        final MarkdownInlineNode n = _items[cur].node;
+        if (n is! TextNode || n.text.isNotEmpty) {
+          rawChildren.add(n);
+        }
+        cur = _items[cur].nextActive;
       }
+      final List<MarkdownInlineNode> children = freezeList(
+        _coalesceTextNodes(rawChildren),
+      );
 
       final SourceSpan emSpan = SourceSpan(
         startOffset: opener.node.span.startOffset,
@@ -1598,55 +2398,44 @@ final class _InlineScanner {
         );
       }
 
-      // Place wrapped node immediately after openerItemIdx (in slot openerItemIdx + 1).
-      // Wait: if openerItemIdx + 1 < closerItemIdx, reuse that slot! If adjacent
-      // (openerItemIdx + 1 == closerItemIdx, e.g. empty `****`? Can't happen for
-      // non-empty or empty? Actually for `****`, `****` is single run!), insert right after opener!
-      if (openerItemIdx + 1 < closerItemIdx) {
-        _items[openerItemIdx + 1]
-          ..node = wrapped
-          ..isText = false
-          ..isDelimiter = false
-          ..isBracket = false;
-      } else {
-        // Insert wrapped node between opener and closer, shifting later indices.
-        final int insertAt = openerItemIdx + 1;
-        _items.insert(insertAt, _InlineItem.node(wrapped));
-        for (int k = 0; k < _delimiterIndices.length; k++) {
-          if (_delimiterIndices[k] >= insertAt) {
-            _delimiterIndices[k]++;
-          }
-        }
-        for (int k = 0; k < _bracketIndices.length; k++) {
-          if (_bracketIndices[k] >= insertAt) {
-            _bracketIndices[k]++;
-          }
-        }
-      }
+      // Splice wrapped node into active item list between openerItemIdx and
+      // closerItemIdx in O(1), unlinking all interior items without shifting.
+      final int wrappedIdx = _items.length;
+      _items.add(
+        _InlineItem.node(wrapped, inlineDepth: 1 + maxChildDepth)
+          ..prevActive = openerItemIdx
+          ..nextActive = closerItemIdx,
+      );
+      opener.nextActive = wrappedIdx;
+      closer.prevActive = wrappedIdx;
 
       if (opener.delimCount == 0) {
         opener.isDelimiter = false;
         opener.isText = false;
+        _unlinkDelim(foundOpenerPos);
       }
       if (closer.delimCount == 0) {
         closer.isDelimiter = false;
         closer.isText = false;
-        currentPos++;
+        final int nextPos = _nextDelim[currentPos];
+        _unlinkDelim(currentPos);
+        currentPos = nextPos;
       }
     }
   }
 
-  List<MarkdownInlineNode> _collectActiveNodes(int start, int end) {
+  List<MarkdownInlineNode> _collectActiveNodesCoalesced(int headIdx) {
     final List<MarkdownInlineNode> result = <MarkdownInlineNode>[];
-    for (int i = start; i < end; i++) {
-      final _InlineItem item = _items[i];
+    int cur = headIdx;
+    while (cur != -1) {
+      final _InlineItem item = _items[cur];
       final MarkdownInlineNode n = item.node;
-      if (n is TextNode && n.text.isEmpty) {
-        continue;
+      if (n is! TextNode || n.text.isNotEmpty) {
+        result.add(n);
       }
-      result.add(n);
+      cur = item.nextActive;
     }
-    return result;
+    return _coalesceTextNodes(result);
   }
 
   // ===========================================================================
@@ -1736,8 +2525,8 @@ final class _InlineScanner {
             out.add(TextNode(text.substring(lastEmit, i), span: node.span));
           }
           out.add(
-            LinkNode(
-              destination: resolver._sanitizeDestination(match.url),
+            resolver._makeLinkNode(
+              rawDestination: match.url,
               isAutolink: true,
               children: <MarkdownInlineNode>[TextNode(match.label)],
               span: node.span,
@@ -1773,8 +2562,8 @@ final class _InlineScanner {
               out.add(TextNode(text.substring(lastEmit, i), span: node.span));
             }
             out.add(
-              LinkNode(
-                destination: resolver._sanitizeDestination(match.url),
+              resolver._makeLinkNode(
+                rawDestination: match.url,
                 isAutolink: true,
                 children: <MarkdownInlineNode>[TextNode(match.label)],
                 span: node.span,
@@ -1801,8 +2590,8 @@ final class _InlineScanner {
             );
           }
           out.add(
-            LinkNode(
-              destination: resolver._sanitizeDestination(emailMatch.href),
+            resolver._makeLinkNode(
+              rawDestination: emailMatch.href,
               isAutolink: true,
               children: <MarkdownInlineNode>[TextNode(emailMatch.label)],
               span: node.span,
@@ -2091,10 +2880,16 @@ final class _InlineScanner {
     List<MarkdownInlineNode> nodes,
   ) {
     return _mapTextNodes(nodes, (TextNode t) {
+      if (!t.text.contains(':')) {
+        return <MarkdownInlineNode>[t];
+      }
       final String replaced = t.text.replaceAllMapped(
-        RegExp(r':([a-z0-9_+-]+):'),
+        _emojiShortcodePattern,
         (Match m) => emojiShortcodes[m.group(1)!] ?? m.group(0)!,
       );
+      if (identical(replaced, t.text)) {
+        return <MarkdownInlineNode>[t];
+      }
       return <MarkdownInlineNode>[TextNode(replaced, span: t.span)];
     });
   }
@@ -2104,10 +2899,22 @@ final class _InlineScanner {
   ) {
     return _mapTextNodes(nodes, (TextNode t) {
       String s = t.text;
-      s = s.replaceAll('---', '\u2014');
-      s = s.replaceAll('--', '\u2013');
-      s = s.replaceAll('...', '\u2026');
-      s = _smartQuotes(s);
+      bool changed = false;
+      if (s.contains('--')) {
+        s = s.replaceAll('---', '\u2014').replaceAll('--', '\u2013');
+        changed = true;
+      }
+      if (s.contains('...')) {
+        s = s.replaceAll('...', '\u2026');
+        changed = true;
+      }
+      if (s.contains('"') || s.contains("'")) {
+        s = _smartQuotes(s);
+        changed = true;
+      }
+      if (!changed) {
+        return <MarkdownInlineNode>[t];
+      }
       return <MarkdownInlineNode>[TextNode(s, span: t.span)];
     });
   }
@@ -2145,20 +2952,22 @@ final class _InlineScanner {
   }
 
   List<MarkdownInlineNode> _applyAbbreviations(List<MarkdownInlineNode> nodes) {
-    final List<String> keys = resolver.abbreviations.keys.toList()
-      ..sort((String a, String b) => b.length.compareTo(a.length));
-    final RegExp abbrPattern = RegExp(
-      '\\b(${keys.map(RegExp.escape).join('|')})\\b',
-    );
+    final RegExp? abbrPattern = resolver.abbrPattern;
+    if (abbrPattern == null) {
+      return nodes;
+    }
     return _mapTextNodes(nodes, (TextNode t) {
       final List<MarkdownInlineNode> out = <MarkdownInlineNode>[];
       int last = 0;
       for (final Match m in abbrPattern.allMatches(t.text)) {
+        final String abbr = m.group(1)!;
+        final String? title = resolver.abbreviations[abbr];
+        if (title == null || !resolver.tryConsumeExpandedBytes(title.length)) {
+          break;
+        }
         if (m.start > last) {
           out.add(TextNode(t.text.substring(last, m.start), span: t.span));
         }
-        final String abbr = m.group(1)!;
-        final String title = resolver.abbreviations[abbr]!;
         out.add(
           AbbrInlineNode(
             title: title,
@@ -2235,12 +3044,9 @@ final class _InlineScanner {
           out.add(node);
         } else {
           out.add(
-            LinkNode(
-              destination: node.destination,
-              title: node.title,
+            createBlockedLinkNodeFromExisting(
+              node,
               children: _mapTextNodes(node.children, fn),
-              isAutolink: node.isAutolink,
-              span: node.span,
             ),
           );
         }
@@ -2250,6 +3056,27 @@ final class _InlineScanner {
     }
     return out;
   }
+}
+
+LinkNode createBlockedLinkNodeFromExisting(
+  LinkNode existing, {
+  required List<MarkdownInlineNode> children,
+}) {
+  if (isBlockedLinkNode(existing)) {
+    return createBlockedLinkNode(
+      title: existing.title,
+      children: children,
+      isAutolink: existing.isAutolink,
+      span: existing.span,
+    );
+  }
+  return LinkNode(
+    destination: existing.destination,
+    title: existing.title,
+    children: children,
+    isAutolink: existing.isAutolink,
+    span: existing.span,
+  );
 }
 
 List<MarkdownInlineNode> _coalesceTextNodes(List<MarkdownInlineNode> nodes) {
@@ -2323,6 +3150,110 @@ String _extractAltText(List<MarkdownInlineNode> nodes) {
   return out.toString();
 }
 
+bool _isHtmlAsciiAlpha(int cu) =>
+    (cu >= 0x41 && cu <= 0x5A) || (cu >= 0x61 && cu <= 0x7A);
+
+bool _isHtmlTagNameChar(int cu) =>
+    _isHtmlAsciiAlpha(cu) || (cu >= 0x30 && cu <= 0x39) || cu == 0x2D;
+
+bool _isHtmlAttrNameStart(int cu) =>
+    _isHtmlAsciiAlpha(cu) || cu == 0x5F || cu == 0x3A;
+
+bool _isHtmlAttrNameChar(int cu) =>
+    _isHtmlTagNameChar(cu) || cu == 0x5F || cu == 0x3A || cu == 0x2E;
+
+bool _isInlineHtmlWs(int cu) =>
+    cu == 0x20 || cu == 0x09 || cu == 0x0A || cu == 0x0D;
+
+bool _isBrTag(String rawHtml) {
+  final int len = rawHtml.length;
+  if (len < 4 || rawHtml.codeUnitAt(len - 1) != 0x3E) {
+    return false;
+  }
+  if (rawHtml.codeUnitAt(0) != 0x3C) {
+    return false;
+  }
+  final int b = rawHtml.codeUnitAt(1);
+  final int r = rawHtml.codeUnitAt(2);
+  if ((b != 0x62 && b != 0x42) || (r != 0x72 && r != 0x52)) {
+    return false;
+  }
+  int i = 3;
+  while (i < len - 1 && _isInlineHtmlWs(rawHtml.codeUnitAt(i))) {
+    i++;
+  }
+  if (i == len - 1) {
+    return true;
+  }
+  return i == len - 2 && rawHtml.codeUnitAt(i) == 0x2F;
+}
+
+bool _equalsAsciiIgnoreCase(String a, String b) {
+  if (a.length != b.length) {
+    return false;
+  }
+  for (int i = 0; i < a.length; i++) {
+    int ca = a.codeUnitAt(i);
+    int cb = b.codeUnitAt(i);
+    if (ca >= 0x41 && ca <= 0x5A) {
+      ca += 0x20;
+    }
+    if (cb >= 0x41 && cb <= 0x5A) {
+      cb += 0x20;
+    }
+    if (ca != cb) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int _indexOfAsciiIgnoreCase(String haystack, String lowerNeedle, int start) {
+  final int nLen = lowerNeedle.length;
+  final int limit = haystack.length - nLen;
+  for (int i = start; i <= limit; i++) {
+    bool match = true;
+    for (int j = 0; j < nLen; j++) {
+      int ch = haystack.codeUnitAt(i + j);
+      if (ch >= 0x41 && ch <= 0x5A) {
+        ch += 0x20;
+      }
+      if (ch != lowerNeedle.codeUnitAt(j)) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+int? _parseHtmlDimension(String raw) {
+  String s = raw.trim();
+  if (s.isEmpty) {
+    return null;
+  }
+  if (s.length > 2) {
+    final int c1 = s.codeUnitAt(s.length - 2);
+    final int c2 = s.codeUnitAt(s.length - 1);
+    if ((c1 == 0x70 || c1 == 0x50) && (c2 == 0x78 || c2 == 0x58)) {
+      s = s.substring(0, s.length - 2).trimRight();
+    }
+  }
+  final int? intVal = int.tryParse(s);
+  if (intVal != null) {
+    return (intVal > 0 && intVal <= 100000) ? intVal : null;
+  }
+  final double? val = double.tryParse(s);
+  if (val == null || !val.isFinite || val <= 0 || val > 100000) {
+    return null;
+  }
+  final int rounded = val.round();
+  return (rounded > 0 && rounded <= 100000) ? rounded : null;
+}
+
 final RegExp _uriAutolinkPattern = RegExp(
   r'^[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20\x7F<>]*$',
 );
@@ -2331,16 +3262,24 @@ final RegExp _emailAutolinkPattern = RegExp(
   r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$",
 );
 
-final RegExp _inlineHtmlDeclPattern = RegExp(
-  r'^<![A-Za-z]+[\x20\x09\n\r][^>]*>',
+final RegExp _emojiShortcodePattern = RegExp(r':([a-z0-9_+-]+):');
+
+final RegExp _anchorTagPattern = RegExp(
+  r'''^<a\s+(?:id|name)\s*=\s*(?:"([^"]+)"|'([^']+)')\s*>$''',
+  caseSensitive: false,
 );
 
-final RegExp _inlineHtmlTagPattern = RegExp(
-  r'^<(?:[A-Za-z][A-Za-z0-9-]*(?:[\x20\x09\n\r]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[\x20\x09\n\r]*=[\x20\x09\n\r]*(?:[^\x20\x09\n\r"'
-  "'"
-  r'=<>`]+|'
-  "'"
-  r"[^']*"
-  "'"
-  r'|"[^"]*"))?)*[\x20\x09\n\r]*/?|/[A-Za-z][A-Za-z0-9-]*[\x20\x09\n\r]*)>',
+final RegExp _pictureDarkSrcsetPattern = RegExp(
+  r'''prefers-color-scheme\s*:\s*dark[^>]*srcset\s*=\s*["']([^"']+)["']''',
+  caseSensitive: false,
+);
+
+final RegExp _pictureImgSrcPattern = RegExp(
+  r'''<img\b[^>]*src\s*=\s*["']([^"']+)["'][^>]*>''',
+  caseSensitive: false,
+);
+
+final RegExp _pictureAltPattern = RegExp(
+  r'''alt\s*=\s*["']([^"']*)["']''',
+  caseSensitive: false,
 );

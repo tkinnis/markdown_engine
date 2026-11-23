@@ -95,6 +95,9 @@ ParsedFrontmatter? tryParseFrontmatter(String source) {
   return null;
 }
 
+/// Maximum number of top-level frontmatter entries parsed per document.
+const int maxFrontmatterEntries = 1024;
+
 Map<String, Object?> _parseYamlEntries(String raw) {
   final Map<String, Object?> entries = <String, Object?>{};
   final List<String> lines = raw.split('\n');
@@ -134,19 +137,31 @@ Map<String, Object?> _parseYamlEntries(String raw) {
       currentListKey = null;
       continue;
     }
+    if (!entries.containsKey(key) && entries.length >= maxFrontmatterEntries) {
+      currentListKey = null;
+      continue;
+    }
     final String rest = line.substring(colon + 1).trim();
     if (rest.isEmpty) {
       entries[key] = <Object?>[];
       currentListKey = key;
     } else if (rest.startsWith('[') && rest.endsWith(']')) {
-      entries[key] = _parseInlineArray(rest.substring(1, rest.length - 1));
+      entries[key] = List<Object?>.unmodifiable(
+        _parseInlineArray(rest.substring(1, rest.length - 1)),
+      );
       currentListKey = null;
     } else {
       entries[key] = _parseYamlScalar(rest);
       currentListKey = null;
     }
   }
-  return entries;
+  for (final String key in entries.keys.toList(growable: false)) {
+    final Object? value = entries[key];
+    if (value is List<Object?>) {
+      entries[key] = List<Object?>.unmodifiable(value);
+    }
+  }
+  return Map<String, Object?>.unmodifiable(entries);
 }
 
 Map<String, Object?> _parseTomlEntries(String raw) {
@@ -162,14 +177,22 @@ Map<String, Object?> _parseTomlEntries(String raw) {
       continue;
     }
     final String key = _unquote(trimmed.substring(0, eq).trim());
+    if (key.isEmpty) {
+      continue;
+    }
+    if (!entries.containsKey(key) && entries.length >= maxFrontmatterEntries) {
+      continue;
+    }
     final String val = trimmed.substring(eq + 1).trim();
     if (val.startsWith('[') && val.endsWith(']')) {
-      entries[key] = _parseInlineArray(val.substring(1, val.length - 1));
+      entries[key] = List<Object?>.unmodifiable(
+        _parseInlineArray(val.substring(1, val.length - 1)),
+      );
     } else {
       entries[key] = _parseYamlScalar(val);
     }
   }
-  return entries;
+  return Map<String, Object?>.unmodifiable(entries);
 }
 
 List<Object?> _parseInlineArray(String inner) {

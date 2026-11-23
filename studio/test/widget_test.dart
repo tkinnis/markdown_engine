@@ -420,4 +420,87 @@ void main() {
     );
     expect(find.byType(SnackBar), findsOneWidget);
   });
+
+  testWidgets(
+    'Cursor-only editor moves trigger zero reparses, expanded inspector clears across presets, and Load remote images works',
+    (WidgetTester tester) async {
+      _setDesktopViewport(tester);
+
+      await tester.pumpWidget(const MarkdownStudioApp());
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('studio-parse-count')),
+          matching: find.text('Parses: 1'),
+        ),
+        findsOneWidget,
+      );
+
+      // Moving selection/caret without modifying text triggers 0 reparses.
+      final TextField editor = tester.widget<TextField>(
+        find.byKey(const Key('studio-source-editor')),
+      );
+      editor.controller!.selection = const TextSelection.collapsed(offset: 4);
+      await tester.pump();
+      editor.controller!.selection = const TextSelection.collapsed(offset: 12);
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('studio-parse-count')),
+          matching: find.text('Parses: 1'),
+        ),
+        findsOneWidget,
+      );
+
+      // Expand an AST card, then switch presets -> expanded IDs clear cleanly.
+      await tester.tap(find.text('HeadingNode').first);
+      await tester.pump();
+      expect(find.text('TextNode'), findsWidgets);
+
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Security & Sanitization').last);
+      await tester.pumpAndSettle();
+
+      // Switch back to Showcase and verify expanded inline nodes are collapsed.
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CommonMark & GFM Showcase').last);
+      await tester.pumpAndSettle();
+      expect(find.text('TextNode'), findsNothing);
+
+      // Switch to Security preset and approve remote image loading.
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Security & Sanitization').last);
+      await tester.pumpAndSettle();
+
+      final Finder previewScrollable = find
+          .descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      await tester.scrollUntilVisible(
+        find.text('Load remote images'),
+        250.0,
+        scrollable: previewScrollable,
+      );
+      await tester.ensureVisible(find.text('Load remote images'));
+      await tester.pumpAndSettle();
+      expect(find.text('Load remote images'), findsOneWidget);
+
+      await tester.tap(find.text('Load remote images'));
+      await tester.pump();
+      expect(find.text('Load remote images'), findsNothing);
+      expect(
+        find.text(
+          'Remote image loading approved for current view (MarkdownImagePolicy.ask).',
+        ),
+        findsWidgets,
+      );
+    },
+  );
 }

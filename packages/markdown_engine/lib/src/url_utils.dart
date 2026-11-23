@@ -1,9 +1,9 @@
 import 'entities.dart';
 import 'unicode.dart';
 
-/// Escapes plain text for safe HTML element body output (`&`, `<`, `>`, `"`).
-String escapeHtmlText(String text) {
-  final StringBuffer out = StringBuffer();
+/// Escapes plain text for safe HTML element body output (`&`, `<`, `>`, `"`),
+/// writing directly into [out].
+void writeEscapedHtml(StringBuffer out, String text) {
   int last = 0;
   for (int i = 0; i < text.length; i++) {
     final int cu = text.codeUnitAt(i);
@@ -29,6 +29,41 @@ String escapeHtmlText(String text) {
     }
   }
   if (last == 0) {
+    out.write(text);
+  } else if (last < text.length) {
+    out.write(text.substring(last));
+  }
+}
+
+/// Escapes plain text for safe HTML element body output (`&`, `<`, `>`, `"`).
+String escapeHtmlText(String text) {
+  StringBuffer? out;
+  int last = 0;
+  for (int i = 0; i < text.length; i++) {
+    final int cu = text.codeUnitAt(i);
+    String? replacement;
+    switch (cu) {
+      case 0x26:
+        replacement = '&amp;';
+      case 0x3C:
+        replacement = '&lt;';
+      case 0x3E:
+        replacement = '&gt;';
+      case 0x22:
+        replacement = '&quot;';
+      default:
+        break;
+    }
+    if (replacement != null) {
+      out ??= StringBuffer();
+      if (i > last) {
+        out.write(text.substring(last, i));
+      }
+      out.write(replacement);
+      last = i + 1;
+    }
+  }
+  if (out == null) {
     return text;
   }
   if (last < text.length) {
@@ -40,15 +75,24 @@ String escapeHtmlText(String text) {
 /// Unescapes CommonMark backslash escapes and HTML character references inside
 /// link destinations, titles, and fenced code info strings.
 String unescapeMarkdownString(String input) {
-  final StringBuffer out = StringBuffer();
+  if (!input.contains(r'\') && !input.contains('&')) {
+    return input;
+  }
+  StringBuffer? out;
+  int last = 0;
   int i = 0;
   while (i < input.length) {
     final int cu = input.codeUnitAt(i);
     if (cu == 0x5C && i + 1 < input.length) {
       final int next = input.codeUnitAt(i + 1);
       if (isAsciiPunctuation(next)) {
+        out ??= StringBuffer();
+        if (i > last) {
+          out.write(input.substring(last, i));
+        }
         out.writeCharCode(next);
         i += 2;
+        last = i;
         continue;
       }
     } else if (cu == 0x26) {
@@ -57,13 +101,23 @@ String unescapeMarkdownString(String input) {
         i,
       );
       if (decoded != null) {
+        out ??= StringBuffer();
+        if (i > last) {
+          out.write(input.substring(last, i));
+        }
         out.write(decoded.text);
         i = decoded.nextIndex;
+        last = i;
         continue;
       }
     }
-    out.writeCharCode(cu);
     i++;
+  }
+  if (out == null) {
+    return input;
+  }
+  if (last < input.length) {
+    out.write(input.substring(last));
   }
   return out.toString();
 }
@@ -71,7 +125,8 @@ String unescapeMarkdownString(String input) {
 /// Percent-encodes a resolved destination URL for HTML `href`/`src` attributes
 /// matching CommonMark `0.31.2` and `cmark-gfm` (`houdini_escape_href`) rules.
 String percentEncodeUrl(String url) {
-  final StringBuffer out = StringBuffer();
+  StringBuffer? out;
+  int last = 0;
   int i = 0;
   while (i < url.length) {
     final int cu = url.codeUnitAt(i);
@@ -79,24 +134,36 @@ String percentEncodeUrl(String url) {
         i + 2 < url.length &&
         _isHexDigit(url.codeUnitAt(i + 1)) &&
         _isHexDigit(url.codeUnitAt(i + 2))) {
-      out.write(url.substring(i, i + 3));
       i += 3;
       continue;
     }
     if (cu == 0x26) {
+      out ??= StringBuffer();
+      if (i > last) {
+        out.write(url.substring(last, i));
+      }
       out.write('&amp;');
       i++;
+      last = i;
       continue;
     }
     if (cu == 0x27) {
+      out ??= StringBuffer();
+      if (i > last) {
+        out.write(url.substring(last, i));
+      }
       out.write('&#x27;');
       i++;
+      last = i;
       continue;
     }
     if (cu < 0x80 && _isHrefSafeAscii(cu)) {
-      out.writeCharCode(cu);
       i++;
       continue;
+    }
+    out ??= StringBuffer();
+    if (i > last) {
+      out.write(url.substring(last, i));
     }
     // Encode full UTF-8 byte sequence of the Unicode scalar value.
     int cp = cu;
@@ -110,6 +177,13 @@ String percentEncodeUrl(String url) {
     }
     _writeUtf8PercentEncoded(out, cp);
     i += step;
+    last = i;
+  }
+  if (out == null) {
+    return url;
+  }
+  if (last < url.length) {
+    out.write(url.substring(last));
   }
   return out.toString();
 }
@@ -117,23 +191,29 @@ String percentEncodeUrl(String url) {
 /// Percent-encodes URL characters while leaving `'` unencoded (`cmark-gfm`
 /// footnote `href`/`id` attribute normalization).
 String percentEncodeHrefFragment(String fragment) {
-  final StringBuffer out = StringBuffer();
+  StringBuffer? out;
+  int last = 0;
   int i = 0;
   while (i < fragment.length) {
     final int cu = fragment.codeUnitAt(i);
     if (cu < 0x80 && _isHrefSafeAscii(cu) && cu != 0x27 && cu != 0x26) {
-      out.writeCharCode(cu);
       i++;
       continue;
+    }
+    out ??= StringBuffer();
+    if (i > last) {
+      out.write(fragment.substring(last, i));
     }
     if (cu == 0x27) {
       out.write('&#x27;');
       i++;
+      last = i;
       continue;
     }
     if (cu == 0x26) {
       out.write('&amp;');
       i++;
+      last = i;
       continue;
     }
     int cp = cu;
@@ -147,6 +227,13 @@ String percentEncodeHrefFragment(String fragment) {
     }
     _writeUtf8PercentEncoded(out, cp);
     i += step;
+    last = i;
+  }
+  if (out == null) {
+    return fragment;
+  }
+  if (last < fragment.length) {
+    out.write(fragment.substring(last));
   }
   return out.toString();
 }
@@ -155,25 +242,55 @@ String percentEncodeHrefFragment(String fragment) {
 /// whitespace, collapsing internal whitespace runs to a single space, and
 /// applying full Unicode case folding.
 String normalizeLinkLabel(String rawLabel) {
-  final StringBuffer collapsed = StringBuffer();
+  final int len = rawLabel.length;
+  int start = 0;
+  while (start < len && isAsciiWhitespace(rawLabel.codeUnitAt(start))) {
+    start++;
+  }
+  if (start == len) {
+    return '';
+  }
+  int end = len;
+  while (end > start && isAsciiWhitespace(rawLabel.codeUnitAt(end - 1))) {
+    end--;
+  }
+  StringBuffer? collapsed;
   bool inSpace = false;
-  bool seenNonSpace = false;
-  for (int i = 0; i < rawLabel.length; i++) {
+  int last = start;
+  for (int i = start; i < end; i++) {
     final int cu = rawLabel.codeUnitAt(i);
     if (isAsciiWhitespace(cu)) {
-      if (seenNonSpace) {
+      if (!inSpace &&
+          cu == 0x20 &&
+          i + 1 < end &&
+          !isAsciiWhitespace(rawLabel.codeUnitAt(i + 1))) {
+        continue;
+      }
+      collapsed ??= StringBuffer();
+      if (!inSpace) {
+        if (i > last) {
+          collapsed.write(rawLabel.substring(last, i));
+        }
+        collapsed.writeCharCode(0x20);
         inSpace = true;
       }
+      last = i + 1;
     } else {
-      if (inSpace) {
-        collapsed.writeCharCode(0x20);
-        inSpace = false;
-      }
-      collapsed.writeCharCode(cu);
-      seenNonSpace = true;
+      inSpace = false;
     }
   }
-  return caseFold(collapsed.toString());
+  final String normalizedWs;
+  if (collapsed == null) {
+    normalizedWs = (start == 0 && end == len)
+        ? rawLabel
+        : rawLabel.substring(start, end);
+  } else {
+    if (last < end) {
+      collapsed.write(rawLabel.substring(last, end));
+    }
+    normalizedWs = collapsed.toString();
+  }
+  return caseFold(normalizedWs);
 }
 
 void _writeUtf8PercentEncoded(StringBuffer out, int cp) {

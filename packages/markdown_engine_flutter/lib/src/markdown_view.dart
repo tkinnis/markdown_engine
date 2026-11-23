@@ -1,8 +1,8 @@
-import 'dart:async';
-
-// Keeps SelectionArea compatibility with Flutter 3.32-3.50+ callers.
+// Keeps MaterialLocalizations/SelectionArea compatibility with Flutter 3.32-3.50+ callers.
 // ignore: deprecated_member_use
-import 'package:flutter/material.dart' show SelectionArea;
+import 'package:flutter/material.dart'
+    show MaterialLocalizations, SelectionArea;
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 
@@ -16,8 +16,8 @@ import 'theme.dart';
 /// virtualization, zero-reparse theme switching, pre-parsed documents, and
 /// live incremental streaming.
 final class MarkdownView extends StatefulWidget {
-  /// Creates a [MarkdownView] that parses [data] once in widget state and only
-  /// re-parses when [data], [options], or [engine] changes.
+  /// Creates a [MarkdownView] that parses [data] once in widget state and
+  /// incrementally updates on subsequent [data] edits.
   const MarkdownView(
     String data, {
     super.key,
@@ -27,8 +27,10 @@ final class MarkdownView extends StatefulWidget {
     this.theme,
     this.delegates = const MarkdownBuilderDelegates(),
     this.selectable = true,
+    this.focusNode,
     this.scrollable = true,
     this.showFrontmatter = true,
+    this.remoteImagesApproved = false,
     this.padding = EdgeInsets.zero,
     this.scrollController,
     this.physics,
@@ -50,8 +52,10 @@ final class MarkdownView extends StatefulWidget {
     this.theme,
     this.delegates = const MarkdownBuilderDelegates(),
     this.selectable = true,
+    this.focusNode,
     this.scrollable = true,
     this.showFrontmatter = true,
+    this.remoteImagesApproved = false,
     this.padding = EdgeInsets.zero,
     this.scrollController,
     this.physics,
@@ -67,19 +71,21 @@ final class MarkdownView extends StatefulWidget {
        streamPollInterval = null;
 
   /// Creates a [MarkdownView] bound to an incremental
-  /// [StreamingMarkdownController], smoothly updating settled prefix blocks and
-  /// active trailing blocks as chunks arrive.
+  /// [StreamingMarkdownController], subscribing directly to its push
+  /// notifications without polling timers.
   const MarkdownView.streaming({
     super.key,
     required StreamingMarkdownController controller,
     MarkdownController? markdownController,
     Listenable? listenable,
-    Duration? pollInterval = const Duration(milliseconds: 32),
+    Duration? pollInterval,
     this.theme,
     this.delegates = const MarkdownBuilderDelegates(),
     this.selectable = true,
+    this.focusNode,
     this.scrollable = true,
     this.showFrontmatter = true,
+    this.remoteImagesApproved = false,
     this.padding = EdgeInsets.zero,
     this.scrollController,
     this.physics,
@@ -104,12 +110,13 @@ final class MarkdownView extends StatefulWidget {
   /// [MarkdownView.streaming].
   final StreamingMarkdownController? streamingController;
 
-  /// Optional external [Listenable] notifying [MarkdownView.streaming] when new
-  /// chunks are appended to [streamingController].
+  /// Optional extra [Listenable] notifying [MarkdownView.streaming] alongside
+  /// [StreamingMarkdownController]'s built-in push listener notifications.
   final Listenable? streamListenable;
 
-  /// Polling interval used by [MarkdownView.streaming] to pick up chunks
-  /// appended to [streamingController] without an external [streamListenable].
+  /// Deprecated no-op retained for source compatibility;
+  /// [MarkdownView.streaming] uses push notifications from
+  /// [StreamingMarkdownController] with zero polling timers.
   final Duration? streamPollInterval;
 
   /// Optional per-widget [MarkdownOptions] overriding [engine] defaults.
@@ -129,8 +136,13 @@ final class MarkdownView extends StatefulWidget {
   /// and images.
   final MarkdownBuilderDelegates delegates;
 
-  /// Whether rendered text participates in text selection via [SelectionArea].
+  /// Whether rendered text participates in text selection via [SelectionArea]
+  /// or [SelectableRegion].
   final bool selectable;
+
+  /// Optional [FocusNode] forwarded to the enclosing [SelectionArea] or
+  /// [SelectableRegion] for keyboard shortcuts such as Select All and Copy.
+  final FocusNode? focusNode;
 
   /// Whether the view builds a virtualized [CustomScrollView] (`true`) or a
   /// compact non-scrolling [Column] (`false`).
@@ -138,6 +150,10 @@ final class MarkdownView extends StatefulWidget {
 
   /// Whether leading YAML/TOML [FrontmatterNode] metadata cards are rendered.
   final bool showFrontmatter;
+
+  /// Whether remote images are approved by the caller when
+  /// [MarkdownBuilderDelegates.imagePolicy] is [MarkdownImagePolicy.ask].
+  final bool remoteImagesApproved;
 
   /// Outer padding around the rendered Markdown blocks.
   final EdgeInsetsGeometry padding;
@@ -161,8 +177,8 @@ final class MarkdownView extends StatefulWidget {
 final class _MarkdownViewState extends State<MarkdownView> {
   late MarkdownDocument _document;
   ScrollController? _ownedScrollController;
-  Timer? _streamPollTimer;
   bool _remoteImagesApprovedLocally = false;
+  _MarkdownSelectionContainerDelegate? _selectionDelegate;
 
   ScrollController get _effectiveScrollController {
     final ScrollController? external = widget.scrollController;
@@ -171,6 +187,11 @@ final class _MarkdownViewState extends State<MarkdownView> {
     }
     return _ownedScrollController ??= ScrollController();
   }
+
+  bool get _effectiveRemoteImagesApproved =>
+      widget.remoteImagesApproved ||
+      widget.delegates.remoteImagesApproved ||
+      _remoteImagesApprovedLocally;
 
   @override
   void initState() {
@@ -185,13 +206,15 @@ final class _MarkdownViewState extends State<MarkdownView> {
     super.didUpdateWidget(oldWidget);
 
     if (!identical(oldWidget.controller, widget.controller) ||
-        !identical(oldWidget.scrollController, widget.scrollController)) {
+        !identical(oldWidget.scrollController, widget.scrollController) ||
+        oldWidget.scrollable != widget.scrollable ||
+        oldWidget.showFrontmatter != widget.showFrontmatter) {
       _detachControllers(oldWidget);
+      if (!widget.scrollable || widget.scrollController != null) {
+        _ownedScrollController?.dispose();
+        _ownedScrollController = null;
+      }
       _attachControllers();
-    }
-
-    if (oldWidget.delegates.imagePolicy != widget.delegates.imagePolicy) {
-      _remoteImagesApprovedLocally = false;
     }
 
     final bool modeChanged =
@@ -200,33 +223,89 @@ final class _MarkdownViewState extends State<MarkdownView> {
         (oldWidget.streamingController != null) !=
             (widget.streamingController != null);
 
+    if (oldWidget.delegates.imagePolicy != widget.delegates.imagePolicy ||
+        modeChanged ||
+        (oldWidget.remoteImagesApproved && !widget.remoteImagesApproved) ||
+        (oldWidget.delegates.remoteImagesApproved &&
+            !widget.delegates.remoteImagesApproved) ||
+        (widget.data != null && oldWidget.data != widget.data) ||
+        (widget.document != null &&
+            !identical(oldWidget.document, widget.document)) ||
+        (widget.streamingController != null &&
+            !identical(
+              oldWidget.streamingController,
+              widget.streamingController,
+            ))) {
+      _remoteImagesApprovedLocally = false;
+    }
+
+    if (oldWidget.selectable && !widget.selectable) {
+      _selectionDelegate?.dispose();
+      _selectionDelegate = null;
+    }
+
     if (!identical(oldWidget.streamListenable, widget.streamListenable) ||
         !identical(oldWidget.streamingController, widget.streamingController) ||
-        oldWidget.streamPollInterval != widget.streamPollInterval ||
         modeChanged) {
       _detachStreamListeners(oldWidget);
       _attachStreamListeners();
     }
 
     if (widget.data != null) {
-      if (modeChanged ||
+      final bool compatibleForIncremental =
+          !modeChanged &&
+          oldWidget.data != null &&
+          oldWidget.options == widget.options &&
+          oldWidget.engine == widget.engine;
+      if (compatibleForIncremental && oldWidget.data != widget.data) {
+        final IncrementalParseResult result =
+            IncrementalMarkdownParser(engine: widget.engine).parseIncremental(
+              widget.data!,
+              previousDocument: _document,
+              options: widget.options,
+            );
+        _document = result.document;
+        widget.controller?.updateDocument(
+          _document,
+          incrementParseCount: true,
+          showFrontmatter: widget.showFrontmatter,
+        );
+        _selectionDelegate?.clearSelectAllState();
+      } else if (modeChanged ||
           oldWidget.data != widget.data ||
           oldWidget.options != widget.options ||
           oldWidget.engine != widget.engine) {
         _document = widget.engine.parse(widget.data!, options: widget.options);
-        widget.controller?.updateDocument(_document, incrementParseCount: true);
-      } else if (!identical(oldWidget.controller, widget.controller)) {
-        widget.controller?.updateDocument(_document);
+        widget.controller?.updateDocument(
+          _document,
+          incrementParseCount: true,
+          showFrontmatter: widget.showFrontmatter,
+        );
+        _selectionDelegate?.clearSelectAllState();
+      } else if (!identical(oldWidget.controller, widget.controller) ||
+          oldWidget.showFrontmatter != widget.showFrontmatter) {
+        widget.controller?.updateDocument(
+          _document,
+          showFrontmatter: widget.showFrontmatter,
+        );
       }
       return;
     }
 
     if (widget.document != null) {
-      if (modeChanged ||
-          !identical(oldWidget.document, widget.document) ||
-          !identical(oldWidget.controller, widget.controller)) {
+      final bool docChanged =
+          modeChanged || !identical(oldWidget.document, widget.document);
+      if (docChanged ||
+          !identical(oldWidget.controller, widget.controller) ||
+          oldWidget.showFrontmatter != widget.showFrontmatter) {
         _document = widget.document!;
-        widget.controller?.updateDocument(_document);
+        widget.controller?.updateDocument(
+          _document,
+          showFrontmatter: widget.showFrontmatter,
+        );
+        if (docChanged) {
+          _selectionDelegate?.clearSelectAllState();
+        }
       }
       return;
     }
@@ -236,12 +315,16 @@ final class _MarkdownViewState extends State<MarkdownView> {
       final MarkdownDocument latest = streamCtrl.currentDocument;
       if (modeChanged ||
           !identical(_document, latest) ||
-          !identical(oldWidget.controller, widget.controller)) {
+          !identical(oldWidget.controller, widget.controller) ||
+          oldWidget.showFrontmatter != widget.showFrontmatter) {
         _document = latest;
-        widget.controller?.updateDocument(_document);
-      }
-      if (!streamCtrl.isFinished && _streamPollTimer == null) {
-        _startStreamPollTimer();
+        widget.controller?.updateDocument(
+          _document,
+          showFrontmatter: widget.showFrontmatter,
+        );
+        if (modeChanged || latest.source.isEmpty) {
+          _selectionDelegate?.clearSelectAllState();
+        }
       }
     }
   }
@@ -250,6 +333,8 @@ final class _MarkdownViewState extends State<MarkdownView> {
   void dispose() {
     _detachStreamListeners(widget);
     _detachControllers(widget);
+    _selectionDelegate?.dispose();
+    _selectionDelegate = null;
     _ownedScrollController?.dispose();
     _ownedScrollController = null;
     super.dispose();
@@ -258,27 +343,44 @@ final class _MarkdownViewState extends State<MarkdownView> {
   void _initializeDocument() {
     if (widget.data != null) {
       _document = widget.engine.parse(widget.data!, options: widget.options);
-      widget.controller?.updateDocument(_document, incrementParseCount: true);
+      widget.controller?.updateDocument(
+        _document,
+        incrementParseCount: true,
+        showFrontmatter: widget.showFrontmatter,
+      );
       return;
     }
     if (widget.document != null) {
       _document = widget.document!;
-      widget.controller?.updateDocument(_document);
+      widget.controller?.updateDocument(
+        _document,
+        showFrontmatter: widget.showFrontmatter,
+      );
       return;
     }
     final StreamingMarkdownController? streamCtrl = widget.streamingController;
     if (streamCtrl != null) {
       _document = streamCtrl.currentDocument;
-      widget.controller?.updateDocument(_document);
+      widget.controller?.updateDocument(
+        _document,
+        showFrontmatter: widget.showFrontmatter,
+      );
       return;
     }
     _document = const MarkdownDocument(source: '');
-    widget.controller?.updateDocument(_document);
+    widget.controller?.updateDocument(
+      _document,
+      showFrontmatter: widget.showFrontmatter,
+    );
   }
 
   void _attachControllers() {
-    if (widget.controller != null) {
-      widget.controller!.attachScrollController(_effectiveScrollController);
+    if (widget.controller != null && widget.scrollable) {
+      widget.controller!.attachScrollController(
+        _effectiveScrollController,
+        owner: this,
+        showFrontmatter: widget.showFrontmatter,
+      );
     }
   }
 
@@ -290,55 +392,22 @@ final class _MarkdownViewState extends State<MarkdownView> {
     final ScrollController? sc =
         targetWidget.scrollController ?? _ownedScrollController;
     if (sc != null) {
-      ctrl.detachScrollController(sc);
+      ctrl.detachScrollController(sc, owner: this);
     }
   }
 
   void _attachStreamListeners() {
-    if (widget.streamingController == null) {
+    final StreamingMarkdownController? streamCtrl = widget.streamingController;
+    if (streamCtrl == null) {
       return;
     }
+    streamCtrl.addListener(_syncFromStream);
     widget.streamListenable?.addListener(_syncFromStream);
-    _startStreamPollTimer();
   }
 
   void _detachStreamListeners(MarkdownView targetWidget) {
+    targetWidget.streamingController?.removeListener(_syncFromStream);
     targetWidget.streamListenable?.removeListener(_syncFromStream);
-    _streamPollTimer?.cancel();
-    _streamPollTimer = null;
-  }
-
-  void _startStreamPollTimer() {
-    _streamPollTimer?.cancel();
-    _streamPollTimer = null;
-    final StreamingMarkdownController? streamCtrl = widget.streamingController;
-    final Duration? interval = widget.streamPollInterval;
-    if (streamCtrl == null ||
-        interval == null ||
-        interval <= Duration.zero ||
-        streamCtrl.isFinished) {
-      return;
-    }
-    _streamPollTimer = Timer.periodic(interval, _onStreamPollTick);
-  }
-
-  void _onStreamPollTick(Timer timer) {
-    if (!mounted) {
-      timer.cancel();
-      return;
-    }
-    final StreamingMarkdownController? streamCtrl = widget.streamingController;
-    if (streamCtrl == null) {
-      timer.cancel();
-      return;
-    }
-    _syncFromStream();
-    if (streamCtrl.isFinished) {
-      timer.cancel();
-      if (identical(_streamPollTimer, timer)) {
-        _streamPollTimer = null;
-      }
-    }
   }
 
   void _syncFromStream() {
@@ -351,10 +420,21 @@ final class _MarkdownViewState extends State<MarkdownView> {
     }
     final MarkdownDocument latest = streamCtrl.currentDocument;
     if (!identical(latest, _document)) {
+      final bool wasReset =
+          latest.source.isEmpty && _document.source.isNotEmpty;
       setState(() {
         _document = latest;
+        if (wasReset) {
+          _remoteImagesApprovedLocally = false;
+        }
       });
-      widget.controller?.updateDocument(latest);
+      if (wasReset) {
+        _selectionDelegate?.clearSelectAllState();
+      }
+      widget.controller?.updateDocument(
+        latest,
+        showFrontmatter: widget.showFrontmatter,
+      );
     }
   }
 
@@ -364,6 +444,15 @@ final class _MarkdownViewState extends State<MarkdownView> {
         _remoteImagesApprovedLocally = true;
       });
     }
+  }
+
+  _MarkdownSelectionContainerDelegate _ensureSelectionDelegate(
+    MarkdownDocument activeDocument,
+  ) {
+    final _MarkdownSelectionContainerDelegate delegate = _selectionDelegate ??=
+        _MarkdownSelectionContainerDelegate();
+    delegate.fullPlainTextProvider = () => activeDocument.toPlainText();
+    return delegate;
   }
 
   Widget _buildNonScrollingColumn(
@@ -380,7 +469,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
       delegates: widget.delegates,
       urlPolicy: resolvedPolicy,
       controller: widget.controller,
-      remoteImagesApproved: _remoteImagesApprovedLocally,
+      remoteImagesApproved: _effectiveRemoteImagesApproved,
       onRequestLoadRemoteImages: _approveRemoteImagesLocally,
     );
 
@@ -417,7 +506,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
       controller: widget.controller,
       showFrontmatter: widget.showFrontmatter,
       padding: widget.padding == EdgeInsets.zero ? null : widget.padding,
-      remoteImagesApproved: _remoteImagesApprovedLocally,
+      remoteImagesApproved: _effectiveRemoteImagesApproved,
       onRequestLoadRemoteImages: _approveRemoteImagesLocally,
     );
 
@@ -434,15 +523,6 @@ final class _MarkdownViewState extends State<MarkdownView> {
 
   @override
   Widget build(BuildContext context) {
-    final StreamingMarkdownController? streamCtrl = widget.streamingController;
-    if (streamCtrl != null) {
-      final MarkdownDocument latest = streamCtrl.currentDocument;
-      if (!identical(latest, _document)) {
-        _document = latest;
-        widget.controller?.updateDocument(latest);
-      }
-    }
-
     final MarkdownDocument activeDocument = _document;
     final MarkdownThemeData resolvedTheme =
         widget.theme ?? MarkdownTheme.of(context);
@@ -483,9 +563,141 @@ final class _MarkdownViewState extends State<MarkdownView> {
     if (!widget.selectable) {
       return content;
     }
-    if (SelectionContainer.maybeOf(context) != null) {
-      return content;
+
+    final SelectionRegistrar? ancestorRegistrar = SelectionContainer.maybeOf(
+      context,
+    );
+    final Widget selectableContent = SelectionContainer(
+      delegate: _ensureSelectionDelegate(activeDocument),
+      child: content,
+    );
+    if (ancestorRegistrar != null) {
+      return selectableContent;
     }
-    return SelectionArea(child: content);
+
+    final bool hasMaterialLocalizations =
+        Localizations.of<MaterialLocalizations>(
+          context,
+          MaterialLocalizations,
+        ) !=
+        null;
+    if (hasMaterialLocalizations) {
+      return SelectionArea(
+        focusNode: widget.focusNode,
+        child: selectableContent,
+      );
+    }
+
+    if (MediaQuery.maybeOf(context) != null &&
+        Overlay.maybeOf(context) != null) {
+      return SelectableRegion(
+        focusNode: widget.focusNode,
+        selectionControls: emptyTextSelectionControls,
+        child: selectableContent,
+      );
+    }
+
+    return content;
+  }
+}
+
+final class _MarkdownSelectionContainerDelegate
+    extends StaticSelectionContainerDelegate {
+  bool _isSelectAllActive = false;
+  final Set<Selectable> _selectAllDispatched = <Selectable>{};
+  String Function()? fullPlainTextProvider;
+
+  void clearSelectAllState() {
+    _isSelectAllActive = false;
+    _selectAllDispatched.clear();
+  }
+
+  @override
+  void remove(Selectable selectable) {
+    _selectAllDispatched.remove(selectable);
+    super.remove(selectable);
+  }
+
+  @override
+  void didChangeSelectables() {
+    super.didChangeSelectables();
+    if (_isSelectAllActive) {
+      for (final Selectable selectable in selectables) {
+        if (_selectAllDispatched.add(selectable)) {
+          dispatchSelectionEventToChild(
+            selectable,
+            const SelectAllSelectionEvent(),
+          );
+        }
+      }
+      currentSelectionStartIndex = selectables.isEmpty ? -1 : 0;
+      currentSelectionEndIndex = selectables.isEmpty
+          ? -1
+          : selectables.length - 1;
+    }
+  }
+
+  @override
+  SelectionResult handleSelectAll(SelectAllSelectionEvent event) {
+    _isSelectAllActive = true;
+    _selectAllDispatched
+      ..clear()
+      ..addAll(selectables);
+    return super.handleSelectAll(event);
+  }
+
+  @override
+  SelectionResult handleClearSelection(ClearSelectionEvent event) {
+    clearSelectAllState();
+    return super.handleClearSelection(event);
+  }
+
+  @override
+  SelectionResult handleSelectionEdgeUpdate(SelectionEdgeUpdateEvent event) {
+    clearSelectAllState();
+    return super.handleSelectionEdgeUpdate(event);
+  }
+
+  @override
+  SelectionResult handleSelectWord(SelectWordSelectionEvent event) {
+    clearSelectAllState();
+    return super.handleSelectWord(event);
+  }
+
+  @override
+  SelectionResult handleSelectParagraph(SelectParagraphSelectionEvent event) {
+    clearSelectAllState();
+    return super.handleSelectParagraph(event);
+  }
+
+  @override
+  SelectionResult handleGranularlyExtendSelection(
+    GranularlyExtendSelectionEvent event,
+  ) {
+    clearSelectAllState();
+    return super.handleGranularlyExtendSelection(event);
+  }
+
+  @override
+  SelectionResult handleDirectionallyExtendSelection(
+    DirectionallyExtendSelectionEvent event,
+  ) {
+    clearSelectAllState();
+    return super.handleDirectionallyExtendSelection(event);
+  }
+
+  @override
+  SelectedContent? getSelectedContent() {
+    if (_isSelectAllActive) {
+      final String fullText = fullPlainTextProvider?.call() ?? '';
+      return fullText.isEmpty ? null : SelectedContent(plainText: fullText);
+    }
+    return super.getSelectedContent();
+  }
+
+  @override
+  void dispose() {
+    _selectAllDispatched.clear();
+    super.dispose();
   }
 }

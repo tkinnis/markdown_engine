@@ -128,6 +128,23 @@ int codePointAt(String text, int index) {
 
 /// Performs full Unicode case folding on [input] for CommonMark link label matching.
 String caseFold(String input) {
+  final int len = input.length;
+  bool hasUpperAscii = false;
+  bool hasNonAscii = false;
+  for (int i = 0; i < len; i++) {
+    final int cu = input.codeUnitAt(i);
+    if (cu >= 0x80) {
+      hasNonAscii = true;
+      break;
+    }
+    if (cu >= 0x41 && cu <= 0x5A) {
+      hasUpperAscii = true;
+    }
+  }
+  if (!hasNonAscii) {
+    return hasUpperAscii ? input.toLowerCase() : input;
+  }
+
   final StringBuffer out = StringBuffer();
   for (final int cp in input.runes) {
     if (cp >= 0x41 && cp <= 0x5A) {

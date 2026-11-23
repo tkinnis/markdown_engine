@@ -6,12 +6,12 @@ Pure-Dart Flutter sliver rendering widgets, widgets-first and Material theming, 
 
 ## Highlights
 
-* **Zero-Reparse Theme Switching**: `MarkdownView` parses Markdown once in widget state and only re-parses when `data`, `options`, or `engine` changes, so Light and Dark `MarkdownTheme` toggles perform zero AST re-parses.
-* **Lazy Sliver Virtualization**: `SliverMarkdownDocument` materializes only visible top-level blocks via `SliverChildBuilderDelegate` keyed by `node.blockId`, preserving widget state across incremental updates.
-* **Live LLM Streaming**: `MarkdownView.streaming` binds directly to `StreamingMarkdownController` to freeze settled prefix blocks while smoothly updating only the active trailing slice.
-* **Background Isolate Reader**: `MarkdownDocumentReader` parses short inputs (`< 4096` UTF-16 code units) synchronously and offloads larger documents to a background `Isolate.run` with latest-wins coalescing.
-* **Defense-in-Depth Security**: Interactive links are strictly gated through `MarkdownUrlPolicy` (so `javascript:`, `vbscript:`, unsafe `data:`, and control-character obfuscated URLs are never interactive), and remote images honor `MarkdownImagePolicy` (`block`, `ask`, `load`).
-* **Rich Native Widgets**: Supports headings with anchor registration, aligned GFM tables, task list checkboxes, all five GitHub Alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), YAML/TOML frontmatter cards, interactive collapsible `<details>`/`<summary>`, figures, aligned blocks, definition lists, footnotes with back-links, `<kbd>`, `<abbr>` tooltips, `<picture>`, and code blocks with language badges and copy buttons.
+* **Zero-Reparse Theme Switching & Incremental Updates**: `MarkdownView` caches the parsed AST in widget state, reuses untouched blocks automatically via `IncrementalMarkdownParser` on `data` edits (preserving stateful block widgets such as `<details>`), and performs zero re-parses when `MarkdownTheme` flips Light/Dark modes.
+* **Lazy Sliver Virtualization & Full-Document Selection**: `SliverMarkdownDocument` materializes only visible top-level blocks via `SliverChildBuilderDelegate` keyed by `node.blockId` (`addAutomaticKeepAlives: true`), works inside both `MaterialApp` (`SelectionArea`) and `WidgetsApp` (`SelectableRegion`), accepts an optional `focusNode`, excludes UI chrome (`Copy` buttons, bullets, alert badges) from selection, and exports full `document.toPlainText()` on `Cmd+A` / Select All across off-screen slivers.
+* **Push-Based LLM Streaming**: `MarkdownView.streaming` subscribes directly to `StreamingMarkdownController.addListener` with zero polling timers, freezing settled prefix blocks while updating only the active trailing slice (including post-`finish()` `reset()` / `append()` reuse).
+* **Background Isolate `ValueListenable` Reader**: `MarkdownDocumentReader` implements `ValueListenable<MarkdownDocument>` (`value`, `hasRead`), parses short inputs (`< 4096` UTF-16 code units) synchronously, offloads larger documents to `Isolate.run` with in-flight deduplication and latest-wins coalescing, and falls back synchronously on `IsolateSpawnException`.
+* **Defense-in-Depth Security & Accessibility**: Enforces `MarkdownUrlPolicy` (defaulting to strict scheme/host checks) on interactive links and images, gates remote/external images via `MarkdownImagePolicy` (`block`, `ask`, `load` with `remoteImagesApproved` scoping per document), and provides screen-reader `Semantics` (`headingLevel`, table header traits, single-speak `<abbr>` tooltips, link traits) and keyboard `FocusableActionDetector` controls.
+* **Rich Native Widgets**: Supports headings with anchor registration and `MarkdownController.readingPlaceNotifier` tracking, aligned GFM tables, task list checkboxes, all five GitHub Alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), YAML/TOML frontmatter cards, interactive collapsible `<details>`/`<summary>`, figures, aligned blocks, definition lists, footnotes with back-links, `<kbd>`, `<abbr>`, `<u>`/`<small>`/`<q>`, sized `<img width height>`, `<picture>`, and code blocks with language badges and copy buttons.
 
 ## Installation
 
@@ -57,7 +57,7 @@ Use `MarkdownView.document(document: preParsed)` to render a pre-parsed `Markdow
 
 ## Streaming LLM Responses
 
-Bind `MarkdownView.streaming` directly to a `StreamingMarkdownController` (optionally with an external `Listenable` to drive zero-poll frame updates):
+Bind `MarkdownView.streaming` directly to a `StreamingMarkdownController` for zero-poll push-driven UI updates as chunks arrive:
 
 ```dart
 final StreamingMarkdownController stream = StreamingMarkdownController(

@@ -51,7 +51,7 @@ Pure-Dart **CommonMark 0.31.2** and **GFM** with ==highlight==, H~2~O, x^2^, and
 
 ### Incremental Block Reuse (`IncrementalMarkdownParser`)
 
-In live editors, `IncrementalMarkdownParser` diffs normalized text, reuses unchanged blank-line-isolated prefix and suffix blocks with preserved `blockId` values, shifts suffix `SourceSpan`s, and reparses only the dirty slice:
+In live editors, `IncrementalMarkdownParser` reuses cached normalized source text, windows edits in $O(1)$ using `editStartOffset`/`editOldEndOffset`/`editNewEndOffset`, binary-searches unchanged blank-line-isolated prefix and suffix blocks with preserved `blockId` values, applies $O(1)$ lazy span shifting, and reparses only the dirty slice:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -68,6 +68,8 @@ void editInPlace() {
     '# Guide\n\nParagraph one (updated).\n\nParagraph two.\n',
     previousResult: v1,
     editStartOffset: 9,
+    editOldEndOffset: 23,
+    editNewEndOffset: 33,
   );
 
   assert(v2.reusedBlockCount == 2);
@@ -77,7 +79,7 @@ void editInPlace() {
 
 ### Streaming Token Feeds (`StreamingMarkdownController`)
 
-For token-by-token SSE or LLM streams, `StreamingMarkdownController` freezes completed leading blocks in `settledBlocks` and re-parses only the active trailing slice on each `append()`, reconciling exact parity on `finish()`:
+For token-by-token SSE or LLM streams, `StreamingMarkdownController` freezes completed leading blocks in `settledBlocks`, notifies registered push listeners (`addListener`/`removeListener`/`dispose`), and re-parses only the active trailing slice on each `append()`, reconciling exact parity on `finish()`:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -118,20 +120,20 @@ const MarkdownOptions hardenedOptions = MarkdownOptions.gfm(
 );
 ```
 
-* **`MarkdownUrlPolicy`**: Strips ASCII control characters before scheme parsing, blocks `javascript:`, `vbscript:`, and `data:` by default, supports scheme and host allowlists, and offers opt-in raster image data URIs (`allowSafeImageDataUrls`) while keeping SVG data URIs blocked.
-* **GFM `tagfilter` & `sanitizeHtml`**: Escapes disallowed GFM tags by default (`gfmTagFilter: true`), and when `sanitizeHtml: true` strips `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<svg>`, `<math>`, `<form>`, `on*` event handlers, `srcdoc`, unsafe inline CSS, and disallowed URI attributes.
-* **`MarkdownBudgets`**: Enforces caps on `maxInputLength` (`500000`), `maxNestingDepth` (`64`), `maxBlocks` (`50000`), `maxTableColumns` (`128`), `maxTableRows` (`10000`), `maxHtmlBytes` (`250000`), and `maxTokens` (`500000`).
+* **`MarkdownUrlPolicy`**: Defaults to `MarkdownUrlPolicy.strict()` on `MarkdownOptions()` (allowing `http`, `https`, `mailto`, relative paths, and `#fragments` while rejecting protocol-relative `//`, userinfo `@`, `javascript:`, `vbscript:`, unsafe `data:`, and control/zero-width obfuscated URIs), with optional host allowlists and opt-in raster image data URIs (`allowSafeImageDataUrls`).
+* **GFM `tagfilter` & Linear HTML5 Sanitizer (`sanitizeHtml`)**: Escapes disallowed GFM tags by default (`gfmTagFilter: true`), and when `sanitizeHtml: true` runs a linear-time HTML5 state-machine tokenizer/allowlist sanitizer stripping `<script>`, `<style>`, `<noscript>`, `<template>`, `<iframe>`, `<object>`, `<embed>`, `<svg>`, `<math>`, `<form>`, `<meta>`, `on*` handlers, `srcdoc`, unsafe CSS `url(...)`, and disallowed URI attributes (`href`, `src`, `srcset`, `background`, `cite`, `ping`, `longdesc`, `poster`, `action`).
+* **`MarkdownBudgets`**: Enforces caps on `maxInputLength` (`500000`), `maxNestingDepth` (`64`, bounding both block containers and inline emphasis/brackets), `maxBlocks` (`50000`), `maxTableColumns` (`128`), `maxTableRows` (`10000`), `maxHtmlBytes` (`250000`), `maxTokens` (`500000`), and `maxOutputBytes` (`4194304`).
 
 ## Core API Summary
 
 | Symbol | Role |
 | :--- | :--- |
 | `MarkdownEngine` | Stateless entry point exposing `parse`, `renderToHtml`, and `toPlainText`. |
-| `MarkdownOptions` | Presets (`.commonMark()`, `.gfm()`, `.extended()`) and 26 feature/sanitization flags plus `budgets` and `urlPolicy`. |
-| `MarkdownDocument` | Immutable parsed output exposing `blocks`, `frontmatter`, `outline`, `footnotes`, `remoteImageAddresses`, `linkDefinitions`, `toHtml()`, `toPlainText()`, and `toJson()`. |
-| `HtmlRenderer` | Renders `List<MarkdownBlockNode>` to CommonMark/GFM HTML respecting sanitization and `maxHtmlBytes`. |
-| `IncrementalMarkdownParser` / `IncrementalParseResult` | Reuses unchanged prefix/suffix AST blocks across targeted document edits. |
-| `StreamingMarkdownController` | Accumulates streamed chunks with frozen `settledBlocks`, prefix-preserving `replaceText()`, and full-parity `finish()`. |
+| `MarkdownOptions` | Presets (`.commonMark()`, `.gfm()`, `.extended()`), default `MarkdownOptions()` (`headingSlugs: true`, `urlPolicy: MarkdownUrlPolicy.strict()`), and 26 feature/sanitization flags plus `budgets` and `urlPolicy`. |
+| `MarkdownDocument` | Immutable parsed output exposing `blocks`, `frontmatter`, `outline`, `footnotes`, `remoteImageAddresses`, `linkDefinitions`, `abbreviations`, `toHtml()`, `toPlainText()`, and `toJson()`. |
+| `HtmlRenderer` | Renders `List<MarkdownBlockNode>` to CommonMark/GFM HTML respecting sanitization, `maxHtmlBytes`, and `maxOutputBytes`. |
+| `IncrementalMarkdownParser` / `IncrementalParseResult` | Reuses unchanged prefix/suffix AST blocks across targeted document edits with $O(1)$ edit-windowing and lazy span shifting. |
+| `StreamingMarkdownController` | Accumulates streamed chunks with frozen `settledBlocks`, pure-Dart push listeners (`addListener`/`removeListener`/`dispose`), prefix-preserving `replaceText()`, and full-parity `finish()`. |
 | `MarkdownBlockNode` / `MarkdownInlineNode` | Sealed Dart 3 AST hierarchies (18 block subtypes, 20 inline subtypes) with `SourceSpan`, `blockId`, `toPlainText()`, and `shiftSpan()`. |
 | `HeadingSlugGenerator` / `slugifyHeadingText` | Deterministic GitHub-style heading anchor slug generation with collision deduplication. |
 
@@ -154,11 +156,11 @@ Native Dart AOT measurements on Apple M4 (`arm64`, macOS 15.6, Dart `3.13.5`) un
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) |
 | :--- | ---: | ---: | ---: | ---: |
-| `small_doc_parse_and_html` | 937 B (18 lines) | 28.30 us | **27.80 us** | 32.15 MB/s |
-| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 1.060 ms | **999.36 us** | 24.09 MB/s |
-| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 7.038 ms | **7.013 ms** | 23.52 MB/s |
-| `incremental_single_paragraph_edit` | 168.9 KB (1,457/1,458 reused, **4.01x**) | 1.717 ms | **1.747 ms** | 94.43 MB/s |
-| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (14/15 settled) | 13.18 us | **13.29 us** | 3.09 MB/s |
+| `small_doc_parse_and_html` | 937 B (18 lines) | 12.78 us | **12.77 us** | 70.00 MB/s |
+| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 402.74 us | **399.72 us** | 60.23 MB/s |
+| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 2.595 ms | **2.601 ms** | 63.43 MB/s |
+| `incremental_single_paragraph_edit` | 168.9 KB (`1,457/1,458` reused, **16.28x**) | 160.04 us | **159.80 us** | 1032.33 MB/s |
+| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (14/15 settled) | 3.06 us | **3.05 us** | 13.47 MB/s |
 
 ## License & Additional Resources
 

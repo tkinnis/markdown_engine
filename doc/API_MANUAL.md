@@ -24,7 +24,7 @@ flutter pub add markdown_engine_flutter
 | `MarkdownEngine.parse` | `MarkdownDocument parse(String source, {MarkdownOptions? options})` | Enforces `maxInputLength` (throws `RangeError` if exceeded), runs Phase 1 and Phase 2 parsing, and returns an immutable `MarkdownDocument`. |
 | `MarkdownEngine.renderToHtml` | `String renderToHtml(String source, {MarkdownOptions? options})` | Parses `source` and serializes directly to CommonMark/GFM HTML. |
 | `MarkdownEngine.toPlainText` | `String toPlainText(String source, {MarkdownOptions? options})` | Parses `source` and extracts normalized plain text joined across blocks by `\n\n`. |
-| `MarkdownDocument` | `source`, `options`, `blocks`, `frontmatter`, `outline`, `footnotes`, `remoteImageAddresses`, `linkDefinitions`, `isEmpty`, `toHtml()`, `toPlainText()`, `toJson()` | Immutable parsed document holding unmodifiable AST blocks, extracted metadata, and HTML/text/JSON exporters. |
+| `MarkdownDocument` | `source`, `options`, `blocks`, `frontmatter`, `outline`, `footnotes`, `remoteImageAddresses`, `linkDefinitions`, `abbreviations`, `isEmpty`, `toHtml()`, `toPlainText()`, `toJson()` | Immutable parsed document holding frozen AST blocks, extracted metadata, and HTML/text/JSON exporters. |
 | `HtmlRenderer` | `const HtmlRenderer({MarkdownOptions options = const MarkdownOptions()})`, `String render(List<MarkdownBlockNode> blocks)` | Renders any list of `MarkdownBlockNode`s to CommonMark `0.31.2` / `cmark-gfm` HTML while enforcing `gfmTagFilter`, `sanitizeHtml`, `sanitizeUrls`, and `maxHtmlBytes`. |
 
 ```dart
@@ -61,10 +61,10 @@ Pure-Dart **CommonMark** and *GFM* with `code`, ~~old~~, and ==highlight==.
 
 | Preset Constructor | Enabled Feature Set |
 | :--- | :--- |
-| `const MarkdownOptions(...)` | Default GFM core flags (`gfmTables`, `gfmStrikethrough`, `gfmTaskLists`, `gfmAutolinks`, `gfmTagFilter`) enabled; optional extensions off; `sanitizeUrls: true`, `sanitizeHtml: false`. |
-| `const MarkdownOptions.commonMark(...)` | Strict CommonMark `0.31.2` compliance with all GFM and optional extensions disabled; `sanitizeUrls: true`, `sanitizeHtml: false`. |
-| `const MarkdownOptions.gfm(...)` | Standard GitHub Flavored Markdown (`0.29.0.gfm.13`): enables all five core GFM flags plus `footnotes: true` and `headingSlugs: true` by default; individual extensions remain overridable. |
-| `const MarkdownOptions.extended(...)` | Enables GFM plus every optional block and inline extension (`footnotes`, `alerts`, `frontmatter`, `definitionLists`, `math`, `headingSlugs`, `highlight`, `subscript`, `superscript`, `emoji`, `smartPunctuation`, `explicitHeadingIds`, `detailsBlocks`, `figureBlocks`, `alignedBlocks`, `kbd`, `abbreviations`, `inlineBreaks`). |
+| `const MarkdownOptions(...)` | Default GFM core flags (`gfmTables`, `gfmStrikethrough`, `gfmTaskLists`, `gfmAutolinks`, `gfmTagFilter`) plus `headingSlugs: true` enabled; optional extensions off; `sanitizeUrls: true`, `sanitizeHtml: false`, `urlPolicy: const MarkdownUrlPolicy.strict()`. |
+| `const MarkdownOptions.commonMark(...)` | Strict CommonMark `0.31.2` compliance with all GFM and optional extensions disabled; `sanitizeUrls: true`, `sanitizeHtml: false`, `urlPolicy: const MarkdownUrlPolicy()`. |
+| `const MarkdownOptions.gfm(...)` | Standard GitHub Flavored Markdown (`0.29.0.gfm.13`): enables all five core GFM flags plus `footnotes: true` and `headingSlugs: true` by default; `urlPolicy: const MarkdownUrlPolicy()`; individual extensions remain overridable. |
+| `const MarkdownOptions.extended(...)` | Enables GFM plus every optional block and inline extension (`footnotes`, `alerts`, `frontmatter`, `definitionLists`, `math`, `headingSlugs`, `highlight`, `subscript`, `superscript`, `emoji`, `smartPunctuation`, `explicitHeadingIds`, `detailsBlocks`, `figureBlocks`, `alignedBlocks`, `kbd`, `abbreviations`, `inlineBreaks`) with `urlPolicy: const MarkdownUrlPolicy.strict()`. |
 
 ### Complete Option Reference
 
@@ -80,7 +80,7 @@ Pure-Dart **CommonMark** and *GFM* with `code`, ~~old~~, and ==highlight==.
 | `frontmatter` | `bool` | `false` | Extracts leading YAML (`---`) or TOML (`+++`) frontmatter into `FrontmatterNode` and `MarkdownDocument.frontmatter`. |
 | `definitionLists` | `bool` | `false` | Parses PHP Markdown Extra style definition lists (`DefinitionListNode`). |
 | `math` | `bool` | `false` | Parses inline (`$...$`) and display (`$$...$$`) LaTeX math into `MathInlineNode` and `MathBlockNode`. |
-| `headingSlugs` | `bool` | `false` (`true` in `.gfm()`) | Populates deduplicated GitHub-style anchor slugs on `HeadingNode.slug` and `MarkdownDocument.outline`. |
+| `headingSlugs` | `bool` | `true` (`false` in `.commonMark()`) | Populates deduplicated GitHub-style anchor slugs on `HeadingNode.slug` and `MarkdownDocument.outline`. |
 | `highlight` | `bool` | `false` | Parses `==text==` into `HighlightNode` (`<mark>`). |
 | `subscript` | `bool` | `false` | Parses `~text~` into `SubscriptNode` (`<sub>`) without breaking `~~strike~~`. |
 | `superscript` | `bool` | `false` | Parses `^text^` into `SuperscriptNode` (`<sup>`). |
@@ -99,7 +99,7 @@ Pure-Dart **CommonMark** and *GFM* with `code`, ~~old~~, and ==highlight==.
 | `maxInputLength` | `int` (getter) | `500000` | Optional override merged into `effectiveBudgets.maxInputLength`. |
 | `maxNestingDepth` | `int` (getter) | `64` | Optional override merged into `effectiveBudgets.maxNestingDepth`. |
 | `budgets` | `MarkdownBudgets` | `const MarkdownBudgets()` | Full resource and complexity limit bundle (`effectiveBudgets` merges top-level overrides). |
-| `urlPolicy` | `MarkdownUrlPolicy` | `const MarkdownUrlPolicy()` | Scheme and host validation policy applied when `sanitizeUrls` is `true`. |
+| `urlPolicy` | `MarkdownUrlPolicy` | `const MarkdownUrlPolicy.strict()` | Scheme and host validation policy applied when `sanitizeUrls` is `true` (`.commonMark()` and `.gfm()` default to `const MarkdownUrlPolicy()`). |
 
 ---
 
@@ -118,19 +118,24 @@ Configure deterministic limits on untrusted Markdown inputs via `MarkdownBudgets
 | `maxTableRows` | `defaultMaxTableRows` | `10000` | Maximum body rows per GFM pipe table. |
 | `maxHtmlBytes` | `defaultMaxHtmlBytes` | `250000` | Cumulative raw HTML emission budget before escaping remaining HTML. |
 | `maxTokens` | `defaultMaxTokens` | `500000` | Maximum inline scanner and delimiter-stack work units per document. |
+| `maxOutputBytes` | `defaultMaxOutputBytes` | `4194304` | Maximum cumulative rendered HTML output and reference/abbreviation expansion budget. |
 
 ### `MarkdownUrlPolicy`
 
-`MarkdownUrlPolicy` validates URI destinations after stripping control characters (`<= 0x20`, `0x7F`) to neutralize obfuscated schemes:
+`MarkdownUrlPolicy` validates URI destinations after stripping control, Unicode whitespace, and zero-width characters to neutralize obfuscated schemes, backslashes (`/\`, `\/`, `\\`), and unexpected authority userinfo:
 
 | Member | Type / Signature | Default & Behavior |
 | :--- | :--- | :--- |
+| `MarkdownUrlPolicy(...)` | `const MarkdownUrlPolicy({...})` | Blocklist constructor rejecting `blockedSchemes`, protocol-relative `//`, and userinfo `@` by default (`allowProtocolRelative: false`, `allowUserInfo: false`). |
+| `MarkdownUrlPolicy.strict(...)` | `const MarkdownUrlPolicy.strict({...})` | Strict allowlist constructor (`allowedSchemes = defaultStrictSchemes` `{'http', 'https', 'mailto'}`, `allowProtocolRelative: false`, `allowUserInfo: false`). |
 | `blockedSchemes` | `Set<String>` | `defaultBlockedSchemes` (`{'javascript', 'vbscript', 'data'}`). |
-| `allowedSchemes` | `Set<String>?` | `null` (when non-null, overrides `blockedSchemes` as a strict scheme allowlist). |
-| `allowedHosts` | `Set<String>?` | `null` (when non-null, restricts authority hosts case-insensitively after stripping userinfo and ports). |
+| `allowedSchemes` | `Set<String>?` | `null` (`defaultStrictSchemes` in `.strict()`, overriding `blockedSchemes` as a strict scheme allowlist). |
+| `allowedHosts` | `Set<String>?` | `null` (when non-null, restricts authority hosts case-insensitively after stripping ports and IPv6 brackets). |
 | `allowRelative` | `bool` | `true` — permits scheme-less relative paths (and empty destinations). |
 | `allowFragments` | `bool` | `true` — permits `#section` fragment links. |
 | `allowSafeImageDataUrls` | `bool` | `false` — when `true`, allows base64 `data:image/(png|jpeg|jpg|gif|webp)` URIs while keeping SVG and HTML `data:` URIs blocked. |
+| `allowProtocolRelative` | `bool` | `false` — controls whether protocol-relative authority URLs (`//host/path`) are accepted. |
+| `allowUserInfo` | `bool` | `false` — controls whether authority userinfo (`user:pass@host`) is accepted. |
 | `isAllowed` | `bool isAllowed(String url)` | Returns `true` if `url` satisfies the policy. |
 | `sanitize` | `String sanitize(String url, {String fallback = ''})` | Returns `url` if allowed, otherwise returns `fallback`. |
 
@@ -181,6 +186,8 @@ void editDocument() {
     '# Guide\n\nUpdated paragraph.\n\nSecond paragraph.\n',
     previousResult: v1,
     editStartOffset: 9,
+    editOldEndOffset: 25,
+    editNewEndOffset: 27,
   );
   assert(v2.reusedBlockCount == 2 && v2.reparsedBlockCount == 1);
 }
@@ -193,10 +200,11 @@ Accumulate chunked token streams while freezing settled prefix blocks and re-par
 | Member | Type / Signature | Behavior |
 | :--- | :--- | :--- |
 | Constructor | `StreamingMarkdownController({MarkdownEngine engine = const MarkdownEngine(), MarkdownOptions? options})` | Initializes an empty streaming session. |
-| `append` | `MarkdownDocument append(String chunk)` | Appends `chunk`, settles completed leading blocks, and returns the updated `MarkdownDocument` snapshot. |
-| `replaceText` | `MarkdownDocument replaceText(String fullText)` | Replaces buffered text while preserving already-settled prefix blocks if the settled prefix is unchanged. |
-| `finish` | `MarkdownDocument finish()` | Finalizes the stream, producing the exact same semantic AST and HTML as `MarkdownEngine.parse(buffer)`. |
-| `reset` | `void reset()` | Clears buffered text, settled blocks, and active blocks back to an empty state. |
+| `append` | `MarkdownDocument append(String chunk)` | Appends `chunk` (checking `maxInputLength` upfront), settles completed leading blocks, notifies registered push listeners, and returns the updated `MarkdownDocument` snapshot. |
+| `replaceText` | `MarkdownDocument replaceText(String fullText)` | Replaces buffered text while preserving already-settled prefix blocks if the settled prefix is unchanged, and notifies push listeners. |
+| `finish` | `MarkdownDocument finish()` | Finalizes the stream, producing the exact same semantic AST and HTML as `MarkdownEngine.parse(buffer)` while preserving safe settled blocks and notifying listeners. |
+| `reset` | `void reset()` | Clears buffered text, settled blocks, and active blocks back to an empty state and notifies listeners. |
+| `addListener` / `removeListener` / `dispose` | `void addListener(void Function() listener)` | Pure-Dart push listener registration notified synchronously whenever `append`, `replaceText`, `finish`, or `reset` updates state. |
 | Read-only getters | `effectiveOptions`, `buffer`, `currentDocument`, `document`, `settledBlocks`, `activeBlocks`, `settledBlockCount`, `isFinished`, `html` | Inspect current stream state without triggering extra parses (`html` renders `currentDocument.toHtml()`). |
 
 ```dart
@@ -278,7 +286,7 @@ Every `MarkdownInlineNode` exposes `span`, `toPlainText()`, and `shiftSpan(offse
 | `FootnoteRefNode` | `label`, `index`, `occurrenceIndex` | Inline footnote citation (`[^label]`). |
 | `KbdInlineNode` | `children` | Keyboard key tag (`<kbd>`). |
 | `AbbrInlineNode` | `title`, `children` | Expanded abbreviation (`<abbr title="...">`). |
-| `AnchorInlineNode` | `id` | Explicit inline anchor (`<a id="..."></a>`). |
+| `AnchorInlineNode` | `id` | Explicit inline anchor (`<a id="..."></a>` or `<a name="..."></a>`). |
 | `PictureInlineNode` | `lightSource`, `darkSource`, `alt` | Light/dark theme-aware `<picture>` element. |
 | `InlineBreakNode` | *(inherits `span`)* | Parsed inline `<br>` / `<br />` element. |
 | `RawHtmlInlineNode` | `html`, `literal` | Raw inline HTML tag, comment, or declaration. |
@@ -338,10 +346,10 @@ Importing `package:markdown_engine_flutter/markdown_engine_flutter.dart` also re
 
 | Symbol | Constructors / Key Members | Behavior |
 | :--- | :--- | :--- |
-| `MarkdownView` | `const MarkdownView(String data, {options, engine, controller, theme, delegates, selectable = true, scrollable = true, showFrontmatter = true, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Parses `data` once in widget state and only re-parses when `data`, `options`, or `engine` changes, ensuring Light/Dark theme toggles perform zero AST re-parses. Uses a virtualized `CustomScrollView` when `scrollable: true` or a compact `Column` when `scrollable: false`. |
-| `MarkdownView.document` | `const MarkdownView.document({required MarkdownDocument document, controller, theme, delegates, selectable = true, scrollable = true, showFrontmatter = true, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Renders a pre-parsed `MarkdownDocument` (for example from `MarkdownDocumentReader` or `IncrementalMarkdownParser`) with zero parsing work inside the widget. |
-| `MarkdownView.streaming` | `const MarkdownView.streaming({required StreamingMarkdownController controller, MarkdownController? markdownController, Listenable? listenable, Duration? pollInterval = const Duration(milliseconds: 32), theme, delegates, selectable = true, scrollable = true, showFrontmatter = true, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Binds directly to a `StreamingMarkdownController`, rendering frozen `settledBlocks` alongside updating `activeBlocks` via an optional external `listenable` or bounded `pollInterval`. |
-| `SliverMarkdownDocument` | `const SliverMarkdownDocument({required MarkdownDocument document, theme, delegates, controller, showFrontmatter = true, padding, addAutomaticKeepAlives = false, addRepaintBoundaries = true, remoteImagesApproved = false, onRequestLoadRemoteImages})` | Standalone virtualized sliver built on `SliverChildBuilderDelegate` keyed by `ValueKey<String>(block.blockId)` with `findChildIndexCallback` for state preservation inside caller-owned `CustomScrollView`s; exposes static helper `visibleBlocksFor(document, showFrontmatter: ...)`. |
+| `MarkdownView` | `const MarkdownView(String data, {options, engine, controller, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Parses `data` once in widget state, applies `IncrementalMarkdownParser` automatically on compatible `data` edits, performs zero AST re-parses across Light/Dark `MarkdownTheme` flips, guards `SelectionArea` / `SelectableRegion` for `MaterialApp` and `WidgetsApp`, and exports full `toPlainText()` on Select All (`Cmd+A`) across virtualized slivers. |
+| `MarkdownView.document` | `const MarkdownView.document({required MarkdownDocument document, controller, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Renders a pre-parsed `MarkdownDocument` (for example from `MarkdownDocumentReader` or `IncrementalMarkdownParser`) with zero parsing work inside the widget. |
+| `MarkdownView.streaming` | `const MarkdownView.streaming({required StreamingMarkdownController controller, MarkdownController? markdownController, Listenable? listenable, Duration? pollInterval, theme, delegates, selectable = true, focusNode, scrollable = true, showFrontmatter = true, remoteImagesApproved = false, padding = EdgeInsets.zero, scrollController, physics, shrinkWrap = false, cacheExtent})` | Binds directly to `StreamingMarkdownController` via push listeners (`addListener`/`removeListener`) with zero polling timers (`pollInterval` is a deprecated compatibility no-op), rendering frozen `settledBlocks` alongside updating `activeBlocks` and supporting post-`finish()` `reset()` / `append()` reuse. |
+| `SliverMarkdownDocument` | `const SliverMarkdownDocument({required MarkdownDocument document, theme, delegates, controller, showFrontmatter = true, padding, addAutomaticKeepAlives = true, addRepaintBoundaries = true, remoteImagesApproved = false, onRequestLoadRemoteImages})` | Stateful virtualized sliver built on `SliverChildBuilderDelegate` keyed by `ValueKey<String>(block.blockId)` with `findChildIndexCallback`, cached `idToIndex` lookup, and `addAutomaticKeepAlives = true` by default so active off-screen drag selections persist across scroll; exposes `visibleBlocksFor(document, showFrontmatter: ...)`. |
 
 ### 7.2 Theming (`MarkdownTheme`, `MarkdownThemeData`, `MarkdownAlertPalette`, `MarkdownAlertColors`)
 
@@ -356,16 +364,16 @@ Importing `package:markdown_engine_flutter/markdown_engine_flutter.dart` also re
 
 | Symbol | Constructors / Key Members | Behavior |
 | :--- | :--- | :--- |
-| `MarkdownController` | `MarkdownController({MarkdownDocument? initialDocument})`, `document`, `outline`, `parseCount`, `readingPlace`, `scrollController`, `attachScrollController`, `detachScrollController`, `updateDocument`, `registerAnchor` / `unregisterAnchor`, `registerBlock` / `unregisterBlock`, `scrollToAnchor(slug, ...)`, `scrollToLine(line, ...)`, `jumpToPlace(place, ...)` | `ChangeNotifier` coordinating parsed document state, heading outline navigation, footnote/anchor jumps, live reading position synchronization, and `parseCount` telemetry. |
+| `MarkdownController` | `MarkdownController({MarkdownDocument? initialDocument})`, `document`, `outline`, `parseCount`, `readingPlace`, `readingPlaceNotifier`, `showFrontmatter`, `scrollController`, `attachScrollController(..., {owner, showFrontmatter})`, `detachScrollController(..., {owner})`, `updateDocument(..., {incrementParseCount, showFrontmatter})`, `registerAnchor` / `unregisterAnchor`, `registerBlock` / `unregisterBlock`, `scrollToAnchor(slug, ...)`, `scrollToLine(line, ...)`, `jumpToPlace(place, ...)` | `ChangeNotifier` coordinating parsed document state, heading outline navigation, owner-scoped scroll attachment, viewport-measured `readingPlace` updates (isolated on `ValueListenable<MarkdownReadingPlace> readingPlaceNotifier`), and `parseCount` telemetry. |
 | `MarkdownReadingPlace` | `const MarkdownReadingPlace({required int blockIndex, String? blockId, double offsetFraction = 0.0})`, `MarkdownReadingPlace.start`, `copyWith(...)` | Immutable reading position recording active top-level block index, stable `blockId`, and normalized `0.0..1.0` scroll progress within the block. |
-| `MarkdownDocumentReader` | `MarkdownDocumentReader({MarkdownEngine engine = const MarkdownEngine(), int syncThreshold = defaultSyncThreshold, MarkdownDocument? initialDocument})`, `defaultSyncThreshold` (`4096`), `document`, `isParsing`, `lastError`, `lastStackTrace`, `parseCount`, `backgroundParseCount`, `update(source, {options})`, `clear()` | `ChangeNotifier` that parses sources shorter than `syncThreshold` (`4096` UTF-16 code units by default) synchronously and offloads larger documents to a background `Isolate.run` (with web fallback) using latest-wins coalescing. |
+| `MarkdownDocumentReader` | `MarkdownDocumentReader({MarkdownEngine engine = const MarkdownEngine(), int syncThreshold = defaultSyncThreshold, MarkdownDocument? initialDocument})`, `defaultSyncThreshold` (`4096`), `document`, `value`, `hasRead`, `isParsing`, `lastError`, `lastStackTrace`, `parseCount`, `backgroundParseCount`, `update(source, {options})`, `clear()` | `ChangeNotifier` implementing `ValueListenable<MarkdownDocument>` that parses sources shorter than `syncThreshold` (`4096` UTF-16 code units by default) synchronously and offloads larger documents to `Isolate.run` (falling back synchronously on `IsolateSpawnException`) with in-flight deduplication and latest-wins coalescing. |
 
 ### 7.4 Pluggable Builders, Security Delegates & Companion Adapters
 
 | Symbol | Values / Signature | Behavior |
 | :--- | :--- | :--- |
-| `MarkdownImagePolicy` | `block`, `ask`, `load` | Controls whether remote (`http://`, `https://`, `//`) images render a non-network placeholder (`block`, default for privacy), prompt for user consent (`ask`), or load automatically (`load`). |
-| `MarkdownBuilderDelegates` | `const MarkdownBuilderDelegates({imagePolicy = MarkdownImagePolicy.block, onLoadRemoteImages, mathInlineBuilder, mathBlockBuilder, diagramBuilder, codeBlockBuilder, imageBuilder, onTapLink, onOpenWebLink, urlPolicy})`, `copyWith(...)`, `resolveUrlPolicy(fallback)`, `isRemoteImageUrl(destination)` | Bundles pluggable custom widget/span renderers with URL and remote image security policies; interactive links are gated by `MarkdownUrlPolicy` before firing `onTapLink` or `onOpenWebLink`. |
+| `MarkdownImagePolicy` | `block`, `ask`, `load` | Controls whether remote/external images render a non-network placeholder (`block`, default for privacy), prompt for user consent (`ask`), or load automatically (`load`). |
+| `MarkdownBuilderDelegates` | `const MarkdownBuilderDelegates({imagePolicy = MarkdownImagePolicy.block, remoteImagesApproved = false, onLoadRemoteImages, autoScrollToAnchors = true, mathInlineBuilder, mathBlockBuilder, diagramBuilder, codeBlockBuilder, imageBuilder, onTapLink, onOpenWebLink, urlPolicy})`, `copyWith(...)`, `resolveUrlPolicy(fallback)`, `normalizeUrlDestination(destination)`, `isRemoteImageUrl(destination)` | Bundles pluggable custom widget/span renderers with URL and remote image security policies; interactive links are gated by `MarkdownUrlPolicy` before firing `onTapLink` or `onOpenWebLink`, and `#fragment` links automatically scroll attached controllers when `autoScrollToAnchors` is `true`. |
 | `MarkdownMathInlineBuilder` | `InlineSpan Function(BuildContext context, MathInlineNode node, TextStyle style, GestureRecognizer? linkRecognizer)` | Renders inline `$...$` math nodes (for example via `tex_math_flutter`'s `TexMathSpan`), receiving the enclosing `linkRecognizer` when nested inside a sanitized hyperlink. |
 | `MarkdownMathBlockBuilder` | `Widget Function(BuildContext context, MathBlockNode node)` | Renders display `$$...$$` math blocks (for example via `tex_math_flutter`'s `TexMath`). |
 | `MarkdownDiagramBuilder` | `Widget? Function(BuildContext context, CodeBlockNode node)` | Inspected before `codeBlockBuilder` for fenced code blocks (such as `language == 'mermaid'` via `pele_dart`); returning `null` falls back to code block rendering. |

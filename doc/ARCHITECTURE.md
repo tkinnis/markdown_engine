@@ -53,7 +53,7 @@ Footnote citations (`[^label]`) are queued iteratively in order of first referen
 
 ## 3. Immutable Sealed AST Hierarchy
 
-Every AST node in `packages/markdown_engine/lib/src/ast.dart` is `@immutable`, exposes unmodifiable child collections, implements structural `==` and `hashCode`, extracts plain text via `toPlainText()`, and supports constant-structure span relocation via `shiftSpan(offsetDelta, lineDelta)`.
+Every AST node in `packages/markdown_engine/lib/src/ast.dart` is `@immutable`, freezes child lists and frontmatter entries once at construction for $O(1)$ getter access, implements structural `==` and `hashCode`, extracts plain text via `toPlainText()`, and supports constant-time ($O(1)$) lazy span relocation via `shiftSpan(offsetDelta, lineDelta)`.
 
 ```mermaid
 flowchart TD
@@ -75,28 +75,29 @@ Untrusted Markdown introduces three distinct threat classes: executable URI sche
 
 ### URL Security Gate (`MarkdownUrlPolicy`)
 
-When `MarkdownOptions.sanitizeUrls` is enabled (the default across all presets), links, images, `<picture>` sources, and sanitized HTML URI attributes pass through `MarkdownUrlPolicy`:
+When `MarkdownOptions.sanitizeUrls` is enabled (the default across all presets), links, images, `<picture>` sources, and sanitized HTML URI attributes pass through `MarkdownUrlPolicy` (defaulting to `const MarkdownUrlPolicy.strict()` on `MarkdownOptions()`):
 
-* Strips ASCII control characters (`<= 0x20`, `0x7F`) before extracting the URI scheme so obfuscated payloads such as `java\tscript:alert(1)` or `&#x6A;avascript:` cannot bypass validation.
-* Blocks `javascript`, `vbscript`, and `data` by default (`MarkdownUrlPolicy.defaultBlockedSchemes`).
-* Supports strict scheme allowlists (`allowedSchemes`), host allowlists (`allowedHosts` with userinfo/port/IPv6 bracket stripping), toggles for relative (`allowRelative`) and `#fragment` (`allowFragments`) links, and opt-in raster image data URIs (`allowSafeImageDataUrls` permitting base64 `png`/`jpeg`/`gif`/`webp` while keeping `image/svg+xml` blocked).
+* Strips ASCII control characters (`<= 0x20`, `0x7F`), Unicode whitespace, and zero-width characters (`stripControlAndWhitespaceForUrl`), and decodes HTML5 entities before extracting the URI scheme so obfuscated payloads such as `java\tscript:alert(1)`, `\u00A0javascript:`, or `&#x6A;avascript:` cannot bypass validation.
+* `MarkdownUrlPolicy.strict()` uses an explicit scheme allowlist (`http`, `https`, `mailto`, plus relative/fragment URLs when enabled) while rejecting protocol-relative (`//`, `\\`, `/\`, `\/`) and authority userinfo (`user:pass@host`) URLs by default (`allowProtocolRelative: false`, `allowUserInfo: false`); `MarkdownUrlPolicy()` blocks `javascript`, `vbscript`, and `data` via `defaultBlockedSchemes`.
+* Supports custom scheme allowlists (`allowedSchemes`), case-insensitive host allowlists (`allowedHosts`), toggles for relative (`allowRelative`) and `#fragment` (`allowFragments`) links, and opt-in raster image data URIs (`allowSafeImageDataUrls` permitting base64 `png`/`jpeg`/`jpg`/`gif`/`webp` while keeping SVG data URIs blocked).
 
-### GFM Tagfilter & Deep HTML Sanitization
+### GFM Tagfilter & Linear HTML5 Sanitizer
 
 * **GFM `tagfilter` (`gfmTagFilter: true`)**: Escapes the opening `<` of `<title>`, `<textarea>`, `<style>`, `<xmp>`, `<iframe>`, `<noembed>`, `<noframes>`, `<script>`, and `<plaintext>` tags to `&lt;` per the GFM `0.29` specification.
-* **Deep Raw HTML Sanitizer (`sanitizeHtml: true`)**: Invokes `sanitizeRawHtml()` to strip dangerous elements (`<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<base>`, `<link>`, `<meta>`, `<title>`, `<textarea>`, `<xmp>`, `<noembed>`, `<noframes>`, `<plaintext>`, `<svg>`, `<math>`, `<form>`, `<frame>`, `<frameset>`), remove all `on*` event handler attributes and `srcdoc`, block inline `style` attributes containing `javascript:`, `vbscript:`, `expression(`, or `data:text/html`, and filter `href`, `src`, `action`, `formaction`, `poster`, and `xlink:href` through `urlPolicy`.
+* **Linear-Time State-Machine HTML5 Sanitizer (`sanitizeHtml: true`)**: `sanitizeRawHtml()` executes a linear-time state-machine HTML tokenizer and allowlist sanitizer (zero backtracking regexes), handling slash-separated attributes (`<img/src=x/...>`), `<` inside quoted attribute values, HTML5 entity decoding before `urlPolicy.isAllowed` and CSS `url(...)` inspection, stripping dangerous elements (`<script>`, `<style>`, `<noscript>`, `<template>`, `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<base>`, `<link>`, `<meta>`, `<title>`, `<textarea>`, `<xmp>`, `<noembed>`, `<noframes>`, `<plaintext>`, `<svg>`, `<math>`, `<form>`, `<frame>`, `<frameset>`), removing `on*` handlers and `srcdoc`, validating `href`, `src`, `srcset`, `background`, `cite`, `ping`, `longdesc`, `poster`, `action`, `formaction`, and `xlink:href` against `urlPolicy`, and re-escaping serialized output cleanly.
 
 ### Resource & Complexity Budgets (`MarkdownBudgets`)
 
 | Budget Field | Default Limit | Protected Resource |
 | :--- | ---: | :--- |
 | `maxInputLength` | `500,000` UTF-16 code units | Maximum document length accepted per parse pass (throws `RangeError` if exceeded). |
-| `maxNestingDepth` | `64` levels | Maximum nested container depth for blockquotes, lists, and inline constructs. |
-| `maxBlocks` | `50,000` blocks | Upper bound on top-level and nested block AST nodes produced per document. |
-| `maxTableColumns` | `128` columns | Maximum column count accepted in a GFM pipe table. |
+| `maxNestingDepth` | `64` levels | Maximum nested container depth across blockquotes, lists, brackets, and inline emphasis delimiters (bounded safely inside `Isolate.run`). |
+| `maxBlocks` | `50,000` blocks | Upper bound on top-level and nested block AST nodes produced per document across all container depths. |
+| `maxTableColumns` | `128` columns | Maximum column count accepted in a GFM pipe table (clamped on header and body rows). |
 | `maxTableRows` | `10,000` body rows | Maximum body row count parsed in a single GFM pipe table. |
 | `maxHtmlBytes` | `250,000` code units | Cumulative raw HTML emission budget before remaining raw HTML is escaped as text. |
-| `maxTokens` | `500,000` tokens | Inline scanner and delimiter-stack work budget per document. |
+| `maxTokens` | `500,000` tokens | Document-wide inline scanner and delimiter-stack work budget. |
+| `maxOutputBytes` | `4,194,304` code units | Cumulative rendered output and reference/abbreviation expansion budget. |
 
 ---
 
@@ -108,26 +109,26 @@ When `MarkdownOptions.sanitizeUrls` is enabled (the default across all presets),
 
 ```mermaid
 flowchart LR
-  Diff["Common Prefix & Non-Overlapping Suffix Scan"] --> Prefix["Reuse Blank-Line Isolated Prefix Blocks (Same blockId)"]
-  Diff --> Dirty["Phase 1 + Phase 2 Parse Dirty Slice Only"]
-  Diff --> Suffix["Reuse Blank-Line Isolated Suffix Blocks + shiftSpan(offsetDelta, lineDelta)"]
-  Prefix --> Merge["Merge Blocks + Reconcile Outline & Slugs"]
+  Diff["O(1) Edit-Offset Windowing / Prefix-Suffix Diff"] --> Prefix["O(log B) Binary-Search Reusable Prefix Blocks (Same blockId)"]
+  Diff --> Dirty["Phase 1 + Phase 2 Parse Dirty Slice Only (Inject Definitions & Abbrs)"]
+  Diff --> Suffix["O(log B) Binary-Search Reusable Suffix Blocks + O(1) Lazy shiftSpan"]
+  Prefix --> Merge["Merge Blocks + Incremental Outline, Remote Images & Slug Reconcile"]
   Dirty --> Merge
   Suffix --> Merge
 ```
 
-1. **Exact Prefix & Suffix Diff**: Scans normalized old and new sources to locate the exact changed range, optionally narrowed by `editStartOffset`.
-2. **Blank-Line Boundary Isolation**: Reuses leading blocks whose `span.endOffset` ends strictly before a blank line (`\n\n`) inside the unchanged prefix, and trailing blocks preceded strictly by a blank line inside the unchanged suffix. This guarantees the edit cannot retroactively turn an adjacent line into a setext heading, table header, list continuation, or merged paragraph.
-3. **Dirty Slice Parsing**: Runs Phase 1 and Phase 2 only on the dirty slice (injecting `previousDocument.linkDefinitions` so reference links inside the edited paragraph resolve immediately) and shifts suffix block spans by `(offsetDelta, lineDelta)` while preserving every reused `blockId`.
+1. **Cached Normalization & $O(1)$ Dirty Windowing**: Reuses `normalizedSource` cached on the previous `MarkdownDocument` and locates the dirty slice directly in $O(1)$ when `(editStartOffset, editOldEndOffset, editNewEndOffset)` are provided, falling back cleanly to prefix/suffix diffing otherwise.
+2. **Binary-Search Blank-Line & Container Isolation**: Binary-searches leading and trailing reusable blocks in $O(\log B)$ and enforces shared container-merge guards (`ListNode`, `DefinitionListNode`, `DetailsBlockNode`, `FigureBlockNode`, `AlignedBlockNode`, `HtmlBlockNode`) across blank-line boundaries so edits never split or miss adjacent container merges.
+3. **Dirty Slice Parsing & $O(1)$ Lazy Span Shifting**: Runs Phase 1 and Phase 2 only on the dirty slice (propagating `previousDocument.linkDefinitions` and `previousDocument.abbreviations`), wraps shifted suffix blocks in $O(1)$ lazy span-shifted nodes preserving every `blockId`, and updates `outline` and `remoteImageAddresses` incrementally across all container types.
 4. **Safe Full-Reparse Fallbacks**: Automatically falls back to full `MarkdownEngine.parse` if `options` changed, frontmatter was touched or introduced, footnotes are active, or the dirty slice introduces or modifies link/footnote/abbreviation definitions (`]:`).
 
 ### Streaming Token Accumulation (`StreamingMarkdownController`)
 
 `StreamingMarkdownController` (`packages/markdown_engine/lib/src/streaming.dart`) is tailored for chunked network or LLM token feeds:
 
-* **Frozen Settled Prefix**: Maintains `_settledBlocks` (immutable finalized top-level blocks) and `_activeBlocks` (trailing open blocks). Whenever a block inside the active tail is followed by a blank line and a subsequent block (excluding adjacent lists, extended HTML containers, or definition lists that could still merge), it freezes into `_settledBlocks` and advances `_settledOffset` and `_settledLine`.
-* **Bounded Tail Work**: Each `append(chunk)` call parses only the unsettled tail substring (`_normalizedBuffer.substring(_settledOffset)`), keeping per-chunk latency bounded as transcripts grow.
-* **Prefix-Preserving `replaceText` & Parity `finish()`**: `replaceText(fullText)` retains already-settled blocks whenever the settled prefix matches byte-for-byte, and `finish()` reconciles the completed buffer against `MarkdownEngine.parse(buffer)` so final AST, HTML, and plain text match full parsing identically. If definitions (`]:`) appear mid-stream, the controller safely switches to full-document resolution so forward and backward references stay accurate.
+* **Frozen Settled Prefix & Push Listeners**: Maintains `_settledBlocks` (immutable finalized top-level blocks) and `_activeBlocks` (trailing open blocks), exposing pure-Dart `addListener`, `removeListener`, and `dispose` callbacks with zero polling timers required. Whenever a block inside the active tail is followed by a blank line and a subsequent block (excluding mergeable lists, definition lists, or open HTML containers), it freezes into `_settledBlocks` and advances `_settledOffset` and `_settledLine`.
+* **True $O(\text{chunk})$ Tail Work**: Normalizes incoming chunks incrementally, scans only new non-fenced lines for reference definitions (`]:`), parses only the unsettled tail substring from `_settledOffset`, reserves settled heading slugs via the shared `HeadingSlugGenerator`, preserves stable `blockId` values across chunks and `finish()`, and updates `outline` and `remoteImageAddresses` incrementally without re-walking `_settledBlocks`.
+* **Prefix-Preserving `replaceText` & Safe Post-`finish()` Continuation**: `replaceText(fullText)` retains already-settled blocks whenever the settled prefix matches byte-for-byte, checks `maxInputLength` before mutating internal state, and `finish()` reconciles exact parity with `MarkdownEngine.parse(buffer)` while keeping `_safeSettledCount` intact so subsequent `append()` or `reset()` calls resume cleanly.
 
 ---
 
@@ -137,17 +138,17 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Parse["Layer 1: Parse (MarkdownEngine / MarkdownDocumentReader / StreamingMarkdownController)"] --> AST["Immutable MarkdownDocument & Sealed Blocks (blockId)"]
+  Parse["Layer 1: Parse (IncrementalMarkdownParser / MarkdownDocumentReader / StreamingMarkdownController)"] --> AST["Immutable MarkdownDocument & Sealed Blocks (blockId)"]
   Theme["Layer 2: Theme (MarkdownTheme / MarkdownThemeData / MarkdownAlertPalette)"] --> Sliver["Layer 3: Slivers (SliverMarkdownDocument & MarkdownView)"]
   AST --> Sliver
-  Ctrl["MarkdownController & MarkdownReadingPlace"] <--> Sliver
+  Ctrl["MarkdownController (readingPlaceNotifier)"] <--> Sliver
   Del["MarkdownBuilderDelegates & MarkdownImagePolicy"] --> Sliver
-  Sliver --> Select["SelectionArea & Companion Adapters (tex_math_flutter / pele_dart)"]
+  Sliver --> Select["SelectionArea / SelectableRegion & Companion Adapters"]
 ```
 
-* **Layer 1 — Parse & Isolate Offload (`markdown_engine`, `MarkdownDocumentReader`)**: `MarkdownView` caches the parsed `MarkdownDocument` in widget state and only re-parses when `data`, `options`, or `engine` changes (`MarkdownController.parseCount` stays constant across Light/Dark theme toggles). For pre-parsed ASTs, `MarkdownView.document` skips parsing completely, `MarkdownView.streaming` binds directly to `StreamingMarkdownController`, and `MarkdownDocumentReader` parses short inputs (`< 4096` UTF-16 code units by default) synchronously while offloading larger inputs to a background `Isolate.run` (`isolate_parse_io.dart` / `isolate_parse_stub.dart`) with latest-wins coalescing.
-* **Layer 2 — Theme Tokens (`MarkdownTheme`, `MarkdownThemeData`, `MarkdownAlertPalette`, `MarkdownAlertColors`)**: Built `package:flutter/widgets.dart`-first with only three scoped `package:flutter/material.dart` `show` imports (`SelectionArea`, `Tooltip`, and `ColorScheme`/`Theme`/`ThemeData`) guarded with `// ignore: deprecated_member_use` for Flutter `3.32` through `3.50+` compatibility. Supports built-in `.light()`/`.dark()` palettes, `.fromColorScheme`, `.fromTheme`, and smooth `.lerp` transitions without re-parsing source text.
-* **Layer 3 — Virtualized Slivers, Navigation & Security Delegates (`SliverMarkdownDocument`, `MarkdownView`, `MarkdownController`, `MarkdownBuilderDelegates`)**: `SliverMarkdownDocument` materializes only visible top-level blocks via `SliverChildBuilderDelegate` keyed by `ValueKey<String>(block.blockId)` with `findChildIndexCallback` (plus `scrollable: false` compact `Column` mode for cards and chat bubbles). `MarkdownController` tracks `outline`, `parseCount`, and `MarkdownReadingPlace`, exposing `scrollToAnchor`, `scrollToLine`, and `jumpToPlace`. `MarkdownBuilderDelegates` enforces `MarkdownUrlPolicy` on interactive links (preventing `javascript:`, `vbscript:`, unsafe `data:`, and control-character obfuscated links from becoming clickable), gates remote images via `MarkdownImagePolicy` (`block`, `ask`, `load`), and exposes `mathInlineBuilder`, `mathBlockBuilder`, `diagramBuilder`, `codeBlockBuilder`, and `imageBuilder` for native `tex_math_flutter` and `pele_dart` integration.
+* **Layer 1 — Parse, Incremental Edits & Isolate Offload (`markdown_engine`, `MarkdownDocumentReader`)**: `MarkdownView` caches the parsed `MarkdownDocument` in widget state, applies `IncrementalMarkdownParser` automatically inside `didUpdateWidget` when `data` edits occur with compatible options (preserving `blockId`s and interactive `<details>`/`Copy` widget state), and performs zero re-parses across Light/Dark `MarkdownTheme` flips. `MarkdownView.document` skips parsing completely, `MarkdownView.streaming` subscribes directly to `StreamingMarkdownController` push listeners without `Timer.periodic` polling, and `MarkdownDocumentReader` implements `ValueListenable<MarkdownDocument>` (`hasRead`, in-flight deduplication, latest-wins coalescing, and `IsolateSpawnException` sync fallback).
+* **Layer 2 — Theme Tokens (`MarkdownTheme`, `MarkdownThemeData`, `MarkdownAlertPalette`, `MarkdownAlertColors`)**: Built `package:flutter/widgets.dart`-first with scoped `package:flutter/material.dart` `show` imports (`SelectionArea`, `Tooltip`, and `ColorScheme`/`Theme`/`ThemeData`) guarded with `// ignore: deprecated_member_use` for Flutter `3.32` through `3.50+` compatibility. Supports built-in `.light()`/`.dark()` palettes, `.fromColorScheme`, `.fromTheme`, and smooth `.lerp` transitions without re-parsing source text.
+* **Layer 3 — Virtualized Slivers, Selection, Navigation & Accessibility (`SliverMarkdownDocument`, `MarkdownView`, `MarkdownController`, `MarkdownBuilderDelegates`)**: `SliverMarkdownDocument` is a `StatefulWidget` (`addAutomaticKeepAlives: true` by default so active drag selections stay alive off-screen) caching visible blocks and `blockId` indices via `SliverChildBuilderDelegate`. `MarkdownView` guards `SelectionArea` behind `MaterialLocalizations` (falling back to `SelectableRegion` in `WidgetsApp` contexts), supports optional `focusNode`, excludes UI chrome (`Copy`, bullets, alert titles, disclosure arrows) via `SelectionContainer.disabled`, and exports full `activeDocument.toPlainText()` on `Cmd+A` / Select All across off-screen slivers. `MarkdownController` tracks owner-scoped `ScrollController` attachments, separates `readingPlaceNotifier` from document rebuilds using mounted `RenderAbstractViewport` positions, and performs frame-synchronized `scrollToAnchor` convergence. `MarkdownBuilderDelegates` enforces `MarkdownUrlPolicy`, normalizes/gates remote/external images via `MarkdownImagePolicy` (scoping per-document approvals cleanly), reuses/post-frame-disposes `TapGestureRecognizer`s, caches decoded `data:image/` payloads, and exposes screen-reader `Semantics` (`headingLevel`, table header cells, single-speak `<abbr>` tooltips, link traits) alongside keyboard `FocusableActionDetector` controls.
 
 ---
 

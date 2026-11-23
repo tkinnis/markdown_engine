@@ -5,12 +5,121 @@ import 'package:flutter/gestures.dart';
 // Keeps Tooltip compatibility with Flutter 3.32-3.50+ callers.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart' show Tooltip;
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 
 import 'controller.dart';
 import 'delegates.dart';
 import 'theme.dart';
+
+/// Package-internal keyboard- and pointer-accessible interactive wrapper used
+/// for Markdown controls (code copy, `<details>`, footnote links, image ask).
+final class MarkdownInteractiveAction extends StatefulWidget {
+  /// Creates a [MarkdownInteractiveAction].
+  const MarkdownInteractiveAction({
+    super.key,
+    required this.onActivate,
+    required this.semanticLabel,
+    required this.focusBorderColor,
+    required this.child,
+    this.expanded,
+    this.borderRadius = const BorderRadius.all(Radius.circular(4.0)),
+    this.isButton = true,
+    this.isLink = false,
+  });
+
+  /// Callback invoked on tap, keyboard Enter/Space, or semantic activation.
+  final VoidCallback? onActivate;
+
+  /// Accessible label announced by screen readers.
+  final String semanticLabel;
+
+  /// Border color used when keyboard focus highlight is active.
+  final Color focusBorderColor;
+
+  /// Visual content rendered inside the interactive target.
+  final Widget child;
+
+  /// Optional expanded state for toggle controls like `<details>`.
+  final bool? expanded;
+
+  /// Border radius for the keyboard focus indicator.
+  final BorderRadius borderRadius;
+
+  /// Whether to expose `Semantics(button: true)`.
+  final bool isButton;
+
+  /// Whether to expose `Semantics(link: true)`.
+  final bool isLink;
+
+  @override
+  State<MarkdownInteractiveAction> createState() =>
+      _MarkdownInteractiveActionState();
+}
+
+final class _MarkdownInteractiveActionState
+    extends State<MarkdownInteractiveAction> {
+  static const Map<ShortcutActivator, Intent> _shortcuts =
+      <ShortcutActivator, Intent>{
+        SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+        SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+      };
+
+  bool _isFocusHighlighted = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final VoidCallback? onActivate = widget.onActivate;
+    return Semantics(
+      container: true,
+      button: widget.isButton ? true : null,
+      link: widget.isLink ? true : null,
+      expanded: widget.expanded,
+      label: widget.semanticLabel,
+      child: FocusableActionDetector(
+        enabled: onActivate != null,
+        mouseCursor: onActivate != null
+            ? SystemMouseCursors.click
+            : MouseCursor.defer,
+        shortcuts: _shortcuts,
+        actions: <Type, Action<Intent>>{
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (ActivateIntent _) {
+              onActivate?.call();
+              return null;
+            },
+          ),
+        },
+        onShowFocusHighlight: (bool focused) {
+          if (_isFocusHighlighted != focused) {
+            setState(() {
+              _isFocusHighlighted = focused;
+            });
+          }
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onActivate,
+          child: DecoratedBox(
+            position: DecorationPosition.foreground,
+            decoration: _isFocusHighlighted
+                ? BoxDecoration(
+                    borderRadius: widget.borderRadius,
+                    border: Border.all(
+                      color: widget.focusBorderColor,
+                      width: 1.5,
+                    ),
+                  )
+                : const BoxDecoration(),
+            child: ExcludeSemantics(child: widget.child),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// Internal widget that registers one or more anchor slugs with a
 /// [MarkdownController] while mounted.
@@ -133,36 +242,100 @@ final class MarkdownInlineText extends StatefulWidget {
   State<MarkdownInlineText> createState() => _MarkdownInlineTextState();
 }
 
+final class _TrackedRecognizer {
+  const _TrackedRecognizer(this.key, this.recognizer);
+
+  final String key;
+  final TapGestureRecognizer recognizer;
+}
+
+enum _InlineHtmlStyleTag { underline, small, quote }
+
 final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
-  final List<TapGestureRecognizer> _recognizers = <TapGestureRecognizer>[];
+  List<_TrackedRecognizer> _recognizers = <_TrackedRecognizer>[];
+  final List<TapGestureRecognizer> _retiredRecognizers =
+      <TapGestureRecognizer>[];
+  bool _postFrameCleanupScheduled = false;
 
   @override
   void dispose() {
-    _disposeRecognizers();
+    for (final _TrackedRecognizer entry in _recognizers) {
+      entry.recognizer.dispose();
+    }
+    _recognizers = <_TrackedRecognizer>[];
+    _disposeRetiredRecognizers();
     super.dispose();
   }
 
-  void _disposeRecognizers() {
-    for (final TapGestureRecognizer recognizer in _recognizers) {
+  void _disposeRetiredRecognizers() {
+    for (final TapGestureRecognizer recognizer in _retiredRecognizers) {
       recognizer.dispose();
     }
-    _recognizers.clear();
+    _retiredRecognizers.clear();
+  }
+
+  void _scheduleRetiredCleanup() {
+    if (_retiredRecognizers.isEmpty || _postFrameCleanupScheduled) {
+      return;
+    }
+    _postFrameCleanupScheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((Duration _) {
+      _postFrameCleanupScheduled = false;
+      if (mounted) {
+        _disposeRetiredRecognizers();
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    _disposeRecognizers();
+    final Map<String, List<TapGestureRecognizer>> pool =
+        <String, List<TapGestureRecognizer>>{};
+    for (final _TrackedRecognizer entry in _recognizers) {
+      pool
+          .putIfAbsent(entry.key, () => <TapGestureRecognizer>[])
+          .add(entry.recognizer);
+    }
+    final List<_TrackedRecognizer> nextRecognizers = <_TrackedRecognizer>[];
+
     final List<InlineSpan> spans = _buildInlines(
       context,
       widget.nodes,
       widget.baseStyle,
       linkRecognizer: null,
       onLinkTap: null,
+      isLink: false,
+      linkUrl: null,
+      recognizerPool: pool,
+      nextRecognizers: nextRecognizers,
     );
+
+    for (final List<TapGestureRecognizer> unused in pool.values) {
+      _retiredRecognizers.addAll(unused);
+    }
+    _recognizers = nextRecognizers;
+    _scheduleRetiredCleanup();
+
     return Text.rich(
       TextSpan(style: widget.baseStyle, children: spans),
       textAlign: widget.textAlign,
     );
+  }
+
+  TapGestureRecognizer _acquireRecognizer(
+    String key,
+    VoidCallback onTap,
+    Map<String, List<TapGestureRecognizer>> pool,
+    List<_TrackedRecognizer> nextRecognizers,
+  ) {
+    final List<TapGestureRecognizer>? bucket = pool[key];
+    final TapGestureRecognizer recognizer =
+        (bucket != null && bucket.isNotEmpty)
+        ? bucket.removeAt(0)
+        : TapGestureRecognizer();
+    recognizer.onTap = onTap;
+    nextRecognizers.add(_TrackedRecognizer(key, recognizer));
+    return recognizer;
   }
 
   List<InlineSpan> _buildInlines(
@@ -171,23 +344,131 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     TextStyle style, {
     required TapGestureRecognizer? linkRecognizer,
     required VoidCallback? onLinkTap,
+    required bool isLink,
+    required Uri? linkUrl,
+    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required List<_TrackedRecognizer> nextRecognizers,
   }) {
     if (nodes.isEmpty) {
       return const <InlineSpan>[];
     }
     final List<InlineSpan> result = <InlineSpan>[];
+    final List<_InlineHtmlStyleTag> tagStack = <_InlineHtmlStyleTag>[];
+    final MouseCursor? linkCursor = linkRecognizer != null
+        ? SystemMouseCursors.click
+        : null;
+
     for (final MarkdownInlineNode node in nodes) {
+      final TextStyle activeStyle = tagStack.isEmpty
+          ? style
+          : _applyHtmlTagStackStyle(style, tagStack);
+      if (node is RawHtmlInlineNode) {
+        final _RawHtmlDirective directive = _parseRawHtmlDirective(node.html);
+        switch (directive.kind) {
+          case _RawHtmlDirectiveKind.openUnderline:
+            tagStack.add(_InlineHtmlStyleTag.underline);
+          case _RawHtmlDirectiveKind.closeUnderline:
+            _popTag(tagStack, _InlineHtmlStyleTag.underline);
+          case _RawHtmlDirectiveKind.openSmall:
+            tagStack.add(_InlineHtmlStyleTag.small);
+          case _RawHtmlDirectiveKind.closeSmall:
+            _popTag(tagStack, _InlineHtmlStyleTag.small);
+          case _RawHtmlDirectiveKind.openQuote:
+            tagStack.add(_InlineHtmlStyleTag.quote);
+            result.add(
+              TextSpan(
+                text: '\u201C',
+                style: activeStyle,
+                recognizer: linkRecognizer,
+                mouseCursor: linkCursor,
+              ),
+            );
+          case _RawHtmlDirectiveKind.closeQuote:
+            if (_popTag(tagStack, _InlineHtmlStyleTag.quote)) {
+              result.add(
+                TextSpan(
+                  text: '\u201D',
+                  style: activeStyle,
+                  recognizer: linkRecognizer,
+                  mouseCursor: linkCursor,
+                ),
+              );
+            }
+          case _RawHtmlDirectiveKind.anchor:
+            final String? anchorId = directive.anchorId;
+            if (anchorId != null && anchorId.isNotEmpty) {
+              result.add(
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.baseline,
+                  baseline: TextBaseline.alphabetic,
+                  child: ExcludeSemantics(
+                    child: MarkdownAnchorTarget(
+                      slugs: <String>[anchorId],
+                      controller: widget.controller,
+                      child: const SizedBox.shrink(),
+                    ),
+                  ),
+                ),
+              );
+            }
+          case _RawHtmlDirectiveKind.none:
+            break;
+        }
+        continue;
+      }
+
       result.add(
         _buildInline(
           context,
           node,
-          style,
+          activeStyle,
           linkRecognizer: linkRecognizer,
           onLinkTap: onLinkTap,
+          isLink: isLink,
+          linkUrl: linkUrl,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
         ),
       );
     }
     return result;
+  }
+
+  TextStyle _applyHtmlTagStackStyle(
+    TextStyle base,
+    List<_InlineHtmlStyleTag> stack,
+  ) {
+    TextStyle current = base;
+    for (final _InlineHtmlStyleTag tag in stack) {
+      switch (tag) {
+        case _InlineHtmlStyleTag.underline:
+          current = current.copyWith(
+            decoration: _combineDecoration(
+              current.decoration,
+              TextDecoration.underline,
+            ),
+          );
+        case _InlineHtmlStyleTag.small:
+          final double baseSize = current.fontSize ?? widget.theme.fontSize;
+          current = current.copyWith(fontSize: baseSize * 0.85);
+        case _InlineHtmlStyleTag.quote:
+          break;
+      }
+    }
+    return current;
+  }
+
+  static bool _popTag(
+    List<_InlineHtmlStyleTag> stack,
+    _InlineHtmlStyleTag target,
+  ) {
+    for (int i = stack.length - 1; i >= 0; i--) {
+      if (stack[i] == target) {
+        stack.removeAt(i);
+        return true;
+      }
+    }
+    return false;
   }
 
   InlineSpan _buildInline(
@@ -196,6 +477,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     TextStyle style, {
     required TapGestureRecognizer? linkRecognizer,
     required VoidCallback? onLinkTap,
+    required bool isLink,
+    required Uri? linkUrl,
+    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required List<_TrackedRecognizer> nextRecognizers,
   }) {
     final MarkdownThemeData theme = widget.theme;
     final MarkdownBuilderDelegates delegates = widget.delegates;
@@ -248,6 +533,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             emStyle,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
+            recognizerPool: recognizerPool,
+            nextRecognizers: nextRecognizers,
           ),
         );
       case StrongNode():
@@ -262,6 +551,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             strongStyle,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
+            recognizerPool: recognizerPool,
+            nextRecognizers: nextRecognizers,
           ),
         );
       case StrikethroughNode():
@@ -279,6 +572,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             strikeStyle,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
+            recognizerPool: recognizerPool,
+            nextRecognizers: nextRecognizers,
           ),
         );
       case HighlightNode():
@@ -293,6 +590,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             highlightStyle,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
+            recognizerPool: recognizerPool,
+            nextRecognizers: nextRecognizers,
           ),
         );
       case SubscriptNode():
@@ -302,6 +603,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           style,
           isSuperscript: false,
           onLinkTap: onLinkTap,
+          isLink: isLink,
+          linkUrl: linkUrl,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
         );
       case SuperscriptNode():
         return _buildScriptSpan(
@@ -310,9 +615,19 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           style,
           isSuperscript: true,
           onLinkTap: onLinkTap,
+          isLink: isLink,
+          linkUrl: linkUrl,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
         );
       case LinkNode():
-        return _buildLinkSpan(context, node, style);
+        return _buildLinkSpan(
+          context,
+          node,
+          style,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
+        );
       case ImageNode():
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
@@ -327,6 +642,8 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
               onRequestLoadRemoteImages: widget.onRequestLoadRemoteImages,
             ),
             onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
           ),
         );
       case PictureInlineNode():
@@ -353,6 +670,8 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
               onRequestLoadRemoteImages: widget.onRequestLoadRemoteImages,
             ),
             onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
           ),
         );
       case MathInlineNode():
@@ -363,6 +682,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         final double baseSize = style.fontSize ?? theme.fontSize;
         final Widget mathChip = Semantics(
           label: 'Math: ${node.latex}',
+          excludeSemantics: true,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 1.0),
             decoration: BoxDecoration(
@@ -384,7 +704,12 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         return WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: _wrapWidgetWithLink(mathChip, onLinkTap: onLinkTap),
+          child: _wrapWidgetWithLink(
+            mathChip,
+            onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
+          ),
         );
       case FootnoteRefNode():
         return _buildFootnoteRefSpan(node, style);
@@ -405,9 +730,14 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           kbdStyle,
           linkRecognizer: null,
           onLinkTap: null,
+          isLink: false,
+          linkUrl: null,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
         );
         final Widget keycap = Semantics(
           label: 'Key ${node.toPlainText()}',
+          excludeSemantics: true,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 5.0, vertical: 1.5),
             decoration: BoxDecoration(
@@ -426,7 +756,12 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         return WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: _wrapWidgetWithLink(keycap, onLinkTap: onLinkTap),
+          child: _wrapWidgetWithLink(
+            keycap,
+            onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
+          ),
         );
       case AbbrInlineNode():
         final TextStyle abbrStyle = style.copyWith(
@@ -443,35 +778,70 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           abbrStyle,
           linkRecognizer: null,
           onLinkTap: null,
+          isLink: false,
+          linkUrl: null,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
         );
         Widget labelWidget = Text.rich(
           TextSpan(style: abbrStyle, children: abbrChildren),
         );
         if (Overlay.maybeOf(context) != null) {
-          labelWidget = Tooltip(message: node.title, child: labelWidget);
+          labelWidget = Tooltip(
+            message: node.title,
+            excludeFromSemantics: true,
+            child: labelWidget,
+          );
         }
         final Widget semanticAbbr = Semantics(
           label: node.toPlainText(),
           tooltip: node.title,
-          hint: node.title,
+          excludeSemantics: true,
           child: labelWidget,
         );
         return WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: _wrapWidgetWithLink(semanticAbbr, onLinkTap: onLinkTap),
+          child: _wrapWidgetWithLink(
+            semanticAbbr,
+            onLinkTap: onLinkTap,
+            isLink: isLink,
+            linkUrl: linkUrl,
+          ),
         );
       case AnchorInlineNode():
         return WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: MarkdownAnchorTarget(
-            slugs: <String>[node.id],
-            controller: widget.controller,
-            child: const SizedBox.shrink(),
+          child: ExcludeSemantics(
+            child: MarkdownAnchorTarget(
+              slugs: <String>[node.id],
+              controller: widget.controller,
+              child: const SizedBox.shrink(),
+            ),
           ),
         );
       case RawHtmlInlineNode():
+        final ImageNode? rawImg = tryParseHtmlImageTag(node.html);
+        if (rawImg != null) {
+          return WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: _wrapWidgetWithLink(
+              buildMarkdownImageWidget(
+                context: context,
+                node: rawImg,
+                theme: theme,
+                delegates: delegates,
+                urlPolicy: widget.urlPolicy,
+                remoteImagesApproved: widget.remoteImagesApproved,
+                onRequestLoadRemoteImages: widget.onRequestLoadRemoteImages,
+              ),
+              onLinkTap: onLinkTap,
+              isLink: isLink,
+              linkUrl: linkUrl,
+            ),
+          );
+        }
         return const TextSpan();
     }
   }
@@ -482,6 +852,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     TextStyle style, {
     required bool isSuperscript,
     required VoidCallback? onLinkTap,
+    required bool isLink,
+    required Uri? linkUrl,
+    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required List<_TrackedRecognizer> nextRecognizers,
   }) {
     final double baseSize = style.fontSize ?? widget.theme.fontSize;
     final TextStyle scriptStyle = style.copyWith(
@@ -494,6 +868,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
       scriptStyle,
       linkRecognizer: null,
       onLinkTap: null,
+      isLink: false,
+      linkUrl: null,
+      recognizerPool: recognizerPool,
+      nextRecognizers: nextRecognizers,
     );
     final double dy = isSuperscript ? -baseSize * 0.3 : baseSize * 0.2;
     final Widget scriptWidget = Transform.translate(
@@ -503,15 +881,22 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
-      child: _wrapWidgetWithLink(scriptWidget, onLinkTap: onLinkTap),
+      child: _wrapWidgetWithLink(
+        scriptWidget,
+        onLinkTap: onLinkTap,
+        isLink: isLink,
+        linkUrl: linkUrl,
+      ),
     );
   }
 
   InlineSpan _buildLinkSpan(
     BuildContext context,
     LinkNode node,
-    TextStyle style,
-  ) {
+    TextStyle style, {
+    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required List<_TrackedRecognizer> nextRecognizers,
+  }) {
     final String destination = node.destination.trim();
     final MarkdownUrlPolicy policy = widget.urlPolicy;
     final bool isAllowed =
@@ -526,6 +911,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           style,
           linkRecognizer: null,
           onLinkTap: null,
+          isLink: false,
+          linkUrl: null,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
         ),
       );
     }
@@ -542,7 +931,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     final bool hasAction =
         delegates.onTapLink != null ||
         (isWeb && delegates.onOpenWebLink != null) ||
-        (isFragment && controller != null);
+        (isFragment && controller != null && delegates.autoScrollToAnchors);
 
     VoidCallback? onTap;
     TapGestureRecognizer? recognizer;
@@ -552,11 +941,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         if (!policy.isAllowed(destination)) {
           return;
         }
-        if (delegates.onTapLink != null) {
-          delegates.onTapLink!(destination, node.title);
-        } else if (isFragment && controller != null) {
+        if (isFragment && controller != null && delegates.autoScrollToAnchors) {
           unawaited(controller.scrollToAnchor(destination.substring(1)));
         }
+        delegates.onTapLink?.call(destination, node.title);
         if (isWeb && delegates.onOpenWebLink != null) {
           final Uri? webUri = Uri.tryParse(destination);
           if (webUri != null &&
@@ -566,8 +954,13 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           }
         }
       };
-      recognizer = TapGestureRecognizer()..onTap = onTap;
-      _recognizers.add(recognizer);
+      final String recognizerKey = '$destination\u0000${node.title ?? ''}';
+      recognizer = _acquireRecognizer(
+        recognizerKey,
+        onTap,
+        recognizerPool,
+        nextRecognizers,
+      );
     }
 
     final Color linkColor = widget.theme.effectiveLinkColor;
@@ -588,6 +981,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         linkStyle,
         linkRecognizer: recognizer,
         onLinkTap: onTap,
+        isLink: true,
+        linkUrl: parsedUri,
+        recognizerPool: recognizerPool,
+        nextRecognizers: nextRecognizers,
       ),
     );
   }
@@ -613,25 +1010,19 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     final Widget badge = MarkdownAnchorTarget(
       slugs: <String>[refAnchorId],
       controller: widget.controller,
-      child: Semantics(
-        button: true,
-        label: 'Footnote ${node.index}',
-        child: MouseRegion(
-          cursor: SystemMouseCursors.click,
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: handleTap,
-            child: Transform.translate(
-              offset: Offset(0.0, -baseSize * 0.28),
-              child: Text(
-                '[${node.index}]',
-                style: style.copyWith(
-                  color: theme.effectiveLinkColor,
-                  fontSize: baseSize * 0.72,
-                  fontWeight: FontWeight.w600,
-                  height: 1.0,
-                ),
-              ),
+      child: MarkdownInteractiveAction(
+        onActivate: handleTap,
+        semanticLabel: 'Footnote ${node.index}',
+        focusBorderColor: theme.accent,
+        child: Transform.translate(
+          offset: Offset(0.0, -baseSize * 0.28),
+          child: Text(
+            '[${node.index}]',
+            style: style.copyWith(
+              color: theme.effectiveLinkColor,
+              fontSize: baseSize * 0.72,
+              fontWeight: FontWeight.w600,
+              height: 1.0,
             ),
           ),
         ),
@@ -645,18 +1036,27 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     );
   }
 
-  Widget _wrapWidgetWithLink(Widget child, {required VoidCallback? onLinkTap}) {
-    if (onLinkTap == null) {
-      return child;
+  Widget _wrapWidgetWithLink(
+    Widget child, {
+    required VoidCallback? onLinkTap,
+    required bool isLink,
+    Uri? linkUrl,
+  }) {
+    Widget current = child;
+    if (onLinkTap != null) {
+      current = MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onLinkTap,
+          child: current,
+        ),
+      );
     }
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onLinkTap,
-        child: child,
-      ),
-    );
+    if (isLink) {
+      current = Semantics(link: true, linkUrl: linkUrl, child: current);
+    }
+    return current;
   }
 }
 
@@ -671,7 +1071,9 @@ Widget buildMarkdownImageWidget({
   required bool remoteImagesApproved,
   VoidCallback? onRequestLoadRemoteImages,
 }) {
-  final String destination = node.destination.trim();
+  final String destination = MarkdownBuilderDelegates.normalizeUrlDestination(
+    node.destination,
+  );
   if (destination.isEmpty || !urlPolicy.isAllowed(destination)) {
     return _ImagePlaceholderCard(
       theme: theme,
@@ -782,83 +1184,227 @@ final class _ImagePlaceholderCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Semantics(
-      container: true,
-      label: title,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10.0),
-        decoration: BoxDecoration(
-          color: theme.codeBackground,
-          borderRadius: BorderRadius.circular(8.0),
-          border: Border.all(color: theme.border, width: 1.0),
-        ),
-        child: Wrap(
-          spacing: 10.0,
-          runSpacing: 6.0,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: <Widget>[
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Text(
-                  title,
-                  style: TextStyle(
-                    color: theme.foreground,
-                    fontSize: theme.fontSize * 0.88,
-                    fontWeight: FontWeight.w600,
-                    fontFamily: theme.fontFamily,
-                  ),
-                ),
-                if (subtitle.isNotEmpty)
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      color: theme.muted,
-                      fontSize: theme.fontSize * 0.78,
-                      fontFamily: theme.fontFamily,
+    return SelectionContainer.disabled(
+      child: Semantics(
+        container: true,
+        label: title,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10.0),
+          decoration: BoxDecoration(
+            color: theme.codeBackground,
+            borderRadius: BorderRadius.circular(8.0),
+            border: Border.all(color: theme.border, width: 1.0),
+          ),
+          child: Wrap(
+            spacing: 10.0,
+            runSpacing: 6.0,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              ExcludeSemantics(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: theme.foreground,
+                        fontSize: theme.fontSize * 0.88,
+                        fontWeight: FontWeight.w600,
+                        fontFamily: theme.fontFamily,
+                      ),
                     ),
-                  ),
-              ],
-            ),
-            if (allowLoadAction)
-              MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: onLoadPressed,
-                  child: Semantics(
-                    button: true,
-                    label: 'Load remote images',
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10.0,
-                        vertical: 5.0,
-                      ),
-                      decoration: BoxDecoration(
-                        color: theme.accent.withValues(alpha: 0.14),
-                        borderRadius: BorderRadius.circular(6.0),
-                        border: Border.all(
-                          color: theme.accent.withValues(alpha: 0.4),
-                        ),
-                      ),
-                      child: Text(
-                        'Load remote images',
+                    if (subtitle.isNotEmpty)
+                      Text(
+                        subtitle,
                         style: TextStyle(
-                          color: theme.accent,
-                          fontSize: theme.fontSize * 0.8,
-                          fontWeight: FontWeight.w600,
+                          color: theme.muted,
+                          fontSize: theme.fontSize * 0.78,
                           fontFamily: theme.fontFamily,
                         ),
                       ),
+                  ],
+                ),
+              ),
+              if (allowLoadAction)
+                MarkdownInteractiveAction(
+                  onActivate: onLoadPressed,
+                  semanticLabel: 'Load remote images',
+                  focusBorderColor: theme.accent,
+                  borderRadius: BorderRadius.circular(6.0),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10.0,
+                      vertical: 5.0,
+                    ),
+                    decoration: BoxDecoration(
+                      color: theme.accent.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(6.0),
+                      border: Border.all(
+                        color: theme.accent.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Text(
+                      'Load remote images',
+                      style: TextStyle(
+                        color: theme.accent,
+                        fontSize: theme.fontSize * 0.8,
+                        fontWeight: FontWeight.w600,
+                        fontFamily: theme.fontFamily,
+                      ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
+  }
+}
+
+enum _RawHtmlDirectiveKind {
+  none,
+  openUnderline,
+  closeUnderline,
+  openSmall,
+  closeSmall,
+  openQuote,
+  closeQuote,
+  anchor,
+}
+
+final class _RawHtmlDirective {
+  const _RawHtmlDirective(this.kind, [this.anchorId]);
+
+  final _RawHtmlDirectiveKind kind;
+  final String? anchorId;
+
+  static const _RawHtmlDirective none = _RawHtmlDirective(
+    _RawHtmlDirectiveKind.none,
+  );
+}
+
+final RegExp _rawAnchorAttrPattern = RegExp(
+  r'''^<a\b[^>]*\b(?:id|name)\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>$''',
+  caseSensitive: false,
+);
+final RegExp _rawImgTagPattern = RegExp(
+  r'''^<img\b([^>]*)/?>$''',
+  caseSensitive: false,
+);
+final RegExp _rawHtmlAttrPattern = RegExp(
+  r'''([a-zA-Z_:][a-zA-Z0-9_:\-.]*)\s*(?:=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?''',
+);
+
+/// Extracts an [ImageNode] when [rawHtml] is a standalone HTML `<img>` tag.
+ImageNode? tryParseHtmlImageTag(String rawHtml) {
+  final RegExpMatch? tagMatch = _rawImgTagPattern.firstMatch(rawHtml.trim());
+  if (tagMatch == null) {
+    return null;
+  }
+  final String attrs = tagMatch.group(1) ?? '';
+  String? src;
+  String alt = '';
+  String? title;
+  int? width;
+  int? height;
+
+  for (final RegExpMatch match in _rawHtmlAttrPattern.allMatches(attrs)) {
+    final String name = (match.group(1) ?? '').toLowerCase();
+    final String value =
+        match.group(2) ?? match.group(3) ?? match.group(4) ?? '';
+    switch (name) {
+      case 'src':
+        src = value.replaceAll('&amp;', '&');
+      case 'alt':
+        alt = value;
+      case 'title':
+        title = value;
+      case 'width':
+        final int? parsedWidth = int.tryParse(value.trim());
+        if (parsedWidth != null && parsedWidth > 0) {
+          width = parsedWidth;
+        }
+      case 'height':
+        final int? parsedHeight = int.tryParse(value.trim());
+        if (parsedHeight != null && parsedHeight > 0) {
+          height = parsedHeight;
+        }
+    }
+  }
+
+  if (src == null || src.trim().isEmpty) {
+    return null;
+  }
+  return ImageNode(
+    destination: src,
+    alt: alt,
+    title: title,
+    width: width,
+    height: height,
+  );
+}
+
+_RawHtmlDirective _parseRawHtmlDirective(String rawHtml) {
+  final int len = rawHtml.length;
+  if (len < 3 ||
+      rawHtml.codeUnitAt(0) != 0x3C ||
+      rawHtml.codeUnitAt(len - 1) != 0x3E) {
+    return _RawHtmlDirective.none;
+  }
+  final bool isClosing = rawHtml.codeUnitAt(1) == 0x2F;
+  final int nameStart = isClosing ? 2 : 1;
+  int pos = nameStart;
+  while (pos < len - 1) {
+    final int cu = rawHtml.codeUnitAt(pos);
+    if ((cu >= 0x41 && cu <= 0x5A) ||
+        (cu >= 0x61 && cu <= 0x7A) ||
+        (cu >= 0x30 && cu <= 0x39)) {
+      pos++;
+    } else {
+      break;
+    }
+  }
+  if (pos == nameStart) {
+    return _RawHtmlDirective.none;
+  }
+  final String tag = rawHtml.substring(nameStart, pos).toLowerCase();
+  final bool isSelfClosing = !isClosing && len >= 4 && rawHtml.endsWith('/>');
+  switch (tag) {
+    case 'u':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeUnderline);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openUnderline);
+    case 'small':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeSmall);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openSmall);
+    case 'q':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeQuote);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openQuote);
+    case 'a':
+      if (isClosing) {
+        return _RawHtmlDirective.none;
+      }
+      final RegExpMatch? match = _rawAnchorAttrPattern.firstMatch(rawHtml);
+      final String? id = match?.group(1) ?? match?.group(2);
+      if (id != null && id.isNotEmpty) {
+        return _RawHtmlDirective(_RawHtmlDirectiveKind.anchor, id);
+      }
+      return _RawHtmlDirective.none;
+    default:
+      return _RawHtmlDirective.none;
   }
 }
 
@@ -880,10 +1426,26 @@ String _displayHostOrPath(String url) {
   return url;
 }
 
+const int _maxDataImageCacheEntries = 64;
+const int _maxCachedDataImageBytes = 512 * 1024;
+final Map<String, Uint8List> _decodedDataImageCache = <String, Uint8List>{};
+
 Uint8List? _decodeSafeDataImage(String dataUrl) {
+  final Uint8List? cached = _decodedDataImageCache.remove(dataUrl);
+  if (cached != null) {
+    _decodedDataImageCache[dataUrl] = cached;
+    return cached;
+  }
   try {
     final UriData data = UriData.parse(dataUrl);
-    return data.contentAsBytes();
+    final Uint8List bytes = data.contentAsBytes();
+    if (bytes.length <= _maxCachedDataImageBytes) {
+      if (_decodedDataImageCache.length >= _maxDataImageCacheEntries) {
+        _decodedDataImageCache.remove(_decodedDataImageCache.keys.first);
+      }
+      _decodedDataImageCache[dataUrl] = bytes;
+    }
+    return bytes;
   } on FormatException {
     return null;
   }

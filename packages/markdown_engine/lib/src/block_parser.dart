@@ -16,6 +16,8 @@ final class Phase1Result {
     required this.footnoteDefinitions,
     required this.abbreviations,
     required this.normalizedSource,
+    this.idPrefix = '',
+    this.totalBlockCount = 0,
   });
 
   /// Top-level block builders/nodes produced by Phase 1.
@@ -35,6 +37,12 @@ final class Phase1Result {
 
   /// Line-ending and NUL normalized source string.
   final String normalizedSource;
+
+  /// Block ID prefix used during Phase 1 (forwarded to Phase 2).
+  final String idPrefix;
+
+  /// Total blocks opened during Phase 1 (including nested containers).
+  final int totalBlockCount;
 }
 
 /// Intermediate Phase 1 block representation carrying raw inline text before
@@ -311,11 +319,15 @@ final class RawFrontmatter extends RawBlock {
 /// Normalizes line endings (`\r\n`/`\r` -> `\n`) and NUL (`\u0000` -> `\uFFFD`)
 /// per CommonMark Section 2.1.
 String normalizeMarkdownSource(String source) {
-  final StringBuffer out = StringBuffer();
+  if (!source.contains('\r') && !source.contains('\x00')) {
+    return source;
+  }
+  StringBuffer? out;
   int last = 0;
   for (int i = 0; i < source.length; i++) {
     final int cu = source.codeUnitAt(i);
     if (cu == 0x0D) {
+      out ??= StringBuffer();
       if (i > last) {
         out.write(source.substring(last, i));
       }
@@ -325,6 +337,7 @@ String normalizeMarkdownSource(String source) {
       }
       last = i + 1;
     } else if (cu == 0x00) {
+      out ??= StringBuffer();
       if (i > last) {
         out.write(source.substring(last, i));
       }
@@ -332,7 +345,7 @@ String normalizeMarkdownSource(String source) {
       last = i + 1;
     }
   }
-  if (last == 0) {
+  if (out == null) {
     return source;
   }
   if (last < source.length) {
@@ -349,9 +362,10 @@ Phase1Result parseBlocks(
   int baseOffset = 0,
   int baseLine = 1,
   String idPrefix = '',
+  MarkdownBudgets? budgetsOverride,
 }) {
   final String normalized = normalizeMarkdownSource(source);
-  final MarkdownBudgets budgets = options.effectiveBudgets;
+  final MarkdownBudgets budgets = budgetsOverride ?? options.effectiveBudgets;
 
   FrontmatterNode? frontmatterNode;
   int bodyStartOffset = 0;
@@ -814,16 +828,27 @@ final class _BlockEngine {
 
   int _idCounter = 0;
   int _blockCount = 0;
+  int _subIdCounter = 0;
+  bool _budgetExceeded = false;
 
   String _nextId(String prefix) {
     _idCounter++;
     return '$idPrefix$prefix-$_idCounter';
   }
 
+  bool _canOpenBlock([int count = 1]) {
+    if (_blockCount + count > budgets.maxBlocks) {
+      _budgetExceeded = true;
+      return false;
+    }
+    return true;
+  }
+
   void processLines(List<_SourceLine> lines) {
     _stack.add(_root);
     for (final _SourceLine line in lines) {
-      if (_blockCount >= budgets.maxBlocks && _stack.length == 1) {
+      if (_budgetExceeded ||
+          (_blockCount >= budgets.maxBlocks && _stack.length == 1)) {
         break;
       }
       _incorporateLine(line);
@@ -836,7 +861,7 @@ final class _BlockEngine {
     required FrontmatterNode? frontmatter,
   }) {
     final List<RawBlock> topBlocks = <RawBlock>[];
-    if (frontmatter != null) {
+    if (frontmatter != null && budgets.maxBlocks > 0) {
       topBlocks.add(
         RawFrontmatter(
           blockId: frontmatter.blockId,
@@ -856,16 +881,14 @@ final class _BlockEngine {
     }
     final List<RawBlock> transformed = _postProcessBlocks(topBlocks);
     return Phase1Result(
-      blocks: transformed,
+      blocks: freezeList(transformed),
       frontmatter: frontmatter,
-      linkDefinitions: Map<String, MarkdownLinkDefinition>.unmodifiable(
-        _linkDefinitions,
-      ),
-      footnoteDefinitions: Map<String, RawFootnoteDef>.unmodifiable(
-        _footnoteDefs,
-      ),
-      abbreviations: Map<String, String>.unmodifiable(_abbreviations),
+      linkDefinitions: freezeMap(_linkDefinitions),
+      footnoteDefinitions: freezeMap(_footnoteDefs),
+      abbreviations: freezeMap(_abbreviations),
       normalizedSource: normalizedSource,
+      idPrefix: idPrefix,
+      totalBlockCount: _blockCount,
     );
   }
 
@@ -980,20 +1003,14 @@ final class _BlockEngine {
           : lastMatched;
       final bool atMaxDepth = containerDepth >= budgets.maxNestingDepth;
 
-      if (oldTipWasParagraph &&
-          !closedUnmatched &&
-          currentContainer == oldTip.parentRef(this) &&
-          options.gfmTables &&
-          !cursor.blank &&
-          cursor.indent <= 3) {
-        // Not reachable unless handled below.
-      }
-
       if (cursor.indent < 4) {
         final int firstCu = cursor.peekCodeUnitAtNonSpace();
 
         // 1. Blockquote (`>`), subject to maxNestingDepth.
         if (firstCu == 0x3E && !atMaxDepth) {
+          if (!_canOpenBlock()) {
+            return;
+          }
           closeUnmatchedIfNeeded();
           cursor.advanceToNextNonSpace();
           cursor.advanceOffset(1);
@@ -1022,6 +1039,9 @@ final class _BlockEngine {
         if (firstCu == 0x23) {
           final _AtxMatch? atx = _matchAtxHeading(cursor);
           if (atx != null) {
+            if (!_canOpenBlock()) {
+              return;
+            }
             closeUnmatchedIfNeeded();
             _addChild(
               _HeadingOpenBlock(
@@ -1044,6 +1064,9 @@ final class _BlockEngine {
         if (firstCu == 0x60 || firstCu == 0x7E) {
           final _FenceOpenMatch? fence = _matchFenceOpen(cursor);
           if (fence != null) {
+            if (!_canOpenBlock()) {
+              return;
+            }
             closeUnmatchedIfNeeded();
             _addChild(
               _CodeOpenBlock(
@@ -1067,6 +1090,9 @@ final class _BlockEngine {
         if (options.math && firstCu == 0x24) {
           final _MathOpenMatch? mathMatch = _matchMathOpen(cursor);
           if (mathMatch != null) {
+            if (!_canOpenBlock()) {
+              return;
+            }
             closeUnmatchedIfNeeded();
             final _MathOpenBlock mathBlock = _MathOpenBlock(
               blockId: _nextId('math'),
@@ -1090,6 +1116,9 @@ final class _BlockEngine {
             allowType7: !tipIsActivePara,
           );
           if (htmlType != null) {
+            if (!_canOpenBlock()) {
+              return;
+            }
             closeUnmatchedIfNeeded();
             final _HtmlOpenBlock htmlBlock = _HtmlOpenBlock(
               blockId: _nextId('html'),
@@ -1113,8 +1142,9 @@ final class _BlockEngine {
             allMatched &&
             oldTip is _ParagraphOpenBlock &&
             (firstCu == 0x3D || firstCu == 0x2D)) {
-          final int? setextLevel = _matchSetextUnderline(
-            cursor.restAfterNonSpace(),
+          final int? setextLevel = _matchSetextUnderlineSpan(
+            cursor.raw,
+            cursor.firstNonSpaceIndex,
           );
           if (setextLevel != null) {
             final String remaining = _extractLinkDefsFromParagraph(oldTip);
@@ -1146,9 +1176,12 @@ final class _BlockEngine {
         if (options.gfmTables &&
             !closedUnmatched &&
             allMatched &&
-            oldTip is _ParagraphOpenBlock) {
-          final List<TableAlignment>? alignments = _matchTableDelimiterRow(
-            cursor.restAfterNonSpace(),
+            oldTip is _ParagraphOpenBlock &&
+            (firstCu == 0x7C || firstCu == 0x2D || firstCu == 0x3A)) {
+          final List<TableAlignment>? alignments = _matchTableDelimiterRowSpan(
+            cursor.raw,
+            cursor.firstNonSpaceIndex,
+            maxColumns: budgets.maxTableColumns,
           );
           if (alignments != null &&
               alignments.length <= budgets.maxTableColumns) {
@@ -1165,7 +1198,10 @@ final class _BlockEngine {
 
         // 8. Thematic Break (`***`, `---`, `___`).
         if (firstCu == 0x2A || firstCu == 0x2D || firstCu == 0x5F) {
-          if (_matchThematicBreak(cursor.restAfterNonSpace())) {
+          if (_matchThematicBreakSpan(cursor.raw, cursor.firstNonSpaceIndex)) {
+            if (!_canOpenBlock()) {
+              return;
+            }
             closeUnmatchedIfNeeded();
             _addChild(
               _ThematicBreakOpenBlock(
@@ -1187,6 +1223,9 @@ final class _BlockEngine {
             !atMaxDepth) {
           final _FootnoteStartMatch? fn = _matchFootnoteStart(cursor);
           if (fn != null) {
+            if (!_canOpenBlock()) {
+              return;
+            }
             closeUnmatchedIfNeeded();
             cursor.advanceToNextNonSpace();
             cursor.advanceOffset(fn.consumedChars);
@@ -1202,72 +1241,93 @@ final class _BlockEngine {
         }
 
         // 10. List Item (`-`, `+`, `*`, `1.`, `1)`).
-        final bool tipIsMatchedParagraph =
-            !closedUnmatched && allMatched && oldTipWasParagraph;
-        final _ListMarkerMatch? marker = _matchListMarker(
-          cursor,
-          interruptingParagraph: tipIsMatchedParagraph,
-        );
-        if (marker != null && !atMaxDepth) {
-          closeUnmatchedIfNeeded();
-          final int contentIndent = marker.indent + marker.padding;
-          cursor.advanceToNextNonSpace();
-          cursor.advanceOffset(marker.markerChars);
-          cursor.advanceColumns(marker.spacesAfterMarkerConsumed);
+        if (firstCu == 0x2D ||
+            firstCu == 0x2B ||
+            firstCu == 0x2A ||
+            isAsciiDigit(firstCu)) {
+          final bool tipIsMatchedParagraph =
+              !closedUnmatched && allMatched && oldTipWasParagraph;
+          final _ListMarkerMatch? marker = _matchListMarker(
+            cursor,
+            interruptingParagraph: tipIsMatchedParagraph,
+          );
+          if (marker != null && !atMaxDepth) {
+            final _OpenBlock tipBeforeList = closedUnmatched
+                ? _stack.last
+                : _stack[lastMatched];
+            final _OpenBlock? prevLastChild = _lastChildOf(tipBeforeList);
+            final bool reusesExistingList =
+                (tipBeforeList is _ListOpenBlock &&
+                    tipBeforeList.ordered == marker.ordered &&
+                    tipBeforeList.delimiter == marker.delimiter &&
+                    tipBeforeList.bulletChar == marker.bulletChar) ||
+                (prevLastChild is _ListOpenBlock &&
+                    prevLastChild.ordered == marker.ordered &&
+                    prevLastChild.delimiter == marker.delimiter &&
+                    prevLastChild.bulletChar == marker.bulletChar);
+            if (!_canOpenBlock(reusesExistingList ? 1 : 2)) {
+              return;
+            }
+            closeUnmatchedIfNeeded();
+            final int contentIndent = marker.indent + marker.padding;
+            cursor.advanceToNextNonSpace();
+            cursor.advanceOffset(marker.markerChars);
+            cursor.advanceColumns(marker.spacesAfterMarkerConsumed);
 
-          _ListOpenBlock? listBlock;
-          final _OpenBlock tipNow = _stack.last;
-          final _OpenBlock? lastChild = _lastChildOf(tipNow);
-          if (tipNow is _ListOpenBlock &&
-              tipNow.ordered == marker.ordered &&
-              tipNow.delimiter == marker.delimiter &&
-              tipNow.bulletChar == marker.bulletChar) {
-            listBlock = tipNow;
-          } else if (lastChild is _ListOpenBlock &&
-              lastChild.ordered == marker.ordered &&
-              lastChild.delimiter == marker.delimiter &&
-              lastChild.bulletChar == marker.bulletChar) {
-            // Reopen immediately preceding list of the same marker type.
-            if (lastChild.items.isNotEmpty &&
-                lastChild.items.last.endsWithBlank) {
-              lastChild.tight = false;
+            _ListOpenBlock? listBlock;
+            final _OpenBlock tipNow = _stack.last;
+            final _OpenBlock? lastChild = _lastChildOf(tipNow);
+            if (tipNow is _ListOpenBlock &&
+                tipNow.ordered == marker.ordered &&
+                tipNow.delimiter == marker.delimiter &&
+                tipNow.bulletChar == marker.bulletChar) {
+              listBlock = tipNow;
+            } else if (lastChild is _ListOpenBlock &&
+                lastChild.ordered == marker.ordered &&
+                lastChild.delimiter == marker.delimiter &&
+                lastChild.bulletChar == marker.bulletChar) {
+              // Reopen immediately preceding list of the same marker type.
+              if (lastChild.items.isNotEmpty &&
+                  lastChild.items.last.endsWithBlank) {
+                lastChild.tight = false;
+              }
+              _stack.add(lastChild);
+              listBlock = lastChild;
+            } else {
+              if (tipNow is _ListOpenBlock) {
+                _closeTopBlock(line);
+              }
+              listBlock = _ListOpenBlock(
+                blockId: _nextId('list'),
+                startOffset: line.startOffset,
+                startLine: line.lineNumber,
+                ordered: marker.ordered,
+                start: marker.start,
+                delimiter: marker.delimiter,
+                bulletChar: marker.bulletChar,
+              );
+              _addChild(listBlock, line);
             }
-            _stack.add(lastChild);
-            listBlock = lastChild;
-          } else {
-            if (tipNow is _ListOpenBlock) {
-              _closeTopBlock(line);
-            }
-            listBlock = _ListOpenBlock(
-              blockId: _nextId('list'),
+
+            final _ListItemOpenBlock itemBlock = _ListItemOpenBlock(
+              blockId: _nextId('item'),
               startOffset: line.startOffset,
               startLine: line.lineNumber,
+              contentIndent: contentIndent,
               ordered: marker.ordered,
               start: marker.start,
               delimiter: marker.delimiter,
               bulletChar: marker.bulletChar,
             );
-            _addChild(listBlock, line);
-          }
-
-          final _ListItemOpenBlock itemBlock = _ListItemOpenBlock(
-            blockId: _nextId('item'),
-            startOffset: line.startOffset,
-            startLine: line.lineNumber,
-            contentIndent: contentIndent,
-            ordered: marker.ordered,
-            start: marker.start,
-            delimiter: marker.delimiter,
-            bulletChar: marker.bulletChar,
-          );
-          cursor.findNextNonSpace();
-          if (cursor.blank) {
-            itemBlock.startedBlank = true;
+            cursor.findNextNonSpace();
+            if (cursor.blank) {
+              itemBlock.startedBlank = true;
+              _addChild(itemBlock, line);
+              return;
+            }
             _addChild(itemBlock, line);
-            return;
+            continue;
           }
-          _addChild(itemBlock, line);
-          continue;
         }
       }
 
@@ -1277,6 +1337,9 @@ final class _BlockEngine {
           !cursor.blank &&
           !tipIsParagraph &&
           !oldTipWasTable) {
+        if (!_canOpenBlock()) {
+          return;
+        }
         closeUnmatchedIfNeeded();
         cursor.advanceColumns(4);
         final _CodeOpenBlock code = _CodeOpenBlock(
@@ -1391,7 +1454,10 @@ final class _BlockEngine {
         return;
       }
       if (tip.rows.length < budgets.maxTableRows) {
-        final List<String> rowCells = _splitTableRow(cursor.restOfLine());
+        final List<String> rowCells = _splitTableRow(
+          cursor.restOfLine(),
+          maxColumns: tip.alignments.length,
+        );
         tip.rows.add(rowCells);
         tip.extendSpan(line);
         return;
@@ -1420,7 +1486,10 @@ final class _BlockEngine {
       return;
     }
 
-    // Open a new paragraph (unless block budget exceeded, in which case append).
+    // Open a new paragraph (unless block budget exceeded).
+    if (!_canOpenBlock()) {
+      return;
+    }
     cursor.advanceToNextNonSpace();
     final _ParagraphOpenBlock para = _ParagraphOpenBlock(
       blockId: _nextId('para'),
@@ -1455,7 +1524,10 @@ final class _BlockEngine {
     }
     final List<String> remainingLines = remaining.split('\n');
     final String headerLine = remainingLines.last;
-    final List<String> headerCells = _splitTableRow(headerLine);
+    final List<String> headerCells = _splitTableRow(
+      headerLine,
+      maxColumns: alignments.length + 1,
+    );
     if (headerCells.length != alignments.length) {
       return null;
     }
@@ -1468,11 +1540,12 @@ final class _BlockEngine {
 
     final _OpenBlock parent = _stack[_stack.length - 2];
     if (remainingLines.length == 1) {
-      // Whole paragraph becomes the table header.
+      // Whole paragraph becomes the table header (replaces para, net 0 blocks).
       final int tableStartOffset = para.startOffset;
       final int tableStartLine = para.startLine;
       _stack.removeLast();
       _removeLastChild(parent);
+      _blockCount--;
       final _TableOpenBlock table = _TableOpenBlock(
         blockId: _nextId('table'),
         startOffset: tableStartOffset,
@@ -1483,6 +1556,9 @@ final class _BlockEngine {
       _addChild(table, delimiterLine);
       return _TableIntercept(table);
     } else {
+      if (!_canOpenBlock()) {
+        return null;
+      }
       // Split preceding lines into closed paragraph, then open table.
       final int headerSourceLineIdx = para.sourceLines.length - 1;
       final _SourceLine headerSrcLine = para.sourceLines[headerSourceLineIdx];
@@ -1708,7 +1784,18 @@ final class _BlockEngine {
   }
 
   String _extractLinkDefsFromParagraph(_ParagraphOpenBlock para) {
-    String text = para.lines.join('\n');
+    if (para.lines.isEmpty) {
+      return '';
+    }
+    final String firstTrimmed = para.lines.first.trimLeft();
+    if (firstTrimmed.isEmpty || firstTrimmed.codeUnitAt(0) != 0x5B) {
+      return para.lines.length == 1
+          ? para.lines.first.trimRight()
+          : para.lines.join('\n').trimRight();
+    }
+    String text = para.lines.length == 1
+        ? para.lines.first
+        : para.lines.join('\n');
     while (text.isNotEmpty) {
       final _LinkDefMatch? match = _parseLeadingLinkDef(
         text,
@@ -1719,7 +1806,9 @@ final class _BlockEngine {
         break;
       }
       final String norm = normalizeLinkLabel(match.label);
-      if (norm.isNotEmpty && !_linkDefinitions.containsKey(norm)) {
+      if (norm.isNotEmpty &&
+          _linkDefinitions.length < _maxLinkDefinitions &&
+          !_linkDefinitions.containsKey(norm)) {
         _linkDefinitions[norm] = MarkdownLinkDefinition(
           label: match.label,
           normalizedLabel: norm,
@@ -1739,9 +1828,6 @@ final class _BlockEngine {
   }
 
   RawBlock? _buildBlock(_OpenBlock block, {required bool isTopLevel}) {
-    if (_blockCount > budgets.maxBlocks && !isTopLevel) {
-      // Budget guard keeps parser bounded without throwing.
-    }
     final SourceSpan span = SourceSpan(
       startOffset: block.startOffset,
       endOffset: block.endOffset,
@@ -1750,12 +1836,14 @@ final class _BlockEngine {
     );
 
     if (block is _ParagraphOpenBlock) {
-      final String text = block.lines.join('\n').trimRight();
+      final String text =
+          (block.lines.length == 1 ? block.lines.first : block.lines.join('\n'))
+              .trimRight();
       if (text.isEmpty) {
         return null;
       }
       // Check abbreviation definition `*[ABBR]: Title`.
-      if (options.abbreviations && isTopLevel) {
+      if (options.abbreviations && isTopLevel && text.contains('*[')) {
         final String? remaining = _extractAbbreviationDefs(text);
         if (remaining == null) {
           return null;
@@ -1795,9 +1883,7 @@ final class _BlockEngine {
             ? ''
             : '${block.lines.join('\n')}\n';
         final String unescapedInfo = unescapeMarkdownString(block.info.trim());
-        final String? lang = unescapedInfo.isEmpty
-            ? null
-            : unescapedInfo.split(RegExp(r'[ \t]+')).first;
+        final String? lang = _firstWordBeforeSpaceOrTab(unescapedInfo);
         return RawCodeBlock(
           blockId: block.blockId,
           span: span,
@@ -1860,12 +1946,15 @@ final class _BlockEngine {
     }
 
     if (block is _TableOpenBlock) {
+      final List<List<String>> frozenRows = <List<String>>[
+        for (final List<String> row in block.rows) freezeList(row),
+      ];
       return RawTable(
         blockId: block.blockId,
         span: span,
-        alignments: block.alignments,
-        headerCells: block.headerCells,
-        rows: block.rows,
+        alignments: freezeList(block.alignments),
+        headerCells: freezeList(block.headerCells),
+        rows: freezeList(frozenRows),
         endsWithBlankLine: block.endsWithBlank,
       );
     }
@@ -1892,7 +1981,7 @@ final class _BlockEngine {
       return RawBlockQuote(
         blockId: block.blockId,
         span: span,
-        children: children,
+        children: freezeList(children),
         endsWithBlankLine: block.endsWithBlank,
       );
     }
@@ -1912,7 +2001,7 @@ final class _BlockEngine {
         start: block.start,
         tight: block.tight,
         delimiter: block.delimiter,
-        items: items,
+        items: freezeList(items),
         endsWithBlankLine: block.endsWithBlank,
       );
     }
@@ -1947,7 +2036,7 @@ final class _BlockEngine {
         blockId: block.blockId,
         span: span,
         taskState: taskState,
-        children: children,
+        children: freezeList(children),
         endsWithBlankLine: block.endsWithBlank,
       );
     }
@@ -1965,7 +2054,7 @@ final class _BlockEngine {
           blockId: block.blockId,
           span: span,
           label: block.label,
-          children: children,
+          children: freezeList(children),
           endsWithBlankLine: block.endsWithBlank,
         );
       }
@@ -1978,15 +2067,16 @@ final class _BlockEngine {
   String? _extractAbbreviationDefs(String text) {
     final List<String> lines = text.split('\n');
     final List<String> remaining = <String>[];
-    final RegExp abbrPattern = RegExp(r'^\*\[([^\]]+)\]:\s*(.+)$');
     for (final String line in lines) {
-      final RegExpMatch? m = abbrPattern.firstMatch(line.trim());
-      if (m != null) {
-        final String abbr = m.group(1)!.trim();
-        final String title = m.group(2)!.trim();
-        if (abbr.isNotEmpty) {
-          _abbreviations[abbr] = title;
-          continue;
+      if (_abbreviations.length < _maxAbbreviations && line.contains('*[')) {
+        final RegExpMatch? m = _abbrDefPattern.firstMatch(line.trim());
+        if (m != null) {
+          final String abbr = m.group(1)!.trim();
+          final String title = m.group(2)!.trim();
+          if (abbr.isNotEmpty) {
+            _abbreviations[abbr] = title;
+            continue;
+          }
         }
       }
       remaining.add(line);
@@ -1994,7 +2084,7 @@ final class _BlockEngine {
     if (remaining.isEmpty) {
       return null;
     }
-    return remaining.join('\n');
+    return remaining.length == 1 ? remaining.first : remaining.join('\n');
   }
 
   List<RawBlock> _postProcessBlocks(List<RawBlock> blocks) {
@@ -2015,11 +2105,15 @@ final class _BlockEngine {
     int i = 0;
     while (i < blocks.length) {
       final RawBlock b = blocks[i];
-      if (b is RawParagraph) {
+      if (b is RawParagraph && b.rawText.contains('\n:')) {
         final List<String> lines = b.rawText.split('\n');
-        final int firstColonIdx = lines.indexWhere(
-          (String l) => RegExp(r'^:\s+\S|^:\s*$').hasMatch(l),
-        );
+        int firstColonIdx = -1;
+        for (int k = 1; k < lines.length; k++) {
+          if (_isDefListStarterLine(lines[k])) {
+            firstColonIdx = k;
+            break;
+          }
+        }
         if (firstColonIdx >= 1) {
           final List<RawDefGroup> groups = <RawDefGroup>[];
           String term = lines.sublist(0, firstColonIdx).join('\n').trim();
@@ -2027,7 +2121,11 @@ final class _BlockEngine {
           final List<String> currentDefLines = <String>[];
 
           void flushDef() {
-            if (currentDefLines.isNotEmpty) {
+            if (currentDefLines.isNotEmpty &&
+                (defs.isEmpty || _canOpenBlock())) {
+              if (defs.isNotEmpty) {
+                _blockCount++;
+              }
               defs.add(<RawBlock>[
                 RawParagraph(
                   blockId: _nextId('defp'),
@@ -2036,14 +2134,16 @@ final class _BlockEngine {
                 ),
               ]);
               currentDefLines.clear();
+            } else {
+              currentDefLines.clear();
             }
           }
 
           for (int k = firstColonIdx; k < lines.length; k++) {
             final String line = lines[k];
-            if (RegExp(r'^:\s*').hasMatch(line)) {
+            if (line.startsWith(':')) {
               flushDef();
-              currentDefLines.add(line.replaceFirst(RegExp(r'^:\s{0,3}'), ''));
+              currentDefLines.add(_stripColonPrefix(line));
             } else if (currentDefLines.isNotEmpty) {
               currentDefLines.add(line);
             } else {
@@ -2061,27 +2161,36 @@ final class _BlockEngine {
             final RawBlock next = blocks[j];
             if (next is RawCodeBlock && !next.isFenced && defs.isNotEmpty) {
               final String bodyText = next.literal.trimRight();
+              final int remainingBlocks = (budgets.maxBlocks - _blockCount) < 1
+                  ? 1
+                  : budgets.maxBlocks - _blockCount;
               final Phase1Result sub = parseBlocks(
                 bodyText,
                 options.copyWith(definitionLists: false, frontmatter: false),
                 baseOffset: next.span.startOffset,
                 baseLine: next.span.startLine,
+                idPrefix: '${idPrefix}dlsub-${++_subIdCounter}-',
+                budgetsOverride: budgets.copyWith(maxBlocks: remainingBlocks),
               );
+              _blockCount += sub.totalBlockCount;
               defs.last.addAll(sub.blocks);
               endOffset = next.span.endOffset;
               endLine = next.span.endLine;
               j++;
               continue;
             }
-            if (next is RawParagraph &&
-                RegExp(r'^:\s*').hasMatch(next.rawText)) {
+            if (next is RawParagraph && next.rawText.startsWith(':')) {
               for (final String l in next.rawText.split('\n')) {
-                if (RegExp(r'^:\s*').hasMatch(l)) {
+                if (l.startsWith(':')) {
+                  if (!_canOpenBlock()) {
+                    break;
+                  }
+                  _blockCount++;
                   defs.add(<RawBlock>[
                     RawParagraph(
                       blockId: _nextId('defp'),
                       span: next.span,
-                      rawText: l.replaceFirst(RegExp(r'^:\s{0,3}'), ''),
+                      rawText: _stripColonPrefix(l),
                     ),
                   ]);
                 } else if (defs.isNotEmpty && defs.last.last is RawParagraph) {
@@ -2101,10 +2210,13 @@ final class _BlockEngine {
             break;
           }
 
+          final List<List<RawBlock>> frozenDefs = <List<RawBlock>>[
+            for (final List<RawBlock> d in defs) freezeList(d),
+          ];
           groups.add(
             RawDefGroup(
               termRaw: term,
-              definitions: defs,
+              definitions: freezeList(frozenDefs),
               span: SourceSpan(
                 startOffset: b.span.startOffset,
                 endOffset: endOffset,
@@ -2125,7 +2237,7 @@ final class _BlockEngine {
                 startLine: prevList.span.startLine,
                 endLine: endLine,
               ),
-              groups: <RawDefGroup>[...prevList.groups, ...groups],
+              groups: freezeList(<RawDefGroup>[...prevList.groups, ...groups]),
             );
           } else {
             out.add(
@@ -2137,7 +2249,7 @@ final class _BlockEngine {
                   startLine: b.span.startLine,
                   endLine: endLine,
                 ),
-                groups: groups,
+                groups: freezeList(groups),
               ),
             );
           }
@@ -2157,36 +2269,29 @@ final class _BlockEngine {
     while (i < blocks.length) {
       final RawBlock b = blocks[i];
       if (options.detailsBlocks && b is RawHtmlBlock) {
-        final RegExpMatch? openDetails = RegExp(
-          r'^\s*<details(\s+[^>]*)?>\s*(?:<summary>(.*?)</summary>)?\s*$',
-          caseSensitive: false,
-          dotAll: true,
-        ).firstMatch(b.literal);
+        final ({bool open, String summary})? openDetails = _parseDetailsOpen(
+          b.literal,
+        );
         if (openDetails != null) {
-          final String attrs = (openDetails.group(1) ?? '').toLowerCase();
-          final bool open = RegExp(r'\bopen\b').hasMatch(attrs);
-          String summary = (openDetails.group(2) ?? '').trim();
+          final bool open = openDetails.open;
+          String summary = openDetails.summary;
           final List<RawBlock> inner = <RawBlock>[];
           int j = i + 1;
           bool closed = false;
           while (j < blocks.length) {
             final RawBlock nb = blocks[j];
-            if (nb is RawHtmlBlock &&
-                RegExp(
-                  r'^\s*</details>\s*$',
-                  caseSensitive: false,
-                ).hasMatch(nb.literal)) {
+            if (nb is RawHtmlBlock && _isClosingTag(nb.literal, '</details>')) {
               closed = true;
               break;
             }
             if (summary.isEmpty && nb is RawHtmlBlock) {
-              final RegExpMatch? sumMatch = RegExp(
-                r'^\s*<summary>(.*?)</summary>\s*$',
-                caseSensitive: false,
-                dotAll: true,
-              ).firstMatch(nb.literal);
-              if (sumMatch != null) {
-                summary = sumMatch.group(1)!.trim();
+              final String? sumBody = _extractTagBody(
+                nb.literal,
+                '<summary>',
+                '</summary>',
+              );
+              if (sumBody != null) {
+                summary = sumBody;
                 j++;
                 continue;
               }
@@ -2206,7 +2311,7 @@ final class _BlockEngine {
                 ),
                 summaryRaw: summary,
                 initiallyOpen: open,
-                children: inner,
+                children: freezeList(inner),
               ),
             );
             i = j + 1;
@@ -2216,33 +2321,25 @@ final class _BlockEngine {
       }
 
       if (options.figureBlocks && b is RawHtmlBlock) {
-        final bool isFigureOpen = RegExp(
-          r'^\s*<figure(?:\s+[^>]*)?>\s*$',
-          caseSensitive: false,
-        ).hasMatch(b.literal);
-        if (isFigureOpen) {
+        if (_isFigureOpen(b.literal)) {
           final List<RawBlock> inner = <RawBlock>[];
           String? caption;
           int j = i + 1;
           bool closed = false;
           while (j < blocks.length) {
             final RawBlock nb = blocks[j];
-            if (nb is RawHtmlBlock &&
-                RegExp(
-                  r'^\s*</figure>\s*$',
-                  caseSensitive: false,
-                ).hasMatch(nb.literal)) {
+            if (nb is RawHtmlBlock && _isClosingTag(nb.literal, '</figure>')) {
               closed = true;
               break;
             }
             if (nb is RawHtmlBlock) {
-              final RegExpMatch? capMatch = RegExp(
-                r'^\s*<figcaption>(.*?)</figcaption>\s*$',
-                caseSensitive: false,
-                dotAll: true,
-              ).firstMatch(nb.literal);
-              if (capMatch != null) {
-                caption = capMatch.group(1)!.trim();
+              final String? capBody = _extractTagBody(
+                nb.literal,
+                '<figcaption>',
+                '</figcaption>',
+              );
+              if (capBody != null) {
+                caption = capBody;
                 j++;
                 continue;
               }
@@ -2260,7 +2357,7 @@ final class _BlockEngine {
                   startLine: b.span.startLine,
                   endLine: blocks[j].span.endLine,
                 ),
-                children: inner,
+                children: freezeList(inner),
                 captionRaw: caption,
               ),
             );
@@ -2271,28 +2368,14 @@ final class _BlockEngine {
       }
 
       if (options.alignedBlocks && b is RawHtmlBlock) {
-        final RegExpMatch? alignMatch = RegExp(
-          r'''^\s*<div\s+align\s*=\s*["']?(left|center|right)["']?\s*>\s*$''',
-          caseSensitive: false,
-        ).firstMatch(b.literal);
-        if (alignMatch != null) {
-          final String dir = alignMatch.group(1)!.toLowerCase();
-          final TableAlignment align = switch (dir) {
-            'left' => TableAlignment.left,
-            'center' => TableAlignment.center,
-            'right' => TableAlignment.right,
-            _ => TableAlignment.none,
-          };
+        final TableAlignment? align = _parseDivAlign(b.literal);
+        if (align != null) {
           final List<RawBlock> inner = <RawBlock>[];
           int j = i + 1;
           bool closed = false;
           while (j < blocks.length) {
             final RawBlock nb = blocks[j];
-            if (nb is RawHtmlBlock &&
-                RegExp(
-                  r'^\s*</div>\s*$',
-                  caseSensitive: false,
-                ).hasMatch(nb.literal)) {
+            if (nb is RawHtmlBlock && _isClosingTag(nb.literal, '</div>')) {
               closed = true;
               break;
             }
@@ -2310,7 +2393,7 @@ final class _BlockEngine {
                   endLine: blocks[j].span.endLine,
                 ),
                 alignment: align,
-                children: inner,
+                children: freezeList(inner),
               ),
             );
             i = j + 1;
@@ -2335,14 +2418,14 @@ final class _BlockEngine {
       return null;
     }
     final RawBlock first = children.first;
-    if (first is! RawParagraph) {
+    if (first is! RawParagraph || !first.rawText.startsWith('[!')) {
       return null;
     }
-    final List<String> lines = first.rawText.split('\n');
-    final RegExpMatch? match = RegExp(
-      r'^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*$',
-      caseSensitive: false,
-    ).firstMatch(lines.first);
+    final int nl = first.rawText.indexOf('\n');
+    final String firstLine = nl == -1
+        ? first.rawText
+        : first.rawText.substring(0, nl);
+    final RegExpMatch? match = _alertLinePattern.firstMatch(firstLine);
     if (match == null) {
       return null;
     }
@@ -2357,12 +2440,12 @@ final class _BlockEngine {
     };
 
     final List<RawBlock> bodyChildren = <RawBlock>[];
-    if (lines.length > 1) {
+    if (nl != -1) {
       bodyChildren.add(
         RawParagraph(
           blockId: first.blockId,
           span: first.span,
-          rawText: lines.sublist(1).join('\n'),
+          rawText: first.rawText.substring(nl + 1),
           endsWithBlankLine: first.endsWithBlankLine,
         ),
       );
@@ -2375,7 +2458,7 @@ final class _BlockEngine {
       span: span,
       kind: kind,
       title: title,
-      children: bodyChildren,
+      children: freezeList(bodyChildren),
       endsWithBlankLine: endsWithBlank,
     );
   }
@@ -2467,19 +2550,34 @@ final class _BlockEngine {
     String content, {
     required bool enabled,
   }) {
-    if (!enabled) {
+    if (!enabled || content.length < 4) {
       return _SetextHeadingText(text: content, explicitId: null);
     }
-    final RegExpMatch? match = RegExp(
-      r'^(.*?)\s*\{#([A-Za-z0-9_.:-]+)\}[ \t]*$',
-      dotAll: true,
-    ).firstMatch(content);
-    if (match == null) {
+    int end = content.length;
+    while (end > 0) {
+      final int cu = content.codeUnitAt(end - 1);
+      if (cu != 0x20 && cu != 0x09) {
+        break;
+      }
+      end--;
+    }
+    if (end < 4 || content.codeUnitAt(end - 1) != 0x7D) {
+      return _SetextHeadingText(text: content, explicitId: null);
+    }
+    final int idEnd = end - 1;
+    int i = idEnd - 1;
+    while (i >= 0 && _isExplicitIdChar(content.codeUnitAt(i))) {
+      i--;
+    }
+    if (i < 1 ||
+        i + 1 >= idEnd ||
+        content.codeUnitAt(i) != 0x23 ||
+        content.codeUnitAt(i - 1) != 0x7B) {
       return _SetextHeadingText(text: content, explicitId: null);
     }
     return _SetextHeadingText(
-      text: match.group(1)!.trimRight(),
-      explicitId: match.group(2)!,
+      text: content.substring(0, i - 1).trimRight(),
+      explicitId: content.substring(i + 1, idEnd),
     );
   }
 
@@ -2553,20 +2651,20 @@ final class _BlockEngine {
     return text.substring(2).trim().isEmpty;
   }
 
-  int? _matchSetextUnderline(String text) {
-    if (text.isEmpty) {
+  int? _matchSetextUnderlineSpan(String raw, int start) {
+    if (start >= raw.length) {
       return null;
     }
-    final int marker = text.codeUnitAt(0);
+    final int marker = raw.codeUnitAt(start);
     if (marker != 0x3D && marker != 0x2D) {
       return null;
     }
-    int i = 0;
-    while (i < text.length && text.codeUnitAt(i) == marker) {
+    int i = start;
+    while (i < raw.length && raw.codeUnitAt(i) == marker) {
       i++;
     }
-    while (i < text.length) {
-      final int cu = text.codeUnitAt(i);
+    while (i < raw.length) {
+      final int cu = raw.codeUnitAt(i);
       if (cu != 0x20 && cu != 0x09) {
         return null;
       }
@@ -2575,17 +2673,17 @@ final class _BlockEngine {
     return marker == 0x3D ? 1 : 2;
   }
 
-  bool _matchThematicBreak(String text) {
-    if (text.length < 3) {
+  bool _matchThematicBreakSpan(String raw, int start) {
+    if (raw.length - start < 3) {
       return false;
     }
-    final int marker = text.codeUnitAt(0);
+    final int marker = raw.codeUnitAt(start);
     if (marker != 0x2A && marker != 0x2D && marker != 0x5F) {
       return false;
     }
     int count = 0;
-    for (int i = 0; i < text.length; i++) {
-      final int cu = text.codeUnitAt(i);
+    for (int i = start; i < raw.length; i++) {
+      final int cu = raw.codeUnitAt(i);
       if (cu == marker) {
         count++;
       } else if (cu != 0x20 && cu != 0x09) {
@@ -2634,11 +2732,12 @@ final class _BlockEngine {
     _LineCursor cursor, {
     required bool interruptingParagraph,
   }) {
-    final String text = cursor.restAfterNonSpace();
-    if (text.isEmpty) {
+    final String raw = cursor.raw;
+    final int startIdx = cursor.firstNonSpaceIndex;
+    if (startIdx >= raw.length) {
       return null;
     }
-    final int first = text.codeUnitAt(0);
+    final int first = raw.codeUnitAt(startIdx);
     bool ordered = false;
     int start = 1;
     int markerChars = 0;
@@ -2647,26 +2746,26 @@ final class _BlockEngine {
 
     if (first == 0x2D || first == 0x2B || first == 0x2A) {
       // Check that `-` or `*` isn't a thematic break on this line!
-      if (_matchThematicBreak(text)) {
+      if (_matchThematicBreakSpan(raw, startIdx)) {
         return null;
       }
       ordered = false;
       bulletChar = first;
-      delimiter = String.fromCharCode(first);
+      delimiter = first == 0x2D ? '-' : (first == 0x2B ? '+' : '*');
       markerChars = 1;
     } else if (isAsciiDigit(first)) {
       int digits = 0;
       int val = 0;
-      while (digits < text.length &&
+      while (startIdx + digits < raw.length &&
           digits < 9 &&
-          isAsciiDigit(text.codeUnitAt(digits))) {
-        val = val * 10 + (text.codeUnitAt(digits) - 0x30);
+          isAsciiDigit(raw.codeUnitAt(startIdx + digits))) {
+        val = val * 10 + (raw.codeUnitAt(startIdx + digits) - 0x30);
         digits++;
       }
-      if (digits == 0 || digits >= text.length) {
+      if (digits == 0 || startIdx + digits >= raw.length) {
         return null;
       }
-      final int delimCu = text.codeUnitAt(digits);
+      final int delimCu = raw.codeUnitAt(startIdx + digits);
       if (delimCu != 0x2E && delimCu != 0x29) {
         return null;
       }
@@ -2675,7 +2774,7 @@ final class _BlockEngine {
       }
       ordered = true;
       start = val;
-      delimiter = String.fromCharCode(delimCu);
+      delimiter = delimCu == 0x2E ? '.' : ')';
       markerChars = digits + 1;
     } else {
       return null;
@@ -2683,11 +2782,11 @@ final class _BlockEngine {
 
     // Must be followed by at least one space/tab or EOL.
     final int colAfterMarker = cursor.firstNonSpaceColumn + markerChars;
-    int idx = markerChars;
+    int idx = startIdx + markerChars;
     int spaces = 0;
     int tempCol = colAfterMarker;
-    while (idx < text.length) {
-      final int cu = text.codeUnitAt(idx);
+    while (idx < raw.length) {
+      final int cu = raw.codeUnitAt(idx);
       if (cu == 0x20) {
         spaces++;
         tempCol++;
@@ -2702,7 +2801,7 @@ final class _BlockEngine {
       }
     }
 
-    final bool isBlankAfterMarker = idx >= text.length;
+    final bool isBlankAfterMarker = idx >= raw.length;
     if (!isBlankAfterMarker && spaces == 0) {
       return null;
     }
@@ -2721,16 +2820,6 @@ final class _BlockEngine {
       padding: markerChars + consumedSpaces,
       spacesAfterMarkerConsumed: consumedSpaces,
     );
-  }
-}
-
-extension on _OpenBlock {
-  _OpenBlock? parentRef(_BlockEngine engine) {
-    final int idx = engine._stack.indexOf(this);
-    if (idx <= 0) {
-      return null;
-    }
-    return engine._stack[idx - 1];
   }
 }
 
@@ -2807,6 +2896,176 @@ final class _ListMarkerMatch {
   final int spacesAfterMarkerConsumed;
 }
 
+const int _maxLinkDefinitions = 65536;
+const int _maxAbbreviations = 512;
+
+final RegExp _abbrDefPattern = RegExp(r'^\*\[([^\]]+)\]:\s*(.+)$');
+final RegExp _alertLinePattern = RegExp(
+  r'^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*$',
+  caseSensitive: false,
+);
+final RegExp _wordOpenPattern = RegExp(r'\bopen\b');
+final RegExp _divAlignPattern = RegExp(
+  r'''^<div\s+align\s*=\s*["']?(left|center|right)["']?\s*>$''',
+  caseSensitive: false,
+);
+
+String? _firstWordBeforeSpaceOrTab(String text) {
+  if (text.isEmpty) {
+    return null;
+  }
+  for (int i = 0; i < text.length; i++) {
+    final int cu = text.codeUnitAt(i);
+    if (cu == 0x20 || cu == 0x09) {
+      return i == 0 ? '' : text.substring(0, i);
+    }
+  }
+  return text;
+}
+
+bool _isExplicitIdChar(int cu) {
+  return (cu >= 0x41 && cu <= 0x5A) ||
+      (cu >= 0x61 && cu <= 0x7A) ||
+      (cu >= 0x30 && cu <= 0x39) ||
+      cu == 0x5F ||
+      cu == 0x2E ||
+      cu == 0x3A ||
+      cu == 0x2D;
+}
+
+bool _isRegExpWs(int cu) {
+  return cu == 0x20 ||
+      cu == 0x09 ||
+      cu == 0x0A ||
+      cu == 0x0D ||
+      cu == 0x0B ||
+      cu == 0x0C;
+}
+
+bool _isDefListStarterLine(String line) {
+  if (line.isEmpty || line.codeUnitAt(0) != 0x3A) {
+    return false;
+  }
+  return line.length == 1 || _isRegExpWs(line.codeUnitAt(1));
+}
+
+String _stripColonPrefix(String line) {
+  int i = 1;
+  int removedWs = 0;
+  while (i < line.length && removedWs < 3 && _isRegExpWs(line.codeUnitAt(i))) {
+    i++;
+    removedWs++;
+  }
+  return line.substring(i);
+}
+
+bool _startsWithAsciiIgnoreCase(String s, int offset, String lowerPrefix) {
+  if (offset + lowerPrefix.length > s.length) {
+    return false;
+  }
+  for (int i = 0; i < lowerPrefix.length; i++) {
+    int cu = s.codeUnitAt(offset + i);
+    if (cu >= 0x41 && cu <= 0x5A) {
+      cu += 0x20;
+    }
+    if (cu != lowerPrefix.codeUnitAt(i)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool _isClosingTag(String literal, String lowerTag) {
+  final String trimmed = literal.trim();
+  return trimmed.length == lowerTag.length &&
+      _startsWithAsciiIgnoreCase(trimmed, 0, lowerTag);
+}
+
+String? _extractTagBody(String literal, String lowerOpen, String lowerClose) {
+  final String trimmed = literal.trim();
+  if (trimmed.length < lowerOpen.length + lowerClose.length ||
+      !_startsWithAsciiIgnoreCase(trimmed, 0, lowerOpen) ||
+      !_startsWithAsciiIgnoreCase(
+        trimmed,
+        trimmed.length - lowerClose.length,
+        lowerClose,
+      )) {
+    return null;
+  }
+  return trimmed
+      .substring(lowerOpen.length, trimmed.length - lowerClose.length)
+      .trim();
+}
+
+({bool open, String summary})? _parseDetailsOpen(String literal) {
+  final String trimmed = literal.trim();
+  if (trimmed.length < 9 ||
+      !_startsWithAsciiIgnoreCase(trimmed, 0, '<details')) {
+    return null;
+  }
+  final int afterName = trimmed.codeUnitAt(8);
+  if (afterName != 0x3E && !_isRegExpWs(afterName)) {
+    return null;
+  }
+  final int gt = trimmed.indexOf('>', 8);
+  if (gt == -1) {
+    return null;
+  }
+  final bool open =
+      gt > 8 &&
+      _wordOpenPattern.hasMatch(trimmed.substring(8, gt).toLowerCase());
+  int afterGt = gt + 1;
+  while (afterGt < trimmed.length && _isRegExpWs(trimmed.codeUnitAt(afterGt))) {
+    afterGt++;
+  }
+  if (afterGt >= trimmed.length) {
+    return (open: open, summary: '');
+  }
+  final String? summary = _extractTagBody(
+    trimmed.substring(afterGt),
+    '<summary>',
+    '</summary>',
+  );
+  if (summary == null) {
+    return null;
+  }
+  return (open: open, summary: summary);
+}
+
+bool _isFigureOpen(String literal) {
+  final String trimmed = literal.trim();
+  if (trimmed.length < 8 ||
+      !_startsWithAsciiIgnoreCase(trimmed, 0, '<figure') ||
+      !trimmed.endsWith('>')) {
+    return false;
+  }
+  final int afterName = trimmed.codeUnitAt(7);
+  if (afterName != 0x3E && !_isRegExpWs(afterName)) {
+    return false;
+  }
+  return trimmed.indexOf('>', 7) == trimmed.length - 1;
+}
+
+TableAlignment? _parseDivAlign(String literal) {
+  final String trimmed = literal.trim();
+  if (trimmed.length < 16 ||
+      trimmed.length > 64 ||
+      !_startsWithAsciiIgnoreCase(trimmed, 0, '<div') ||
+      !trimmed.endsWith('>')) {
+    return null;
+  }
+  final RegExpMatch? m = _divAlignPattern.firstMatch(trimmed);
+  if (m == null) {
+    return null;
+  }
+  return switch (m.group(1)!.toLowerCase()) {
+    'left' => TableAlignment.left,
+    'center' => TableAlignment.center,
+    'right' => TableAlignment.right,
+    _ => null,
+  };
+}
+
 // =============================================================================
 // HTML Block Condition Matching (CommonMark 0.31.2 Section 4.6)
 // =============================================================================
@@ -2828,17 +3087,162 @@ final RegExp _htmlType6Open = RegExp(
   caseSensitive: false,
 );
 
-final RegExp _htmlType7Open = RegExp(
-  r'^<(?:[A-Za-z][A-Za-z0-9-]*(?:[\x20\x09]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[\x20\x09]*=[\x20\x09]*(?:[^\x20\x09\n\r"'
-  "'"
-  r'=<>`]+|'
-  "'"
-  r"[^'\n\r]*"
-  "'"
-  r'|"[^"\n\r]*"))?)*[\x20\x09]*/?|/[A-Za-z][A-Za-z0-9-]*[\x20\x09]*)>[\x20\x09]*$',
-);
+bool _isHtmlTagNameStart(int cu) =>
+    (cu >= 0x41 && cu <= 0x5A) || (cu >= 0x61 && cu <= 0x7A);
+
+bool _isHtmlTagNameChar(int cu) =>
+    _isHtmlTagNameStart(cu) || (cu >= 0x30 && cu <= 0x39) || cu == 0x2D;
+
+bool _isHtmlAttrNameStart(int cu) =>
+    _isHtmlTagNameStart(cu) || cu == 0x5F || cu == 0x3A;
+
+bool _isHtmlAttrNameChar(int cu) =>
+    _isHtmlTagNameChar(cu) || cu == 0x5F || cu == 0x3A || cu == 0x2E;
+
+/// Linear-time Type 7 HTML open/close block matcher (CommonMark 0.31.2 §4.6).
+bool _isHtmlType7Open(String rest) {
+  final int len = rest.length;
+  if (len < 3 || rest.codeUnitAt(0) != 0x3C) {
+    return false;
+  }
+  int i = 1;
+  if (rest.codeUnitAt(i) == 0x2F) {
+    i++;
+    if (i >= len || !_isHtmlTagNameStart(rest.codeUnitAt(i))) {
+      return false;
+    }
+    i++;
+    while (i < len && _isHtmlTagNameChar(rest.codeUnitAt(i))) {
+      i++;
+    }
+    while (i < len &&
+        (rest.codeUnitAt(i) == 0x20 || rest.codeUnitAt(i) == 0x09)) {
+      i++;
+    }
+    if (i >= len || rest.codeUnitAt(i) != 0x3E) {
+      return false;
+    }
+    i++;
+    while (i < len) {
+      final int cu = rest.codeUnitAt(i);
+      if (cu != 0x20 && cu != 0x09) {
+        return false;
+      }
+      i++;
+    }
+    return true;
+  }
+
+  if (!_isHtmlTagNameStart(rest.codeUnitAt(i))) {
+    return false;
+  }
+  i++;
+  while (i < len && _isHtmlTagNameChar(rest.codeUnitAt(i))) {
+    i++;
+  }
+  while (i < len) {
+    int ws = 0;
+    while (i < len &&
+        (rest.codeUnitAt(i) == 0x20 || rest.codeUnitAt(i) == 0x09)) {
+      i++;
+      ws++;
+    }
+    if (i >= len) {
+      return false;
+    }
+    final int cu = rest.codeUnitAt(i);
+    if (cu == 0x2F) {
+      i++;
+      if (i >= len || rest.codeUnitAt(i) != 0x3E) {
+        return false;
+      }
+      i++;
+      break;
+    }
+    if (cu == 0x3E) {
+      i++;
+      break;
+    }
+    if (ws == 0 || !_isHtmlAttrNameStart(cu)) {
+      return false;
+    }
+    i++;
+    while (i < len && _isHtmlAttrNameChar(rest.codeUnitAt(i))) {
+      i++;
+    }
+    int eqWs = i;
+    while (eqWs < len &&
+        (rest.codeUnitAt(eqWs) == 0x20 || rest.codeUnitAt(eqWs) == 0x09)) {
+      eqWs++;
+    }
+    if (eqWs < len && rest.codeUnitAt(eqWs) == 0x3D) {
+      i = eqWs + 1;
+      while (i < len &&
+          (rest.codeUnitAt(i) == 0x20 || rest.codeUnitAt(i) == 0x09)) {
+        i++;
+      }
+      if (i >= len) {
+        return false;
+      }
+      final int q = rest.codeUnitAt(i);
+      if (q == 0x22 || q == 0x27) {
+        i++;
+        while (i < len) {
+          final int ch = rest.codeUnitAt(i);
+          if (ch == 0x0A || ch == 0x0D) {
+            return false;
+          }
+          if (ch == q) {
+            break;
+          }
+          i++;
+        }
+        if (i >= len) {
+          return false;
+        }
+        i++;
+      } else {
+        int valLen = 0;
+        while (i < len) {
+          final int ch = rest.codeUnitAt(i);
+          if (ch == 0x20 ||
+              ch == 0x09 ||
+              ch == 0x0A ||
+              ch == 0x0D ||
+              ch == 0x22 ||
+              ch == 0x27 ||
+              ch == 0x3D ||
+              ch == 0x3C ||
+              ch == 0x3E ||
+              ch == 0x60) {
+            break;
+          }
+          i++;
+          valLen++;
+        }
+        if (valLen == 0) {
+          return false;
+        }
+      }
+    }
+  }
+  if (i == 0 || rest.codeUnitAt(i - 1) != 0x3E) {
+    return false;
+  }
+  while (i < len) {
+    final int cu = rest.codeUnitAt(i);
+    if (cu != 0x20 && cu != 0x09) {
+      return false;
+    }
+    i++;
+  }
+  return true;
+}
 
 int? _matchHtmlBlockStart(String rest, {required bool allowType7}) {
+  if (rest.isEmpty || rest.codeUnitAt(0) != 0x3C) {
+    return null;
+  }
   if (_htmlType1Open.hasMatch(rest)) {
     return 1;
   }
@@ -2857,12 +3261,7 @@ int? _matchHtmlBlockStart(String rest, {required bool allowType7}) {
   if (_htmlType6Open.hasMatch(rest)) {
     return 6;
   }
-  if (allowType7 &&
-      !RegExp(
-        r'^<(?:pre|script|style|textarea)(?:[\x20\x09>]|$)',
-        caseSensitive: false,
-      ).hasMatch(rest) &&
-      _htmlType7Open.hasMatch(rest)) {
+  if (allowType7 && _isHtmlType7Open(rest)) {
     return 7;
   }
   return null;
@@ -3166,105 +3565,176 @@ int? _consumeSpacesToLineEnd(String text, int start) {
 // GFM Table Parsing Helpers
 // =============================================================================
 
-List<TableAlignment>? _matchTableDelimiterRow(String line) {
-  final String trimmed = line.trim();
-  if (trimmed.isEmpty || !trimmed.contains('-')) {
+List<TableAlignment>? _matchTableDelimiterRowSpan(
+  String raw,
+  int start, {
+  required int maxColumns,
+}) {
+  int end = raw.length;
+  while (end > start) {
+    final int cu = raw.codeUnitAt(end - 1);
+    if (cu != 0x20 && cu != 0x09) {
+      break;
+    }
+    end--;
+  }
+  if (end <= start) {
     return null;
   }
-  for (int i = 0; i < trimmed.length; i++) {
-    final int cu = trimmed.codeUnitAt(i);
-    if (cu != 0x7C && cu != 0x2D && cu != 0x3A && cu != 0x20 && cu != 0x09) {
+  bool hasDash = false;
+  for (int i = start; i < end; i++) {
+    final int cu = raw.codeUnitAt(i);
+    if (cu == 0x2D) {
+      hasDash = true;
+    } else if (cu != 0x7C && cu != 0x3A && cu != 0x20 && cu != 0x09) {
       return null;
     }
   }
-  final List<String> cells = _splitTableRow(trimmed, unescapePipes: false);
-  if (cells.isEmpty) {
+  if (!hasDash) {
     return null;
+  }
+  int s = start;
+  int e = end;
+  if (raw.codeUnitAt(s) == 0x7C) {
+    s++;
+  }
+  if (e > s && raw.codeUnitAt(e - 1) == 0x7C) {
+    e--;
   }
   final List<TableAlignment> alignments = <TableAlignment>[];
-  for (final String cell in cells) {
-    if (cell.isEmpty) {
-      return null;
-    }
-    final bool leftColon = cell.startsWith(':');
-    final bool rightColon = cell.endsWith(':');
-    final int start = leftColon ? 1 : 0;
-    final int end = rightColon ? cell.length - 1 : cell.length;
-    if (end <= start) {
-      return null;
-    }
-    for (int k = start; k < end; k++) {
-      if (cell.codeUnitAt(k) != 0x2D) {
+  int cellStart = s;
+  for (int i = s; i <= e; i++) {
+    if (i == e || raw.codeUnitAt(i) == 0x7C) {
+      int cs = cellStart;
+      int ce = i;
+      while (cs < ce &&
+          (raw.codeUnitAt(cs) == 0x20 || raw.codeUnitAt(cs) == 0x09)) {
+        cs++;
+      }
+      while (ce > cs &&
+          (raw.codeUnitAt(ce - 1) == 0x20 || raw.codeUnitAt(ce - 1) == 0x09)) {
+        ce--;
+      }
+      if (cs >= ce) {
         return null;
       }
-    }
-    if (leftColon && rightColon) {
-      alignments.add(TableAlignment.center);
-    } else if (leftColon) {
-      alignments.add(TableAlignment.left);
-    } else if (rightColon) {
-      alignments.add(TableAlignment.right);
-    } else {
-      alignments.add(TableAlignment.none);
+      final bool leftColon = raw.codeUnitAt(cs) == 0x3A;
+      final bool rightColon = raw.codeUnitAt(ce - 1) == 0x3A;
+      final int innerStart = leftColon ? cs + 1 : cs;
+      final int innerEnd = rightColon ? ce - 1 : ce;
+      if (innerEnd <= innerStart) {
+        return null;
+      }
+      for (int k = innerStart; k < innerEnd; k++) {
+        if (raw.codeUnitAt(k) != 0x2D) {
+          return null;
+        }
+      }
+      if (alignments.length >= maxColumns) {
+        return null;
+      }
+      if (leftColon && rightColon) {
+        alignments.add(TableAlignment.center);
+      } else if (leftColon) {
+        alignments.add(TableAlignment.left);
+      } else if (rightColon) {
+        alignments.add(TableAlignment.right);
+      } else {
+        alignments.add(TableAlignment.none);
+      }
+      cellStart = i + 1;
     }
   }
-  return alignments;
+  return alignments.isEmpty ? null : alignments;
 }
 
 /// Splits a pipe-delimited GFM table row into trimmed cells, unescaping `\|`
 /// to `|` per `cmark-gfm` (`S_row_from_string`) while leaving `\\|` as `\\` +
-/// cell separator.
-List<String> _splitTableRow(String line, {bool unescapePipes = true}) {
-  String s = line.trim();
-  if (s.startsWith('|')) {
-    s = s.substring(1);
+/// cell separator. Stops once [maxColumns] cells are extracted.
+List<String> _splitTableRow(
+  String line, {
+  bool unescapePipes = true,
+  int? maxColumns,
+}) {
+  int start = 0;
+  int end = line.length;
+  while (start < end && isAsciiWhitespace(line.codeUnitAt(start))) {
+    start++;
+  }
+  while (end > start && isAsciiWhitespace(line.codeUnitAt(end - 1))) {
+    end--;
+  }
+  if (start < end && line.codeUnitAt(start) == 0x7C) {
+    start++;
   }
   // Check trailing unescaped pipe.
-  if (s.endsWith('|')) {
+  if (end > start && line.codeUnitAt(end - 1) == 0x7C) {
     int backslashes = 0;
-    int k = s.length - 2;
-    while (k >= 0 && s.codeUnitAt(k) == 0x5C) {
+    int k = end - 2;
+    while (k >= start && line.codeUnitAt(k) == 0x5C) {
       backslashes++;
       k--;
     }
     if (backslashes.isEven) {
-      s = s.substring(0, s.length - 1);
+      end--;
     }
   }
 
   final List<String> cells = <String>[];
-  final StringBuffer current = StringBuffer();
-  int i = 0;
-  while (i < s.length) {
-    final int cu = s.codeUnitAt(i);
-    if (cu == 0x5C && i + 1 < s.length) {
-      final int next = s.codeUnitAt(i + 1);
-      if (next == 0x7C) {
-        if (unescapePipes) {
-          current.writeCharCode(0x7C);
+  StringBuffer? current;
+  int cellSliceStart = start;
+  int i = start;
+  while (i < end) {
+    final int cu = line.codeUnitAt(i);
+    if (cu == 0x5C && i + 1 < end) {
+      final int next = line.codeUnitAt(i + 1);
+      if (next == 0x7C || next == 0x5C) {
+        current ??= StringBuffer();
+        if (i > cellSliceStart) {
+          current.write(line.substring(cellSliceStart, i));
+        }
+        if (next == 0x7C) {
+          current.write(unescapePipes ? '|' : r'\|');
         } else {
-          current.write(r'\|');
+          current.write(r'\\');
         }
         i += 2;
-        continue;
-      }
-      // Preserve `\\` as two characters so `\\|` closes cell properly while
-      // leaving `\\` intact inside cells (`extensions.txt` #11).
-      if (next == 0x5C) {
-        current.write(r'\\');
-        i += 2;
+        cellSliceStart = i;
         continue;
       }
     }
     if (cu == 0x7C) {
-      cells.add(current.toString().trim());
-      current.clear();
+      final String cellText;
+      if (current == null) {
+        cellText = line.substring(cellSliceStart, i).trim();
+      } else {
+        if (i > cellSliceStart) {
+          current.write(line.substring(cellSliceStart, i));
+        }
+        cellText = current.toString().trim();
+        current.clear();
+      }
+      cells.add(cellText);
+      if (maxColumns != null && cells.length >= maxColumns) {
+        return cells;
+      }
       i++;
+      cellSliceStart = i;
       continue;
     }
-    current.writeCharCode(cu);
     i++;
   }
-  cells.add(current.toString().trim());
+  if (maxColumns == null || cells.length < maxColumns) {
+    final String cellText;
+    if (current == null) {
+      cellText = line.substring(cellSliceStart, end).trim();
+    } else {
+      if (end > cellSliceStart) {
+        current.write(line.substring(cellSliceStart, end));
+      }
+      cellText = current.toString().trim();
+    }
+    cells.add(cellText);
+  }
   return cells;
 }

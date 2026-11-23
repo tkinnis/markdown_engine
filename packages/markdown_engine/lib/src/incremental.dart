@@ -1,12 +1,12 @@
 import 'package:meta/meta.dart';
 
 import 'ast.dart';
+import 'ast_walkers.dart';
 import 'block_parser.dart';
 import 'document.dart';
 import 'engine.dart';
 import 'inline_parser.dart';
 import 'options.dart';
-import 'slugs.dart';
 
 /// Result returned by [IncrementalMarkdownParser.parseIncremental], reporting
 /// the resulting [MarkdownDocument] and block reuse telemetry.
@@ -100,50 +100,115 @@ final class IncrementalMarkdownParser {
       );
     }
 
-    final String oldNorm = normalizeMarkdownSource(prevDoc.source);
+    final String oldNorm =
+        cachedNormalizedSource(prevDoc) ??
+        normalizeMarkdownSource(prevDoc.source);
     final String newNorm = normalizeMarkdownSource(newSource);
+    final bool normUnchanged =
+        identical(oldNorm, prevDoc.source) && identical(newNorm, newSource);
 
-    // Compute exact common prefix and non-overlapping common suffix.
-    int prefixLen = 0;
+    // Compute exact common prefix and non-overlapping common suffix, skipping
+    // O(N) prefix/suffix scans when exact edit coordinates are supplied.
     final int minLen = oldNorm.length < newNorm.length
         ? oldNorm.length
         : newNorm.length;
-    while (prefixLen < minLen &&
-        oldNorm.codeUnitAt(prefixLen) == newNorm.codeUnitAt(prefixLen)) {
-      prefixLen++;
-    }
-    if (editStartOffset != null && editStartOffset < prefixLen) {
-      prefixLen = editStartOffset < 0 ? 0 : editStartOffset;
+    int prefixLen;
+    int oldDirtyEndLimit;
+    int newDirtyEndLimit;
+
+    if (normUnchanged &&
+        editStartOffset != null &&
+        editOldEndOffset != null &&
+        editNewEndOffset != null &&
+        editStartOffset >= 0 &&
+        editStartOffset <= editOldEndOffset &&
+        editStartOffset <= editNewEndOffset &&
+        editOldEndOffset <= oldNorm.length &&
+        editNewEndOffset <= newNorm.length &&
+        oldNorm.length - editOldEndOffset ==
+            newNorm.length - editNewEndOffset) {
+      prefixLen = editStartOffset;
+      oldDirtyEndLimit = editOldEndOffset;
+      newDirtyEndLimit = editNewEndOffset;
+    } else if (normUnchanged &&
+        editStartOffset != null &&
+        editStartOffset >= 0 &&
+        editStartOffset <= minLen) {
+      prefixLen = editStartOffset;
+      int suffixLen = 0;
+      final int maxSuffix = minLen - prefixLen;
+      while (suffixLen < maxSuffix &&
+          oldNorm.codeUnitAt(oldNorm.length - 1 - suffixLen) ==
+              newNorm.codeUnitAt(newNorm.length - 1 - suffixLen)) {
+        suffixLen++;
+      }
+      oldDirtyEndLimit = oldNorm.length - suffixLen;
+      newDirtyEndLimit = newNorm.length - suffixLen;
+    } else {
+      prefixLen = 0;
+      while (prefixLen < minLen &&
+          oldNorm.codeUnitAt(prefixLen) == newNorm.codeUnitAt(prefixLen)) {
+        prefixLen++;
+      }
+      if (editStartOffset != null && editStartOffset < prefixLen) {
+        prefixLen = editStartOffset < 0 ? 0 : editStartOffset;
+      }
+
+      int suffixLen = 0;
+      final int maxSuffix = minLen - prefixLen;
+      while (suffixLen < maxSuffix &&
+          oldNorm.codeUnitAt(oldNorm.length - 1 - suffixLen) ==
+              newNorm.codeUnitAt(newNorm.length - 1 - suffixLen)) {
+        suffixLen++;
+      }
+      oldDirtyEndLimit = oldNorm.length - suffixLen;
+      newDirtyEndLimit = newNorm.length - suffixLen;
     }
 
-    int suffixLen = 0;
-    while (suffixLen < minLen - prefixLen &&
-        oldNorm.codeUnitAt(oldNorm.length - 1 - suffixLen) ==
-            newNorm.codeUnitAt(newNorm.length - 1 - suffixLen)) {
-      suffixLen++;
+    // Binary-search reusable prefix/suffix blocks in O(log B) instead of
+    // linearly scanning all document blocks.
+    final List<MarkdownBlockNode> prevBlocks = rawDocumentBlocks(prevDoc);
+    final int searchLimit =
+        prevBlocks.isNotEmpty && prevBlocks.last is FootnoteSectionNode
+        ? prevBlocks.length - 1
+        : prevBlocks.length;
+
+    int lo = 0;
+    int hi = searchLimit;
+    while (lo < hi) {
+      final int mid = (lo + hi) >> 1;
+      if (prevBlocks[mid].span.endOffset < prefixLen) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    int prefixCount = lo;
+    while (prefixCount > 0 &&
+        !_isSafePrefixReuse(
+          prevBlocks[prefixCount - 1],
+          oldNorm,
+          newNorm,
+          prefixLen,
+        )) {
+      prefixCount--;
     }
 
-    final int oldDirtyEndLimit = oldNorm.length - suffixLen;
-    final int newDirtyEndLimit = newNorm.length - suffixLen;
+    // Check if frontmatter was touched or newly introduced.
+    if (effective.frontmatter &&
+        prefixCount == 0 &&
+        (prevDoc.frontmatter != null ||
+            newNorm.startsWith('---') ||
+            newNorm.startsWith('+++'))) {
+      return _fullReparse(newSource, effective);
+    }
 
-    // Identify reusable prefix blocks strictly separated by blank lines
-    // before `prefixLen`.
-    final List<MarkdownBlockNode> prevBlocks = prevDoc.blocks;
-    final List<MarkdownBlockNode> prefixReused = <MarkdownBlockNode>[];
     int dirtyOldStart = 0;
     int dirtyStartLine = 1;
-
-    for (final MarkdownBlockNode block in prevBlocks) {
-      if (block is FootnoteSectionNode) {
-        break;
-      }
-      if (!_isSafePrefixReuse(block, oldNorm, newNorm, prefixLen)) {
-        break;
-      }
-      prefixReused.add(block);
-      dirtyOldStart = block.span.endOffset;
-      dirtyStartLine = block.span.endLine + 1;
-      // Advance over blank separator line(s) up to prefixLen if aligned.
+    if (prefixCount > 0) {
+      final MarkdownBlockNode lastPrefix = prevBlocks[prefixCount - 1];
+      dirtyOldStart = lastPrefix.span.endOffset;
+      dirtyStartLine = lastPrefix.span.endLine + 1;
       while (dirtyOldStart < prefixLen &&
           oldNorm.codeUnitAt(dirtyOldStart) == 0x0A) {
         dirtyOldStart++;
@@ -151,67 +216,136 @@ final class IncrementalMarkdownParser {
       }
     }
 
-    // Check if frontmatter was touched or newly introduced.
-    if (effective.frontmatter &&
-        prefixReused.isEmpty &&
-        (prevDoc.frontmatter != null ||
-            newNorm.startsWith('---') ||
-            newNorm.startsWith('+++'))) {
-      return _fullReparse(newSource, effective);
+    // Identify reusable suffix blocks in O(log B).
+    final int offsetDelta = newNorm.length - oldNorm.length;
+    lo = prefixCount;
+    hi = searchLimit;
+    while (lo < hi) {
+      final int mid = (lo + hi) >> 1;
+      final int s = prevBlocks[mid].span.startOffset;
+      if (s > oldDirtyEndLimit && s > dirtyOldStart) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    int suffixStartIdx = lo;
+    while (suffixStartIdx < searchLimit &&
+        !_isSafeSuffixReuse(
+          prevBlocks[suffixStartIdx],
+          oldNorm,
+          oldDirtyEndLimit,
+          dirtyOldStart,
+        )) {
+      suffixStartIdx++;
     }
 
-    // Identify reusable suffix blocks strictly after a blank line in suffix.
-    final int offsetDelta = newNorm.length - oldNorm.length;
-    final List<MarkdownBlockNode> suffixCandidates = <MarkdownBlockNode>[];
-    int dirtyOldEnd = oldNorm.length;
+    // Apply container-merge boundary guards at prefix/suffix edges so loose
+    // lists, definition lists, and HTML containers (<details>/<figure>/<div align>)
+    // cannot fail to merge or pair across the dirty slice boundary.
+    while (prefixCount > 0 &&
+        (isPotentialHtmlContainerBoundary(
+              prevBlocks[prefixCount - 1],
+              effective,
+            ) ||
+            _mayInteractWithPrefixContainer(
+              prevBlocks[prefixCount - 1],
+              oldNorm,
+              newNorm,
+              dirtyOldStart,
+              oldDirtyEndLimit,
+              newDirtyEndLimit,
+            ))) {
+      prefixCount--;
+      if (prefixCount > 0) {
+        final MarkdownBlockNode b = prevBlocks[prefixCount - 1];
+        dirtyOldStart = b.span.endOffset;
+        dirtyStartLine = b.span.endLine + 1;
+        while (dirtyOldStart < prefixLen &&
+            oldNorm.codeUnitAt(dirtyOldStart) == 0x0A) {
+          dirtyOldStart++;
+          dirtyStartLine++;
+        }
+      } else {
+        dirtyOldStart = 0;
+        dirtyStartLine = 1;
+      }
+    }
 
-    for (int i = prevBlocks.length - 1; i >= prefixReused.length; i--) {
-      final MarkdownBlockNode block = prevBlocks[i];
-      if (block is FootnoteSectionNode) {
-        continue;
-      }
-      if (!_isSafeSuffixReuse(
-        block,
-        oldNorm,
-        oldDirtyEndLimit,
-        dirtyOldStart,
-      )) {
-        break;
-      }
-      suffixCandidates.add(block);
-      dirtyOldEnd = block.span.startOffset;
+    int dirtyOldEnd = suffixStartIdx < searchLimit
+        ? prevBlocks[suffixStartIdx].span.startOffset
+        : oldNorm.length;
+    while (dirtyOldEnd > oldDirtyEndLimit &&
+        oldNorm.codeUnitAt(dirtyOldEnd - 1) == 0x0A) {
+      dirtyOldEnd--;
+    }
+
+    while (suffixStartIdx < searchLimit &&
+        (isPotentialHtmlContainerBoundary(
+              prevBlocks[suffixStartIdx],
+              effective,
+            ) ||
+            _mayInteractWithSuffixContainer(
+              prevBlocks[suffixStartIdx],
+              oldNorm,
+              newNorm,
+              dirtyOldStart,
+              dirtyOldEnd,
+              dirtyOldEnd + offsetDelta,
+            ))) {
+      suffixStartIdx++;
+      dirtyOldEnd = suffixStartIdx < searchLimit
+          ? prevBlocks[suffixStartIdx].span.startOffset
+          : oldNorm.length;
       while (dirtyOldEnd > oldDirtyEndLimit &&
           oldNorm.codeUnitAt(dirtyOldEnd - 1) == 0x0A) {
         dirtyOldEnd--;
       }
     }
-    final List<MarkdownBlockNode> suffixOrder = suffixCandidates.reversed
-        .toList(growable: false);
 
     final int dirtyNewStart = dirtyOldStart;
     final int dirtyNewEnd = dirtyOldEnd + offsetDelta;
+    final int suffixCount = searchLimit - suffixStartIdx;
     if (dirtyNewStart > dirtyNewEnd ||
         dirtyNewEnd > newNorm.length ||
         dirtyOldStart > dirtyOldEnd ||
         dirtyOldEnd > oldNorm.length ||
-        (prefixReused.isEmpty && suffixOrder.isEmpty)) {
+        (prefixCount == 0 && suffixCount == 0)) {
       return _fullReparse(newSource, effective);
     }
 
     final String oldDirtySlice = oldNorm.substring(dirtyOldStart, dirtyOldEnd);
     final String newDirtySlice = newNorm.substring(dirtyNewStart, dirtyNewEnd);
 
-    // If link definitions, footnote definitions, or abbreviations might reside
-    // in or be affected by the dirty slice, verify cleanly.
+    // If link/footnote/abbreviation definitions might reside in or be affected
+    // by the dirty slice, fall back cleanly to full parse.
     if (prevDoc.footnotes.isNotEmpty ||
-        _looksLikeDefinition(oldDirtySlice) ||
-        _looksLikeDefinition(newDirtySlice)) {
+        mightContainDefinitionLine(oldDirtySlice) ||
+        mightContainDefinitionLine(newDirtySlice)) {
       return _fullReparse(newSource, effective);
     }
 
+    if ((effective.detailsBlocks ||
+            effective.figureBlocks ||
+            effective.alignedBlocks) &&
+        (oldDirtySlice.contains('<') || newDirtySlice.contains('<'))) {
+      for (int k = 0; k < prefixCount; k++) {
+        if (prevBlocks[k] is HtmlBlockNode) {
+          return _fullReparse(newSource, effective);
+        }
+      }
+      for (int k = suffixStartIdx; k < searchLimit; k++) {
+        if (prevBlocks[k] is HtmlBlockNode) {
+          return _fullReparse(newSource, effective);
+        }
+      }
+    }
+
     final String dirtyIdPrefix = _pickDisjointIdPrefix(
-      prefixReused,
-      suffixOrder,
+      prevBlocks,
+      prefixCount,
+      suffixStartIdx,
+      searchLimit,
     );
 
     // Parse only the dirty slice (avoiding frontmatter unless dirtyStart == 0).
@@ -233,64 +367,79 @@ final class IncrementalMarkdownParser {
     }
 
     // Resolve inlines inside the dirty slice using document link definitions
-    // (if any existed in reused prefix/suffix).
+    // AND document abbreviations.
     final Phase1Result resolvedSlicePhase1 = Phase1Result(
       blocks: dirtyPhase1.blocks,
       frontmatter: dirtyPhase1.frontmatter,
       linkDefinitions: prevDoc.linkDefinitions,
       footnoteDefinitions: const <String, RawFootnoteDef>{},
-      abbreviations: const <String, String>{},
+      abbreviations: prevDoc.abbreviations,
       normalizedSource: dirtyPhase1.normalizedSource,
+      idPrefix: dirtyPhase1.idPrefix,
     );
     final Phase2Result dirtyPhase2 = parseInlines(
       resolvedSlicePhase1,
       sliceOptions,
     );
 
-    // Compute line delta for shifted suffix blocks.
+    // Compute line delta for shifted suffix blocks (O(1) lazy shift per block).
     final int oldDirtyLines = _countNewlines(oldDirtySlice);
     final int newDirtyLines = _countNewlines(newDirtySlice);
     final int lineDelta = newDirtyLines - oldDirtyLines;
 
-    final List<MarkdownBlockNode> shiftedSuffix = suffixOrder
-        .map((MarkdownBlockNode b) => b.shiftSpan(offsetDelta, lineDelta))
-        .toList(growable: false);
-
-    // If heading slugs are enabled and headings changed across prefix/dirty/suffix,
-    // recompute outline and heading slugs if any slug collision is possible.
     final List<MarkdownBlockNode> combined = <MarkdownBlockNode>[
-      ...prefixReused,
+      for (int i = 0; i < prefixCount; i++) prevBlocks[i],
       ...dirtyPhase2.blocks,
-      ...shiftedSuffix,
+      for (int i = suffixStartIdx; i < searchLimit; i++)
+        prevBlocks[i].shiftSpan(offsetDelta, lineDelta),
     ];
 
-    final List<MarkdownBlockNode> oldMiddleBlocks = prevBlocks.sublist(
-      prefixReused.length,
-      prevBlocks.length - suffixOrder.length,
-    );
+    bool oldMiddleHadHeading = false;
+    for (int i = prefixCount; i < suffixStartIdx; i++) {
+      if (blockContainsHeading(prevBlocks[i])) {
+        oldMiddleHadHeading = true;
+        break;
+      }
+    }
     final bool headingsChanged =
-        _containsHeading(oldMiddleBlocks) ||
-        _containsHeading(dirtyPhase2.blocks);
+        oldMiddleHadHeading || containsHeadingInBlocks(dirtyPhase2.blocks);
 
     final List<MarkdownBlockNode> finalBlocks;
     final List<MarkdownOutlineItem> outline;
-    if (effective.headingSlugs && headingsChanged) {
+    if (!headingsChanged) {
+      finalBlocks = freezeList(combined);
+      outline = _shiftUnchangedOutline(
+        rawDocumentOutline(prevDoc),
+        dirtyOldStart: dirtyOldStart,
+        dirtyOldEnd: dirtyOldEnd,
+        offsetDelta: offsetDelta,
+        lineDelta: lineDelta,
+      );
+    } else if (effective.headingSlugs) {
       final ({
         List<MarkdownBlockNode> blocks,
         List<MarkdownOutlineItem> outline,
       })
-      rebuilt = _recomputeSlugsAndOutline(combined, effective);
-      finalBlocks = rebuilt.blocks;
-      outline = rebuilt.outline;
+      rebuilt = recomputeSlugsAndOutline(combined, effective);
+      finalBlocks = freezeList(rebuilt.blocks);
+      outline = freezeList(rebuilt.outline);
     } else {
-      finalBlocks = combined;
-      outline = _collectOutlineFromBlocks(combined);
+      finalBlocks = freezeList(combined);
+      outline = freezeList(
+        collectOutlineFromBlocks(combined, options: effective),
+      );
     }
 
-    final List<String> remoteImages =
-        prevDoc.remoteImageAddresses.isEmpty && !newDirtySlice.contains('http')
-        ? const <String>[]
-        : _collectRemoteImages(finalBlocks);
+    final List<String> oldMiddleImages = collectRemoteImagesFromBlocks(
+      prevBlocks.sublist(prefixCount, suffixStartIdx),
+    );
+    final List<String> remoteImages;
+    if (oldMiddleImages.isEmpty && dirtyPhase2.remoteImageAddresses.isEmpty) {
+      remoteImages = rawDocumentRemoteImages(prevDoc);
+    } else {
+      remoteImages = freezeList(collectRemoteImagesFromBlocks(finalBlocks));
+    }
+
     final MarkdownDocument resultDoc = MarkdownDocument(
       source: newSource,
       options: effective,
@@ -300,12 +449,14 @@ final class IncrementalMarkdownParser {
       footnotes: prevDoc.footnotes,
       remoteImageAddresses: remoteImages,
       linkDefinitions: prevDoc.linkDefinitions,
+      abbreviations: prevDoc.abbreviations,
+      normalizedSource: newNorm,
     );
 
     final int _ = newDirtyEndLimit;
     return IncrementalParseResult(
       document: resultDoc,
-      reusedBlockCount: prefixReused.length + shiftedSuffix.length,
+      reusedBlockCount: prefixCount + suffixCount,
       reparsedBlockCount: dirtyPhase2.blocks.length,
     );
   }
@@ -364,8 +515,150 @@ final class IncrementalMarkdownParser {
     return start - 2 >= oldDirtyEndLimit;
   }
 
-  bool _looksLikeDefinition(String slice) {
-    return slice.contains(']:');
+  bool _mayInteractWithPrefixContainer(
+    MarkdownBlockNode block,
+    String oldNorm,
+    String newNorm,
+    int dirtyOldStart,
+    int oldDirtyEndLimit,
+    int newDirtyEndLimit,
+  ) {
+    if (block is ListNode) {
+      return _firstNonSpaceLineCouldMergeList(
+            oldNorm,
+            dirtyOldStart,
+            oldDirtyEndLimit,
+          ) ||
+          _firstNonSpaceLineCouldMergeList(
+            newNorm,
+            dirtyOldStart,
+            newDirtyEndLimit,
+          );
+    }
+    if (block is DefinitionListNode) {
+      return _firstNonSpaceLineCouldMergeDefList(
+            oldNorm,
+            dirtyOldStart,
+            oldDirtyEndLimit,
+          ) ||
+          _firstNonSpaceLineCouldMergeDefList(
+            newNorm,
+            dirtyOldStart,
+            newDirtyEndLimit,
+          );
+    }
+    return false;
+  }
+
+  bool _mayInteractWithSuffixContainer(
+    MarkdownBlockNode block,
+    String oldNorm,
+    String newNorm,
+    int dirtyOldStart,
+    int dirtyOldEnd,
+    int dirtyNewEnd,
+  ) {
+    if (block is ListNode) {
+      return _lastNonEmptyLineCouldMergeList(
+            oldNorm,
+            dirtyOldStart,
+            dirtyOldEnd,
+          ) ||
+          _lastNonEmptyLineCouldMergeList(newNorm, dirtyOldStart, dirtyNewEnd);
+    }
+    return false;
+  }
+
+  bool _firstNonSpaceLineCouldMergeList(String text, int start, int limit) {
+    int i = start;
+    while (i < limit && text.codeUnitAt(i) == 0x0A) {
+      i++;
+    }
+    if (i >= limit) {
+      return false;
+    }
+    return _lineStartsWithListOrIndent(text, i, limit);
+  }
+
+  bool _lastNonEmptyLineCouldMergeList(String text, int start, int end) {
+    if (end <= start) {
+      return false;
+    }
+    int i = end;
+    while (i > start && text.codeUnitAt(i - 1) == 0x0A) {
+      i--;
+    }
+    if (i <= start) {
+      return false;
+    }
+    // Check last block in dirty slice (after last `\n\n` or from start).
+    int blockStart = text.lastIndexOf('\n\n', i - 1);
+    blockStart = blockStart < start ? start : blockStart + 2;
+    while (blockStart < i && text.codeUnitAt(blockStart) == 0x0A) {
+      blockStart++;
+    }
+    if (blockStart >= i) {
+      return false;
+    }
+    return _lineStartsWithListOrIndent(text, blockStart, i);
+  }
+
+  bool _lineStartsWithListOrIndent(String text, int lineStart, int limit) {
+    int i = lineStart;
+    int spaces = 0;
+    while (i < limit && i < text.length) {
+      final int cu = text.codeUnitAt(i);
+      if (cu == 0x20) {
+        spaces++;
+        i++;
+      } else if (cu == 0x09) {
+        return true;
+      } else {
+        break;
+      }
+    }
+    if (spaces >= 2) {
+      return true;
+    }
+    if (i >= limit || i >= text.length) {
+      return false;
+    }
+    final int first = text.codeUnitAt(i);
+    if (first == 0x2D || first == 0x2B || first == 0x2A) {
+      return i + 1 >= text.length ||
+          text.codeUnitAt(i + 1) == 0x20 ||
+          text.codeUnitAt(i + 1) == 0x09 ||
+          text.codeUnitAt(i + 1) == 0x0A;
+    }
+    if (first >= 0x30 && first <= 0x39) {
+      int k = i;
+      int digits = 0;
+      while (k < limit &&
+          k < text.length &&
+          digits < 9 &&
+          text.codeUnitAt(k) >= 0x30 &&
+          text.codeUnitAt(k) <= 0x39) {
+        k++;
+        digits++;
+      }
+      if (k < text.length &&
+          (text.codeUnitAt(k) == 0x2E || text.codeUnitAt(k) == 0x29)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _firstNonSpaceLineCouldMergeDefList(String text, int start, int limit) {
+    int i = start;
+    while (i < limit && text.codeUnitAt(i) == 0x0A) {
+      i++;
+    }
+    if (i >= limit || i >= text.length) {
+      return false;
+    }
+    final int cu = text.codeUnitAt(i);
+    return cu == 0x3A || cu == 0x20 || cu == 0x09;
   }
 
   int _countNewlines(String s) {
@@ -379,213 +672,60 @@ final class IncrementalMarkdownParser {
   }
 
   String _pickDisjointIdPrefix(
-    List<MarkdownBlockNode> prefix,
-    List<MarkdownBlockNode> suffix,
+    List<MarkdownBlockNode> blocks,
+    int prefixEnd,
+    int suffixStart,
+    int suffixEnd,
   ) {
-    int gen = 1;
-    while (true) {
-      final String candidate = 'inc$gen-';
-      bool collision = false;
-      for (final MarkdownBlockNode b in prefix) {
-        if (b.blockId.startsWith(candidate)) {
-          collision = true;
-          break;
-        }
-      }
-      if (!collision) {
-        for (final MarkdownBlockNode b in suffix) {
-          if (b.blockId.startsWith(candidate)) {
-            collision = true;
-            break;
-          }
-        }
-      }
-      if (!collision) {
-        return candidate;
-      }
-      gen++;
-    }
-  }
-
-  bool _containsHeading(List<MarkdownBlockNode> blocks) {
-    for (final MarkdownBlockNode b in blocks) {
-      if (b is HeadingNode) {
-        return true;
-      }
-      if (b is BlockQuoteNode && _containsHeading(b.children)) {
-        return true;
-      }
-      if (b is AlertNode && _containsHeading(b.children)) {
-        return true;
-      }
-      if (b is DetailsBlockNode && _containsHeading(b.children)) {
-        return true;
-      }
-    }
-    return false;
-  }
-}
-
-({List<MarkdownBlockNode> blocks, List<MarkdownOutlineItem> outline})
-_recomputeSlugsAndOutline(
-  List<MarkdownBlockNode> blocks,
-  MarkdownOptions options,
-) {
-  final HeadingSlugGenerator gen = HeadingSlugGenerator();
-  final List<MarkdownOutlineItem> outline = <MarkdownOutlineItem>[];
-
-  MarkdownBlockNode visitBlock(MarkdownBlockNode b) {
-    if (b is HeadingNode) {
-      final String slug = (options.explicitHeadingIds && b.explicitId != null)
-          ? b.explicitId!
-          : gen.generate(b.text);
-      outline.add(
-        MarkdownOutlineItem(
-          text: b.text,
-          level: b.level,
-          line: b.span.startLine,
-          slug: slug,
-          span: b.span,
-        ),
-      );
-      if (slug == b.slug) {
-        return b;
-      }
-      return HeadingNode(
-        blockId: b.blockId,
-        level: b.level,
-        text: b.text,
-        slug: slug,
-        explicitId: b.explicitId,
-        children: b.children,
-        isSetext: b.isSetext,
-        span: b.span,
-      );
-    }
-    return b;
-  }
-
-  final List<MarkdownBlockNode> updated = blocks
-      .map(visitBlock)
-      .toList(growable: false);
-  return (blocks: updated, outline: outline);
-}
-
-List<MarkdownOutlineItem> _collectOutlineFromBlocks(
-  List<MarkdownBlockNode> blocks,
-) {
-  final List<MarkdownOutlineItem> out = <MarkdownOutlineItem>[];
-  void walk(List<MarkdownBlockNode> list) {
-    for (final MarkdownBlockNode b in list) {
-      if (b is HeadingNode) {
-        out.add(
-          MarkdownOutlineItem(
-            text: b.text,
-            level: b.level,
-            line: b.span.startLine,
-            slug: b.slug ?? slugifyHeadingText(b.text),
-            span: b.span,
-          ),
-        );
-      } else if (b is BlockQuoteNode) {
-        walk(b.children);
-      } else if (b is AlertNode) {
-        walk(b.children);
-      } else if (b is DetailsBlockNode) {
-        walk(b.children);
-      }
-    }
-  }
-
-  walk(blocks);
-  return out;
-}
-
-List<String> _collectRemoteImages(List<MarkdownBlockNode> blocks) {
-  final List<String> result = <String>[];
-  final Set<String> seen = <String>{};
-
-  void addUrl(String url) {
-    final String lower = url.toLowerCase();
-    if ((lower.startsWith('http://') || lower.startsWith('https://')) &&
-        seen.add(url)) {
-      result.add(url);
-    }
-  }
-
-  void walkInlines(List<MarkdownInlineNode> inlines) {
-    for (final MarkdownInlineNode n in inlines) {
-      if (n is ImageNode) {
-        addUrl(n.destination);
-        walkInlines(n.children);
-      } else if (n is PictureInlineNode) {
-        addUrl(n.lightSource);
-        addUrl(n.darkSource);
-      } else if (n is LinkNode) {
-        walkInlines(n.children);
-      } else if (n is EmphasisNode) {
-        walkInlines(n.children);
-      } else if (n is StrongNode) {
-        walkInlines(n.children);
-      } else if (n is StrikethroughNode) {
-        walkInlines(n.children);
-      }
-    }
-  }
-
-  void walkBlocks(List<MarkdownBlockNode> list) {
-    for (final MarkdownBlockNode b in list) {
-      switch (b) {
-        case ParagraphNode():
-          walkInlines(b.children);
-        case HeadingNode():
-          walkInlines(b.children);
-        case BlockQuoteNode():
-          walkBlocks(b.children);
-        case AlertNode():
-          walkBlocks(b.children);
-        case ListNode():
-          for (final ListItemNode item in b.items) {
-            walkBlocks(item.children);
-          }
-        case ListItemNode():
-          walkBlocks(b.children);
-        case TableNode():
-          for (final TableCellNode cell in b.headers) {
-            walkInlines(cell.children);
-          }
-          for (final List<TableCellNode> row in b.rows) {
-            for (final TableCellNode cell in row) {
-              walkInlines(cell.children);
+    int maxGen = 0;
+    void scanRange(int from, int to) {
+      for (int i = from; i < to; i++) {
+        final String id = blocks[i].blockId;
+        if (id.length > 4 &&
+            id.codeUnitAt(0) == 0x69 &&
+            id.codeUnitAt(1) == 0x6E &&
+            id.codeUnitAt(2) == 0x63) {
+          final int dash = id.indexOf('-', 3);
+          if (dash > 3) {
+            final int? g = int.tryParse(id.substring(3, dash));
+            if (g != null && g > maxGen) {
+              maxGen = g;
             }
           }
-        case DetailsBlockNode():
-          walkInlines(b.summaryInlines);
-          walkBlocks(b.children);
-        case AlignedBlockNode():
-          walkBlocks(b.children);
-        case FigureBlockNode():
-          walkBlocks(b.children);
-          walkInlines(b.captionInlines);
-        case DefinitionListNode():
-          for (final DefinitionGroup g in b.groups) {
-            walkInlines(g.term);
-            for (final List<MarkdownBlockNode> def in g.definitions) {
-              walkBlocks(def);
-            }
-          }
-        case FootnoteDefinitionNode():
-          walkBlocks(b.children);
-        case FootnoteSectionNode():
-          for (final FootnoteDefinitionNode d in b.definitions) {
-            walkBlocks(d.children);
-          }
-        default:
-          break;
+        }
       }
     }
+
+    scanRange(0, prefixEnd);
+    scanRange(suffixStart, suffixEnd);
+    return 'inc${maxGen + 1}-';
   }
 
-  walkBlocks(blocks);
-  return result;
+  List<MarkdownOutlineItem> _shiftUnchangedOutline(
+    List<MarkdownOutlineItem> prevOutline, {
+    required int dirtyOldStart,
+    required int dirtyOldEnd,
+    required int offsetDelta,
+    required int lineDelta,
+  }) {
+    if (prevOutline.isEmpty) {
+      return const <MarkdownOutlineItem>[];
+    }
+    if (offsetDelta == 0 && lineDelta == 0) {
+      return prevOutline;
+    }
+    final List<MarkdownOutlineItem> out = <MarkdownOutlineItem>[
+      for (final MarkdownOutlineItem item in prevOutline)
+        item.span.startOffset >= dirtyOldEnd
+            ? MarkdownOutlineItem(
+                text: item.text,
+                level: item.level,
+                line: item.line + lineDelta,
+                slug: item.slug,
+                span: item.span.shift(offsetDelta, lineDelta),
+              )
+            : item,
+    ];
+    return freezeList(out);
+  }
 }

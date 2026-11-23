@@ -136,29 +136,20 @@ Widget buildView(String source) {
 
   bool _isDark = false;
   int _tabIndex = 0;
+  bool _showcaseRemoteImagesApproved = false;
   String? _statusMessage;
 
   late final MarkdownController _showcaseController;
-  late final StreamingMarkdownController _streamController;
-  late final ValueNotifier<int> _streamTick;
-  Timer? _streamTimer;
-  int _nextChunkIndex = 0;
 
   @override
   void initState() {
     super.initState();
     _showcaseController = MarkdownController();
-    _streamController = StreamingMarkdownController(
-      options: const MarkdownOptions.extended(),
-    );
-    _streamTick = ValueNotifier<int>(0);
   }
 
   @override
   void dispose() {
-    _streamTimer?.cancel();
     _showcaseController.dispose();
-    _streamTick.dispose();
     super.dispose();
   }
 
@@ -166,49 +157,6 @@ Widget buildView(String source) {
     setState(() {
       _isDark = !_isDark;
     });
-  }
-
-  void _stepStreamChunk() {
-    if (_nextChunkIndex < _streamChunks.length) {
-      _streamController.append(_streamChunks[_nextChunkIndex]);
-      _nextChunkIndex++;
-      if (_nextChunkIndex >= _streamChunks.length) {
-        _streamController.finish();
-        _streamTimer?.cancel();
-        _streamTimer = null;
-      }
-      _streamTick.value++;
-      setState(() {});
-    }
-  }
-
-  void _startAutoStream() {
-    if (_nextChunkIndex >= _streamChunks.length) {
-      _resetStream();
-    }
-    _streamTimer?.cancel();
-    _streamTimer = Timer.periodic(const Duration(milliseconds: 180), (
-      Timer timer,
-    ) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      _stepStreamChunk();
-      if (_nextChunkIndex >= _streamChunks.length) {
-        timer.cancel();
-      }
-    });
-    setState(() {});
-  }
-
-  void _resetStream() {
-    _streamTimer?.cancel();
-    _streamTimer = null;
-    _nextChunkIndex = 0;
-    _streamController.reset();
-    _streamTick.value++;
-    setState(() {});
   }
 
   void _setStatus(String message) {
@@ -278,7 +226,7 @@ Widget buildView(String source) {
                   index: _tabIndex,
                   children: <Widget>[
                     _buildShowcaseTab(),
-                    _buildStreamingTab(scheme),
+                    const _ExampleStreamingTab(chunks: _streamChunks),
                     _buildHooksTab(markdownTheme),
                   ],
                 ),
@@ -323,59 +271,16 @@ Widget buildView(String source) {
       padding: const EdgeInsets.all(20.0),
       delegates: MarkdownBuilderDelegates(
         imagePolicy: MarkdownImagePolicy.ask,
-        onLoadRemoteImages: () =>
-            _setStatus('Remote image load requested via ask policy.'),
+        remoteImagesApproved: _showcaseRemoteImagesApproved,
+        onLoadRemoteImages: () {
+          setState(() {
+            _showcaseRemoteImagesApproved = true;
+            _statusMessage = 'Remote image loading approved for showcase view.';
+          });
+        },
         onTapLink: (String destination, String? title) =>
             _setStatus('Tapped safe link: $destination'),
       ),
-    );
-  }
-
-  Widget _buildStreamingTab(ColorScheme scheme) {
-    return Column(
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16.0, 12.0, 16.0, 8.0),
-          child: Wrap(
-            spacing: 8.0,
-            runSpacing: 8.0,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: <Widget>[
-              FilledButton(
-                key: const Key('start-stream-button'),
-                onPressed: _startAutoStream,
-                child: const Text('Start Stream'),
-              ),
-              OutlinedButton(
-                key: const Key('step-chunk-button'),
-                onPressed: _nextChunkIndex < _streamChunks.length
-                    ? _stepStreamChunk
-                    : null,
-                child: const Text('Step Chunk'),
-              ),
-              TextButton(
-                key: const Key('reset-stream-button'),
-                onPressed: _resetStream,
-                child: const Text('Reset'),
-              ),
-              Text(
-                'Settled: ${_streamController.settledBlockCount} · '
-                'Active: ${_streamController.activeBlocks.length}',
-                style: TextStyle(color: scheme.onSurfaceVariant),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1.0),
-        Expanded(
-          child: MarkdownView.streaming(
-            controller: _streamController,
-            listenable: _streamTick,
-            pollInterval: null,
-            padding: const EdgeInsets.all(20.0),
-          ),
-        ),
-      ],
     );
   }
 
@@ -496,6 +401,133 @@ Widget buildView(String source) {
           );
         },
       ),
+    );
+  }
+}
+
+final class _ExampleStreamingTab extends StatefulWidget {
+  const _ExampleStreamingTab({required this.chunks});
+
+  final List<String> chunks;
+
+  @override
+  State<_ExampleStreamingTab> createState() => _ExampleStreamingTabState();
+}
+
+final class _ExampleStreamingTabState extends State<_ExampleStreamingTab> {
+  late final StreamingMarkdownController _streamController;
+  Timer? _streamTimer;
+  int _nextChunkIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _streamController = StreamingMarkdownController(
+      options: const MarkdownOptions.extended(),
+    )..addListener(_onStreamChanged);
+  }
+
+  @override
+  void dispose() {
+    _streamTimer?.cancel();
+    _streamController
+      ..removeListener(_onStreamChanged)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _onStreamChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _stepStreamChunk() {
+    if (_nextChunkIndex < widget.chunks.length) {
+      _streamController.append(widget.chunks[_nextChunkIndex]);
+      _nextChunkIndex++;
+      if (_nextChunkIndex >= widget.chunks.length) {
+        _streamController.finish();
+        _streamTimer?.cancel();
+        _streamTimer = null;
+      }
+      setState(() {});
+    }
+  }
+
+  void _startAutoStream() {
+    if (_nextChunkIndex >= widget.chunks.length) {
+      _resetStream();
+    }
+    _streamTimer?.cancel();
+    _streamTimer = Timer.periodic(const Duration(milliseconds: 180), (
+      Timer timer,
+    ) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      _stepStreamChunk();
+      if (_nextChunkIndex >= widget.chunks.length) {
+        timer.cancel();
+      }
+    });
+    setState(() {});
+  }
+
+  void _resetStream() {
+    _streamTimer?.cancel();
+    _streamTimer = null;
+    _nextChunkIndex = 0;
+    _streamController.reset();
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16.0, 12.0, 16.0, 8.0),
+          child: Wrap(
+            spacing: 8.0,
+            runSpacing: 8.0,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              FilledButton(
+                key: const Key('start-stream-button'),
+                onPressed: _startAutoStream,
+                child: const Text('Start Stream'),
+              ),
+              OutlinedButton(
+                key: const Key('step-chunk-button'),
+                onPressed: _nextChunkIndex < widget.chunks.length
+                    ? _stepStreamChunk
+                    : null,
+                child: const Text('Step Chunk'),
+              ),
+              TextButton(
+                key: const Key('reset-stream-button'),
+                onPressed: _resetStream,
+                child: const Text('Reset'),
+              ),
+              Text(
+                'Settled: ${_streamController.settledBlockCount} · '
+                'Active: ${_streamController.activeBlocks.length}',
+                style: TextStyle(color: scheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1.0),
+        Expanded(
+          child: MarkdownView.streaming(
+            controller: _streamController,
+            padding: const EdgeInsets.all(20.0),
+          ),
+        ),
+      ],
     );
   }
 }

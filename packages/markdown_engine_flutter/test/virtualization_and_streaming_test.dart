@@ -1,6 +1,11 @@
+import 'dart:isolate';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
+import 'package:markdown_engine_flutter/src/isolate_parse_io.dart';
 
 void main() {
   group('Zero-reparse theme toggle', () {
@@ -194,13 +199,14 @@ void main() {
         expect(builtCount, lessThan(80));
 
         // Programmatic navigation to a distant anchor and line works cleanly.
-        final bool scrolled = await controller.scrollToAnchor(
+        final Future<bool> scrolledFuture = controller.scrollToAnchor(
           'section-350',
           duration: Duration.zero,
         );
-        await tester.pump();
-        expect(scrolled, isTrue);
-        expect(controller.readingPlace.blockIndex, greaterThanOrEqualTo(300));
+        await tester.pumpAndSettle();
+        expect(await scrolledFuture, isTrue);
+        expect(find.text('Section 350'), findsOneWidget);
+        expect(controller.readingPlace.blockIndex, greaterThanOrEqualTo(340));
 
         final bool jumpedLine = await controller.scrollToLine(
           1,
@@ -390,6 +396,428 @@ void main() {
 
       expect(reader.lastError, isA<RangeError>());
       expect(reader.isParsing, isFalse);
+      expect(reader.hasRead, isFalse);
     });
+  });
+
+  group('Wave 3 streaming, incremental, controller & selection regressions', () {
+    testWidgets(
+      'MarkdownView.streaming pushes chunks with zero timers and supports reset() + append() after finish()',
+      (WidgetTester tester) async {
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        addTearDown(stream.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: MarkdownView.streaming(controller: stream)),
+          ),
+        );
+
+        stream.append('First push chunk.');
+        await tester.pump();
+        expect(find.text('First push chunk.'), findsOneWidget);
+
+        stream.finish();
+        await tester.pump();
+        expect(stream.isFinished, isTrue);
+
+        // Reset and stream new chunks without recreating MarkdownView.
+        stream.reset();
+        await tester.pump();
+        expect(find.text('First push chunk.'), findsNothing);
+
+        stream.append('Second stream after reset.');
+        await tester.pump();
+        expect(find.text('Second stream after reset.'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'MarkdownView.didUpdateWidget uses IncrementalMarkdownParser and preserves <details> state',
+      (WidgetTester tester) async {
+        final MarkdownController controller = MarkdownController();
+        addTearDown(controller.dispose);
+
+        String trailing = 'Trailing v1';
+        late StateSetter rebuild;
+
+        String makeSource(String tail) =>
+            '''
+<details>
+<summary>Persistent Disclosure</summary>
+
+Disclosure inner body.
+
+</details>
+
+$tail
+''';
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext context, StateSetter setState) {
+              rebuild = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: MarkdownView(
+                    makeSource(trailing),
+                    options: const MarkdownOptions.extended(),
+                    controller: controller,
+                    selectable: false,
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+
+        final String initialDetailsId =
+            controller.document.blocks.first.blockId;
+        await tester.tap(find.text('Persistent Disclosure'));
+        await tester.pump();
+        expect(find.text('Disclosure inner body.'), findsOneWidget);
+
+        rebuild(() => trailing = 'Trailing v2');
+        await tester.pump();
+
+        expect(find.text('Trailing v2'), findsOneWidget);
+        expect(controller.document.blocks.first.blockId, initialDetailsId);
+        expect(find.text('Disclosure inner body.'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'swapping MarkdownView instances preserves shared ScrollController ownership and RenderBox readingPlace',
+      (WidgetTester tester) async {
+        final MarkdownController controller = MarkdownController();
+        final ScrollController scrollController = ScrollController();
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        addTearDown(controller.dispose);
+        addTearDown(scrollController.dispose);
+        addTearDown(stream.dispose);
+
+        final StringBuffer doc = StringBuffer();
+        for (int i = 0; i < 60; i++) {
+          doc.writeln('## Heading $i\n\nParagraph content $i.\n');
+        }
+        stream.append(doc.toString());
+        stream.finish();
+
+        bool useStreaming = false;
+        late StateSetter rebuild;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext context, StateSetter setState) {
+              rebuild = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: 600.0,
+                    height: 300.0,
+                    child: useStreaming
+                        ? MarkdownView.streaming(
+                            controller: stream,
+                            markdownController: controller,
+                            scrollController: scrollController,
+                          )
+                        : MarkdownView(
+                            doc.toString(),
+                            options: const MarkdownOptions.extended(),
+                            controller: controller,
+                            scrollController: scrollController,
+                          ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+
+        // Swap to streaming view sharing both controller and scrollController.
+        rebuild(() => useStreaming = true);
+        await tester.pump();
+
+        // ScrollController must still be attached to controller after oldState.dispose().
+        expect(controller.scrollController, same(scrollController));
+
+        int docNotifyCount = 0;
+        int placeNotifyCount = 0;
+        controller.addListener(() => docNotifyCount++);
+        controller.readingPlaceNotifier.addListener(() => placeNotifyCount++);
+
+        scrollController.jumpTo(900.0);
+        await tester.pump();
+
+        expect(placeNotifyCount, greaterThan(0));
+        expect(docNotifyCount, 0);
+        expect(controller.readingPlace.blockIndex, greaterThan(0));
+      },
+    );
+
+    testWidgets(
+      'scrollToAnchor handles showFrontmatter: false, variable-height docs, duplicate anchors, and unreachable targets',
+      (WidgetTester tester) async {
+        final MarkdownController controller = MarkdownController();
+        addTearDown(controller.dispose);
+
+        final StringBuffer doc = StringBuffer(
+          '---\ntitle: Hidden Frontmatter\n---\n\n'
+          '# Intro {#intro}\n\n',
+        );
+        // Variable heights: tall code blocks early, short paragraphs later.
+        for (int i = 1; i <= 150; i++) {
+          if (i <= 20) {
+            doc.writeln(
+              '```dart\n// Block $i\n' + ('int x$i = $i;\n' * 12) + '```\n',
+            );
+          } else if (i == 120) {
+            doc.writeln(
+              '## Variable Target {#var-target}\n\nReached paragraph.\n',
+            );
+          } else {
+            doc.writeln('Short line $i.\n');
+          }
+        }
+        doc.writeln(
+          '<details>\n<summary>Closed Target</summary>\n\n<a id="inside-closed"></a>\n\n</details>\n',
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 350.0,
+                child: MarkdownView(
+                  doc.toString(),
+                  options: const MarkdownOptions.extended(),
+                  controller: controller,
+                  showFrontmatter: false,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // First visible block is # Intro even though FrontmatterNode is block 0.
+        final Future<bool> introFuture = controller.scrollToAnchor(
+          'intro',
+          duration: Duration.zero,
+        );
+        await tester.pumpAndSettle();
+        expect(await introFuture, isTrue);
+        expect(controller.scrollController!.offset, 0.0);
+
+        // Variable-height offscreen convergence reaches block 120 cleanly.
+        final Future<bool> targetFuture = controller.scrollToAnchor(
+          'var-target',
+          duration: Duration.zero,
+        );
+        await tester.pumpAndSettle();
+        expect(await targetFuture, isTrue);
+        expect(find.text('Variable Target'), findsOneWidget);
+
+        // Capture mounted context before probing down to collapsed <details>.
+        final BuildContext firstCtx = tester.element(
+          find.text('Variable Target'),
+        );
+        controller.registerAnchor('dup-slug', firstCtx);
+
+        // Unreachable anchor inside collapsed <details> returns false cleanly.
+        final Future<bool> hiddenFuture = controller.scrollToAnchor(
+          'inside-closed',
+          duration: Duration.zero,
+        );
+        await tester.pumpAndSettle();
+        expect(await hiddenFuture, isFalse);
+
+        // Missing anchor returns false.
+        expect(
+          await controller.scrollToAnchor(
+            'does-not-exist',
+            duration: Duration.zero,
+          ),
+          isFalse,
+        );
+
+        // Duplicate anchors/blocks do not erase remaining mounted context.
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Builder(
+                builder: (BuildContext ctx) {
+                  controller.registerAnchor('dup-slug', ctx);
+                  return const Text('Second mount');
+                },
+              ),
+            ),
+          ),
+        );
+        // Unmounting firstCtx happens after registering ctx; dup-slug stays reachable.
+        expect(
+          await controller.scrollToAnchor('dup-slug', duration: Duration.zero),
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets(
+      'SliverMarkdownDocument defaults addAutomaticKeepAlives to true and offscreen Cmd+A exports full plainText',
+      (WidgetTester tester) async {
+        String? copiedClipboard;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                copiedClipboard = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        final FocusNode focusNode = FocusNode();
+        final MarkdownController controller = MarkdownController();
+        addTearDown(focusNode.dispose);
+        addTearDown(controller.dispose);
+
+        final StringBuffer bigDoc = StringBuffer();
+        for (int i = 0; i < 200; i++) {
+          bigDoc.writeln('Virtualized paragraph #$i for full Cmd+A.\n');
+        }
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 300.0,
+                child: MarkdownView(
+                  bigDoc.toString(),
+                  controller: controller,
+                  focusNode: focusNode,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final SliverMarkdownDocument sliver = tester
+            .widget<SliverMarkdownDocument>(
+              find.byType(SliverMarkdownDocument),
+            );
+        expect(sliver.addAutomaticKeepAlives, isTrue);
+        expect(
+          find.text('Virtualized paragraph #199 for full Cmd+A.'),
+          findsNothing,
+        );
+
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+
+        expect(copiedClipboard, controller.document.toPlainText());
+        expect(
+          copiedClipboard,
+          contains('Virtualized paragraph #199 for full Cmd+A.'),
+        );
+      },
+    );
+
+    test(
+      'MarkdownDocumentReader implements ValueListenable, dedups active in-flight work, avoids spurious finally notify, and falls back on IsolateSpawnException',
+      () async {
+        final MarkdownDocumentReader reader = MarkdownDocumentReader(
+          syncThreshold: 128,
+        );
+        addTearDown(reader.dispose);
+
+        expect(reader, isA<ValueListenable<MarkdownDocument>>());
+        expect(reader.hasRead, isFalse);
+        expect(reader.value, same(reader.document));
+
+        final String largeA = 'Paragraph A ' * 20;
+        expect(largeA.length, greaterThanOrEqualTo(128));
+
+        // Duplicate concurrent update on the exact same in-flight source reuses active parse.
+        final Future<MarkdownDocument> f1 = reader.update(largeA);
+        final Future<MarkdownDocument> f2 = reader.update(largeA);
+        final List<MarkdownDocument> sameResults = await Future.wait(
+          <Future<MarkdownDocument>>[f1, f2],
+        );
+        expect(sameResults[0], same(sameResults[1]));
+        expect(reader.backgroundParseCount, 1);
+        expect(reader.hasRead, isTrue);
+        expect(reader.value, same(reader.document));
+
+        // Sync update superseding active background parse must not fire spurious finally notify.
+        int notifications = 0;
+        reader.addListener(() => notifications++);
+        final String largeB = 'Paragraph B ' * 20;
+        final Future<MarkdownDocument> bg = reader.update(largeB);
+        await reader.update('Short override');
+        final int countAfterSync = notifications;
+        await bg;
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(notifications, countAfterSync);
+        expect(reader.document.source, 'Short override');
+
+        reader.clear();
+        expect(reader.hasRead, isFalse);
+
+        // IsolateSpawnException fallback executes synchronous parse cleanly.
+        final MarkdownDocument fallbackDoc =
+            await parseMarkdownWithIsolateRunner(
+              const MarkdownEngine(),
+              '# Fallback Heading',
+              const MarkdownOptions(),
+              runIsolate: (MarkdownDocument Function() _) async {
+                throw IsolateSpawnException('Simulated spawn block');
+              },
+            );
+        expect(fallbackDoc.blocks.length, 1);
+        expect(fallbackDoc.outline.first.text, 'Fallback Heading');
+      },
+    );
+
+    testWidgets(
+      'MarkdownDocumentReader defers notifyListeners safely during widget build phase',
+      (WidgetTester tester) async {
+        final MarkdownDocumentReader reader = MarkdownDocumentReader();
+        addTearDown(reader.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ValueListenableBuilder<MarkdownDocument>(
+              valueListenable: reader,
+              builder: (BuildContext context, MarkdownDocument doc, Widget? _) {
+                if (!reader.hasRead) {
+                  reader.update('# Deferred Build Read');
+                }
+                return Text(doc.toPlainText());
+              },
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(find.text('Deferred Build Read'), findsOneWidget);
+      },
+    );
   });
 }

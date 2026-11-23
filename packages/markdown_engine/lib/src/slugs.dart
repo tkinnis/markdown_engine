@@ -6,7 +6,18 @@ final class HeadingSlugGenerator {
   /// Creates a fresh [HeadingSlugGenerator].
   HeadingSlugGenerator();
 
+  HeadingSlugGenerator._clone(Map<String, int> counts) {
+    _counts.addAll(counts);
+  }
+
   final Map<String, int> _counts = <String, int>{};
+
+  /// Returns an independent copy of this generator preserving recorded slug
+  /// counts so incremental or streaming slices continue deduplication cleanly.
+  HeadingSlugGenerator clone() => HeadingSlugGenerator._clone(_counts);
+
+  /// Clears all recorded heading slug counts.
+  void reset() => _counts.clear();
 
   /// Computes a unique GitHub-style slug for heading [text].
   String generate(String text) {
@@ -34,7 +45,37 @@ final class HeadingSlugGenerator {
 /// symbols other than `-` and `_` are stripped, and non-ASCII letters/digits
 /// are preserved (case-folded) so UTF-8 headings produce readable slugs.
 String slugifyHeadingText(String text) {
-  final String folded = caseFold(text.trim());
+  final String trimmed = text.trim();
+  if (trimmed.isEmpty) {
+    return 'section';
+  }
+  bool isAscii = true;
+  final int len = trimmed.length;
+  for (int i = 0; i < len; i++) {
+    if (trimmed.codeUnitAt(i) >= 0x80) {
+      isAscii = false;
+      break;
+    }
+  }
+  if (isAscii) {
+    final StringBuffer out = StringBuffer();
+    for (int i = 0; i < len; i++) {
+      final int cu = trimmed.codeUnitAt(i);
+      if (cu == 0x20 || cu == 0x09) {
+        out.writeCharCode(0x2D);
+      } else if (cu == 0x2D || cu == 0x5F) {
+        out.writeCharCode(cu);
+      } else if ((cu >= 0x30 && cu <= 0x39) || (cu >= 0x61 && cu <= 0x7A)) {
+        out.writeCharCode(cu);
+      } else if (cu >= 0x41 && cu <= 0x5A) {
+        out.writeCharCode(cu + 0x20);
+      }
+    }
+    final String result = out.toString();
+    return result.isEmpty ? 'section' : result;
+  }
+
+  final String folded = caseFold(trimmed);
   final StringBuffer out = StringBuffer();
   for (final int cp in folded.runes) {
     if (cp == 0x20 || cp == 0x09) {

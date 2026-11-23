@@ -30,6 +30,17 @@ final class MarkdownStudioApp extends StatefulWidget {
   State<MarkdownStudioApp> createState() => _MarkdownStudioAppState();
 }
 
+final class _StudioStreamTelemetry extends ChangeNotifier {
+  int appliedChunks = 0;
+  int chunkIntervalMs = 100;
+  int lastChunkParseMicros = 0;
+  int totalParseMicros = 0;
+  String lastChunkText = '';
+  bool isPlaying = false;
+
+  void notify() => notifyListeners();
+}
+
 final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
   static const double _wideOutlineBreakpoint = 1120.0;
 
@@ -40,25 +51,25 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
   late StudioPresetId _selectedPresetId;
   late MarkdownOptions _activeOptions;
   late final TextEditingController _editorController;
+  late final ValueNotifier<String> _editorTextNotifier;
   late final MarkdownController _markdownController;
   late final ScrollController _previewScrollController;
   late final StreamingMarkdownController _streamController;
-  late final ValueNotifier<int> _streamTick;
+  late final _StudioStreamTelemetry _streamTelemetry;
+  late final ValueNotifier<({String? message, bool isError})> _statusNotifier;
 
   bool _isDark = false;
   bool _isStreamingMode = false;
   bool _showOutlineSidebar = true;
   bool _showInspectorPane = true;
+  bool _remoteImagesApproved = false;
   StudioInspectorTab _inspectorTab = StudioInspectorTab.ast;
-  String? _statusMessage;
-  bool _statusIsError = false;
+
+  MarkdownDocument? _lastAuditedDoc;
+  MarkdownUrlPolicy? _lastAuditedPolicy;
+  StudioLinkAudit? _cachedLinkAudit;
 
   Timer? _streamTimer;
-  int _appliedChunks = 0;
-  int _chunkIntervalMs = 100;
-  int _lastChunkParseMicros = 0;
-  int _totalParseMicros = 0;
-  String _lastChunkText = '';
 
   @override
   void initState() {
@@ -66,25 +77,48 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     _selectedPresetId = StudioPresetId.showcase;
     final StudioPreset initialPreset = studioPresetById(_selectedPresetId);
     _activeOptions = initialPreset.options;
-    _editorController = TextEditingController(
-      text: widget.initialSource ?? initialPreset.source,
-    );
+    final String initialText = widget.initialSource ?? initialPreset.source;
+    _editorController = TextEditingController(text: initialText)
+      ..addListener(_handleEditorChanged);
+    _editorTextNotifier = ValueNotifier<String>(initialText);
     _markdownController = MarkdownController();
     _previewScrollController = ScrollController();
     _streamController = StreamingMarkdownController(
       options: const MarkdownOptions.extended(),
     );
-    _streamTick = ValueNotifier<int>(0);
+    _streamTelemetry = _StudioStreamTelemetry();
+    _statusNotifier = ValueNotifier<({String? message, bool isError})>((
+      message: null,
+      isError: false,
+    ));
   }
 
   @override
   void dispose() {
     _streamTimer?.cancel();
-    _editorController.dispose();
+    _editorController
+      ..removeListener(_handleEditorChanged)
+      ..dispose();
+    _editorTextNotifier.dispose();
     _markdownController.dispose();
     _previewScrollController.dispose();
-    _streamTick.dispose();
+    _streamController.dispose();
+    _streamTelemetry.dispose();
+    _statusNotifier.dispose();
     super.dispose();
+  }
+
+  void _handleEditorChanged() {
+    final String nextText = _editorController.text;
+    if (_editorTextNotifier.value == nextText) {
+      return;
+    }
+    _editorTextNotifier.value = nextText;
+    if (_remoteImagesApproved) {
+      setState(() {
+        _remoteImagesApproved = false;
+      });
+    }
   }
 
   void _selectPreset(StudioPresetId? nextId) {
@@ -97,10 +131,11 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
       _selectedPresetId = nextId;
       _activeOptions = preset.options;
       _isStreamingMode = false;
-      _editorController.text = preset.source;
-      _statusMessage = 'Loaded preset: ${preset.label}';
-      _statusIsError = false;
+      _remoteImagesApproved = false;
     });
+    _editorController.text = preset.source;
+    _editorTextNotifier.value = preset.source;
+    _showStatus('Loaded preset: ${preset.label}');
     _resetPreviewScroll();
   }
 
@@ -113,17 +148,19 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
   void _toggleStreamingMode() {
     setState(() {
       _isStreamingMode = !_isStreamingMode;
+      _remoteImagesApproved = false;
       if (!_isStreamingMode) {
         _stopStreamTimer();
-        _statusMessage = 'Switched to Live Editor mode.';
-        _statusIsError = false;
-      } else {
-        _markdownController.updateDocument(_streamController.currentDocument);
-        _statusMessage =
-            'Switched to LLM Streaming Simulator mode. Press Play or Step.';
-        _statusIsError = false;
       }
     });
+    if (!_isStreamingMode) {
+      _showStatus('Switched to Live Editor mode.');
+    } else {
+      _markdownController.updateDocument(_streamController.currentDocument);
+      _showStatus(
+        'Switched to LLM Streaming Simulator mode. Press Play or Step.',
+      );
+    }
     _resetPreviewScroll();
   }
 
@@ -153,104 +190,118 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
   void _stopStreamTimer() {
     _streamTimer?.cancel();
     _streamTimer = null;
+    if (_streamTelemetry.isPlaying) {
+      _streamTelemetry.isPlaying = false;
+      _streamTelemetry.notify();
+    }
   }
 
   void _stepStreamChunk() {
-    if (_appliedChunks >= studioStreamingChunks.length) {
+    if (_streamTelemetry.appliedChunks >= studioStreamingChunks.length) {
       _stopStreamTimer();
-      setState(() {});
       return;
     }
-    final String chunk = studioStreamingChunks[_appliedChunks];
+    final String chunk = studioStreamingChunks[_streamTelemetry.appliedChunks];
     final Stopwatch stopwatch = Stopwatch()..start();
     _streamController.append(chunk);
-    _appliedChunks++;
-    if (_appliedChunks >= studioStreamingChunks.length) {
+    _streamTelemetry.appliedChunks++;
+    if (_streamTelemetry.appliedChunks >= studioStreamingChunks.length) {
       _streamController.finish();
-      _stopStreamTimer();
+      _streamTimer?.cancel();
+      _streamTimer = null;
+      _streamTelemetry.isPlaying = false;
     }
     stopwatch.stop();
     final int elapsedMicros = stopwatch.elapsedMicroseconds;
-    _lastChunkParseMicros = elapsedMicros;
-    _totalParseMicros += elapsedMicros;
-    _lastChunkText = chunk;
-    _streamTick.value++;
+    _streamTelemetry
+      ..lastChunkParseMicros = elapsedMicros
+      ..totalParseMicros += elapsedMicros
+      ..lastChunkText = chunk
+      ..notify();
     _markdownController.updateDocument(_streamController.currentDocument);
-    setState(() {});
   }
 
   void _toggleStreamPlayPause() {
     if (_streamTimer != null) {
       _stopStreamTimer();
-      setState(() {});
       return;
     }
-    if (_appliedChunks >= studioStreamingChunks.length) {
+    if (_streamTelemetry.appliedChunks >= studioStreamingChunks.length) {
       _resetStream();
     }
     _startStreamTimer();
-    setState(() {});
   }
 
   void _startStreamTimer() {
-    _stopStreamTimer();
-    _streamTimer = Timer.periodic(Duration(milliseconds: _chunkIntervalMs), (
-      Timer timer,
-    ) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      _stepStreamChunk();
-      if (_appliedChunks >= studioStreamingChunks.length) {
-        timer.cancel();
-      }
-    });
+    _streamTimer?.cancel();
+    _streamTelemetry.isPlaying = true;
+    _streamTelemetry.notify();
+    _streamTimer = Timer.periodic(
+      Duration(milliseconds: _streamTelemetry.chunkIntervalMs),
+      (Timer timer) {
+        if (!mounted) {
+          timer.cancel();
+          return;
+        }
+        _stepStreamChunk();
+        if (_streamTelemetry.appliedChunks >= studioStreamingChunks.length) {
+          timer.cancel();
+        }
+      },
+    );
   }
 
   void _updateChunkInterval(int nextIntervalMs) {
     final bool wasPlaying = _streamTimer != null;
-    setState(() {
-      _chunkIntervalMs = nextIntervalMs;
-    });
+    _streamTelemetry
+      ..chunkIntervalMs = nextIntervalMs
+      ..notify();
     if (wasPlaying) {
       _startStreamTimer();
     }
   }
 
   void _resetStream() {
-    _stopStreamTimer();
-    _appliedChunks = 0;
-    _lastChunkParseMicros = 0;
-    _totalParseMicros = 0;
-    _lastChunkText = '';
+    _streamTimer?.cancel();
+    _streamTimer = null;
+    _streamTelemetry
+      ..isPlaying = false
+      ..appliedChunks = 0
+      ..lastChunkParseMicros = 0
+      ..totalParseMicros = 0
+      ..lastChunkText = ''
+      ..notify();
     _streamController.reset();
-    _streamTick.value++;
     _markdownController.updateDocument(_streamController.currentDocument);
+    if (_remoteImagesApproved) {
+      setState(() {
+        _remoteImagesApproved = false;
+      });
+    }
     _resetPreviewScroll();
-    setState(() {
-      _statusMessage = 'Streaming simulator reset.';
-      _statusIsError = false;
-    });
+    _showStatus('Streaming simulator reset.');
   }
 
   void _finishStream() {
-    _stopStreamTimer();
+    _streamTimer?.cancel();
+    _streamTimer = null;
     final Stopwatch stopwatch = Stopwatch()..start();
-    while (_appliedChunks < studioStreamingChunks.length) {
-      final String chunk = studioStreamingChunks[_appliedChunks];
+    while (_streamTelemetry.appliedChunks < studioStreamingChunks.length) {
+      final String chunk =
+          studioStreamingChunks[_streamTelemetry.appliedChunks];
       _streamController.append(chunk);
-      _lastChunkText = chunk;
-      _appliedChunks++;
+      _streamTelemetry.lastChunkText = chunk;
+      _streamTelemetry.appliedChunks++;
     }
     _streamController.finish();
     stopwatch.stop();
     final int elapsedMicros = stopwatch.elapsedMicroseconds;
-    _lastChunkParseMicros = elapsedMicros;
-    _totalParseMicros += elapsedMicros;
-    _streamTick.value++;
+    _streamTelemetry
+      ..isPlaying = false
+      ..lastChunkParseMicros = elapsedMicros
+      ..totalParseMicros += elapsedMicros
+      ..notify();
     _markdownController.updateDocument(_streamController.currentDocument);
-    setState(() {});
   }
 
   void _resetPreviewScroll() {
@@ -264,10 +315,7 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     bool isError = false,
     bool showSnackBar = false,
   }) {
-    setState(() {
-      _statusMessage = message;
-      _statusIsError = isError;
-    });
+    _statusNotifier.value = (message: message, isError: isError);
     if (showSnackBar) {
       final ScaffoldMessengerState? messenger =
           _scaffoldMessengerKey.currentState;
@@ -300,8 +348,6 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
       return;
     }
     if (destination.startsWith('#')) {
-      final String slug = destination.substring(1);
-      unawaited(_markdownController.scrollToAnchor(slug));
       _showStatus(
         'MarkdownUrlPolicy allowed anchor jump: $destination',
         showSnackBar: true,
@@ -315,6 +361,18 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
       'MarkdownUrlPolicy allowed link: $destination$titleSuffix',
       showSnackBar: true,
     );
+  }
+
+  StudioLinkAudit _memoizedLinkAudit(
+    MarkdownDocument doc,
+    MarkdownUrlPolicy policy,
+  ) {
+    if (!identical(_lastAuditedDoc, doc) || _lastAuditedPolicy != policy) {
+      _lastAuditedDoc = doc;
+      _lastAuditedPolicy = policy;
+      _cachedLinkAudit = auditDocumentLinks(doc, policy);
+    }
+    return _cachedLinkAudit!;
   }
 
   ThemeData _buildMaterialTheme(Brightness brightness) {
@@ -340,12 +398,18 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     final MarkdownBuilderDelegates delegates = buildStudioDelegates(
       theme: markdownTheme,
       urlPolicy: activeUrlPolicy,
+      remoteImagesApproved: _remoteImagesApproved,
       onTapLink: (String destination, String? title) =>
           _handleLinkTap(destination, title, activeUrlPolicy),
-      onLoadRemoteImages: () => _showStatus(
-        'Remote image loading approved for current view (MarkdownImagePolicy.ask).',
-        showSnackBar: true,
-      ),
+      onLoadRemoteImages: () {
+        setState(() {
+          _remoteImagesApproved = true;
+        });
+        _showStatus(
+          'Remote image loading approved for current view (MarkdownImagePolicy.ask).',
+          showSnackBar: true,
+        );
+      },
     );
 
     return MaterialApp(
@@ -392,24 +456,42 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
                           Expanded(
                             flex: 3,
                             child: _isStreamingMode
-                                ? StudioStreamingPane(
-                                    streamController: _streamController,
-                                    isPlaying: _streamTimer != null,
-                                    appliedChunkCount: _appliedChunks,
-                                    totalChunkCount:
-                                        studioStreamingChunks.length,
-                                    chunkIntervalMs: _chunkIntervalMs,
-                                    lastChunkParseMicros: _lastChunkParseMicros,
-                                    averageChunkParseMicros: _appliedChunks == 0
-                                        ? 0
-                                        : (_totalParseMicros / _appliedChunks)
-                                              .round(),
-                                    lastChunkText: _lastChunkText,
-                                    onTogglePlayPause: _toggleStreamPlayPause,
-                                    onStep: _stepStreamChunk,
-                                    onReset: _resetStream,
-                                    onFinish: _finishStream,
-                                    onIntervalChanged: _updateChunkInterval,
+                                ? ListenableBuilder(
+                                    listenable: _streamTelemetry,
+                                    builder:
+                                        (BuildContext context, Widget? child) {
+                                          final int applied =
+                                              _streamTelemetry.appliedChunks;
+                                          return StudioStreamingPane(
+                                            streamController: _streamController,
+                                            isPlaying:
+                                                _streamTelemetry.isPlaying,
+                                            appliedChunkCount: applied,
+                                            totalChunkCount:
+                                                studioStreamingChunks.length,
+                                            chunkIntervalMs: _streamTelemetry
+                                                .chunkIntervalMs,
+                                            lastChunkParseMicros:
+                                                _streamTelemetry
+                                                    .lastChunkParseMicros,
+                                            averageChunkParseMicros:
+                                                applied == 0
+                                                ? 0
+                                                : (_streamTelemetry
+                                                              .totalParseMicros /
+                                                          applied)
+                                                      .round(),
+                                            lastChunkText:
+                                                _streamTelemetry.lastChunkText,
+                                            onTogglePlayPause:
+                                                _toggleStreamPlayPause,
+                                            onStep: _stepStreamChunk,
+                                            onReset: _resetStream,
+                                            onFinish: _finishStream,
+                                            onIntervalChanged:
+                                                _updateChunkInterval,
+                                          );
+                                        },
                                   )
                                 : _buildEditorPane(context, scheme),
                           ),
@@ -647,28 +729,23 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              ValueListenableBuilder<TextEditingValue>(
-                valueListenable: _editorController,
-                builder:
-                    (
-                      BuildContext context,
-                      TextEditingValue value,
-                      Widget? child,
-                    ) {
-                      final int lines = value.text.isEmpty
-                          ? 0
-                          : '\n'.allMatches(value.text).length + 1;
-                      return Text(
-                        '$lines L · ${value.text.length} ch',
-                        style: TextStyle(
-                          fontSize: 11.0,
-                          color: scheme.onSurfaceVariant,
-                          fontFamily: 'SF Mono',
-                          fontFamilyFallback:
-                              MarkdownThemeData.defaultCodeFontFallback,
-                        ),
-                      );
-                    },
+              ValueListenableBuilder<String>(
+                valueListenable: _editorTextNotifier,
+                builder: (BuildContext context, String text, Widget? child) {
+                  final int lines = text.isEmpty
+                      ? 0
+                      : '\n'.allMatches(text).length + 1;
+                  return Text(
+                    '$lines L · ${text.length} ch',
+                    style: TextStyle(
+                      fontSize: 11.0,
+                      color: scheme.onSurfaceVariant,
+                      fontFamily: 'SF Mono',
+                      fontFamilyFallback:
+                          MarkdownThemeData.defaultCodeFontFallback,
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -724,14 +801,8 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
             listenable: _markdownController,
             builder: (BuildContext context, Widget? child) {
               final MarkdownDocument doc = _markdownController.document;
-              final StudioLinkAudit audit = auditDocumentLinks(doc, urlPolicy);
+              final StudioLinkAudit audit = _memoizedLinkAudit(doc, urlPolicy);
               final int totalBlocks = doc.blocks.length;
-              final int activeBlock = totalBlocks == 0
-                  ? 0
-                  : (_markdownController.readingPlace.blockIndex + 1).clamp(
-                      1,
-                      totalBlocks,
-                    );
               return Wrap(
                 spacing: 8.0,
                 runSpacing: 4.0,
@@ -757,25 +828,38 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
                       ),
                     ],
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7.0,
-                      vertical: 2.0,
-                    ),
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(5.0),
-                    ),
-                    child: Text(
-                      'Block $activeBlock/$totalBlocks',
-                      style: TextStyle(
-                        fontSize: 11.0,
-                        color: scheme.onSurfaceVariant,
-                        fontFamily: 'SF Mono',
-                        fontFamilyFallback:
-                            MarkdownThemeData.defaultCodeFontFallback,
-                      ),
-                    ),
+                  ValueListenableBuilder<MarkdownReadingPlace>(
+                    valueListenable: _markdownController.readingPlaceNotifier,
+                    builder:
+                        (
+                          BuildContext context,
+                          MarkdownReadingPlace place,
+                          Widget? child,
+                        ) {
+                          final int activeBlock = totalBlocks == 0
+                              ? 0
+                              : (place.blockIndex + 1).clamp(1, totalBlocks);
+                          return Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 7.0,
+                              vertical: 2.0,
+                            ),
+                            decoration: BoxDecoration(
+                              color: scheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(5.0),
+                            ),
+                            child: Text(
+                              'Block $activeBlock/$totalBlocks',
+                              style: TextStyle(
+                                fontSize: 11.0,
+                                color: scheme.onSurfaceVariant,
+                                fontFamily: 'SF Mono',
+                                fontFamilyFallback:
+                                    MarkdownThemeData.defaultCodeFontFallback,
+                              ),
+                            ),
+                          );
+                        },
                   ),
                   Container(
                     key: const Key('studio-url-policy-badge'),
@@ -818,61 +902,78 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
             },
           ),
         ),
-        if (_statusMessage != null)
-          Container(
-            key: const Key('studio-status-banner'),
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12.0,
-              vertical: 6.0,
-            ),
-            decoration: BoxDecoration(
-              color: _statusIsError
-                  ? scheme.errorContainer
-                  : scheme.primaryContainer.withValues(alpha: 0.6),
-              border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
-            ),
-            child: Row(
-              children: <Widget>[
-                Icon(
-                  _statusIsError
-                      ? Icons.gpp_bad_rounded
-                      : Icons.verified_user_rounded,
-                  size: 15.0,
-                  color: _statusIsError
-                      ? scheme.onErrorContainer
-                      : scheme.onPrimaryContainer,
-                ),
-                const SizedBox(width: 8.0),
-                Expanded(
-                  child: Text(
-                    _statusMessage!,
-                    style: TextStyle(
-                      fontSize: 12.0,
-                      fontWeight: FontWeight.w500,
-                      color: _statusIsError
-                          ? scheme.onErrorContainer
-                          : scheme.onPrimaryContainer,
+        ValueListenableBuilder<({String? message, bool isError})>(
+          valueListenable: _statusNotifier,
+          builder:
+              (
+                BuildContext context,
+                ({String? message, bool isError}) status,
+                Widget? child,
+              ) {
+                final String? message = status.message;
+                if (message == null) {
+                  return const SizedBox.shrink();
+                }
+                final bool isError = status.isError;
+                return Container(
+                  key: const Key('studio-status-banner'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12.0,
+                    vertical: 6.0,
+                  ),
+                  decoration: BoxDecoration(
+                    color: isError
+                        ? scheme.errorContainer
+                        : scheme.primaryContainer.withValues(alpha: 0.6),
+                    border: Border(
+                      bottom: BorderSide(color: scheme.outlineVariant),
                     ),
                   ),
-                ),
-                IconButton(
-                  onPressed: () {
-                    setState(() {
-                      _statusMessage = null;
-                    });
-                  },
-                  tooltip: 'Dismiss status',
-                  icon: const Icon(Icons.close_rounded, size: 15.0),
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(
-                    minWidth: 24.0,
-                    minHeight: 24.0,
+                  child: Row(
+                    children: <Widget>[
+                      Icon(
+                        isError
+                            ? Icons.gpp_bad_rounded
+                            : Icons.verified_user_rounded,
+                        size: 15.0,
+                        color: isError
+                            ? scheme.onErrorContainer
+                            : scheme.onPrimaryContainer,
+                      ),
+                      const SizedBox(width: 8.0),
+                      Expanded(
+                        child: Text(
+                          message,
+                          style: TextStyle(
+                            fontSize: 12.0,
+                            fontWeight: FontWeight.w500,
+                            color: isError
+                                ? scheme.onErrorContainer
+                                : scheme.onPrimaryContainer,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () {
+                          _statusNotifier.value = (
+                            message: null,
+                            isError: false,
+                          );
+                        },
+                        tooltip: 'Dismiss status',
+                        icon: const Icon(Icons.close_rounded, size: 15.0),
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(
+                          minWidth: 24.0,
+                          minHeight: 24.0,
+                        ),
+                        padding: EdgeInsets.zero,
+                      ),
+                    ],
                   ),
-                  padding: EdgeInsets.zero,
-                ),
-              ],
-            ),
-          ),
+                );
+              },
+        ),
         Expanded(
           child: Container(
             color: scheme.surface,
@@ -881,16 +982,12 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
                     markdownTheme: markdownTheme,
                     delegates: delegates,
                   )
-                : ValueListenableBuilder<TextEditingValue>(
-                    valueListenable: _editorController,
+                : ValueListenableBuilder<String>(
+                    valueListenable: _editorTextNotifier,
                     builder:
-                        (
-                          BuildContext context,
-                          TextEditingValue value,
-                          Widget? child,
-                        ) {
+                        (BuildContext context, String source, Widget? child) {
                           return MarkdownView(
-                            value.text,
+                            source,
                             options: _activeOptions,
                             controller: _markdownController,
                             scrollController: _previewScrollController,
@@ -910,7 +1007,6 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     required MarkdownThemeData markdownTheme,
     required MarkdownBuilderDelegates delegates,
   }) {
-    final bool isEmpty = _streamController.currentDocument.blocks.isEmpty;
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
@@ -918,48 +1014,53 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
           controller: _streamController,
           markdownController: _markdownController,
           scrollController: _previewScrollController,
-          listenable: _streamTick,
-          pollInterval: null,
           theme: markdownTheme,
           delegates: delegates,
           padding: const EdgeInsets.all(20.0),
         ),
-        if (isEmpty)
-          IgnorePointer(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    Icon(
-                      Icons.bolt_rounded,
-                      size: 36.0,
-                      color: markdownTheme.accent,
-                    ),
-                    const SizedBox(height: 10.0),
-                    Text(
-                      'Ready to stream Markdown chunks',
-                      style: TextStyle(
-                        fontSize: 15.0,
-                        fontWeight: FontWeight.w700,
-                        color: markdownTheme.foreground,
+        ListenableBuilder(
+          listenable: _streamTelemetry,
+          builder: (BuildContext context, Widget? child) {
+            if (_streamController.currentDocument.blocks.isNotEmpty) {
+              return const SizedBox.shrink();
+            }
+            return IgnorePointer(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(
+                        Icons.bolt_rounded,
+                        size: 36.0,
+                        color: markdownTheme.accent,
                       ),
-                    ),
-                    const SizedBox(height: 4.0),
-                    Text(
-                      'Use Play or Step in the left pane to observe settled block freezing and microsecond tail parses.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 13.0,
-                        color: markdownTheme.muted,
+                      const SizedBox(height: 10.0),
+                      Text(
+                        'Ready to stream Markdown chunks',
+                        style: TextStyle(
+                          fontSize: 15.0,
+                          fontWeight: FontWeight.w700,
+                          color: markdownTheme.foreground,
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 4.0),
+                      Text(
+                        'Use Play or Step in the left pane to observe settled block freezing and microsecond tail parses.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 13.0,
+                          color: markdownTheme.muted,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
+        ),
       ],
     );
   }

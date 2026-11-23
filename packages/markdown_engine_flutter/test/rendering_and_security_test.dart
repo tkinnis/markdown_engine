@@ -692,4 +692,661 @@ Logo: <picture><source media="(prefers-color-scheme: dark)" srcset="https://exam
       },
     );
   });
+
+  group('Wave 3 security, WidgetsApp, semantics & inline polish', () {
+    testWidgets(
+      'MarkdownImagePolicy.ask resets approval across document/data changes and honors remoteImagesApproved',
+      (WidgetTester tester) async {
+        String source = '![Doc A Img](https://a.example/one.png)';
+        late StateSetter rebuild;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext context, StateSetter setState) {
+              rebuild = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: MarkdownView(
+                    source,
+                    delegates: MarkdownBuilderDelegates(
+                      imagePolicy: MarkdownImagePolicy.ask,
+                      imageBuilder: (BuildContext context, ImageNode node) =>
+                          Text('LOADED:${node.destination}'),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+
+        expect(find.text('Load remote images'), findsOneWidget);
+        expect(find.text('LOADED:https://a.example/one.png'), findsNothing);
+
+        await tester.tap(find.text('Load remote images'));
+        await tester.pump();
+        expect(find.text('LOADED:https://a.example/one.png'), findsOneWidget);
+
+        // Switching to Document B must reset local remote-image approval.
+        rebuild(() => source = '![Doc B Img](https://b.example/two.png)');
+        await tester.pump();
+        expect(find.text('LOADED:https://b.example/two.png'), findsNothing);
+        expect(find.text('Load remote images'), findsOneWidget);
+
+        // Explicit remoteImagesApproved + onLoadRemoteImages wiring on MarkdownView.
+        bool approvedByHost = false;
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext context, StateSetter setState) {
+              return MaterialApp(
+                home: Scaffold(
+                  body: MarkdownView(
+                    '![Controlled Img](https://c.example/three.png)',
+                    remoteImagesApproved: approvedByHost,
+                    delegates: MarkdownBuilderDelegates(
+                      imagePolicy: MarkdownImagePolicy.ask,
+                      onLoadRemoteImages: () =>
+                          setState(() => approvedByHost = true),
+                      imageBuilder: (BuildContext context, ImageNode node) =>
+                          Text('HOST-LOADED:${node.destination}'),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+
+        expect(find.text('Load remote images'), findsOneWidget);
+        await tester.tap(find.text('Load remote images'));
+        await tester.pump();
+        expect(
+          find.text('HOST-LOADED:https://c.example/three.png'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'normalizes obfuscated, bracketed, protocol-relative, ftp, smb, and file image URLs before imageBuilder',
+      (WidgetTester tester) async {
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl(
+            'ht\ttp://evil.example/a.png',
+          ),
+          isTrue,
+        );
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl(
+            '< https://evil.example/b.png >',
+          ),
+          isTrue,
+        );
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl('//evil.example/c.png'),
+          isTrue,
+        );
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl(r'/\evil.example/d.png'),
+          isTrue,
+        );
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl(
+            'ftp://files.example/e.png',
+          ),
+          isTrue,
+        );
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl('smb://nas/share/f.png'),
+          isTrue,
+        );
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl('file:///etc/passwd'),
+          isTrue,
+        );
+        expect(
+          MarkdownBuilderDelegates.isRemoteImageUrl('assets/local_logo.png'),
+          isFalse,
+        );
+
+        final List<String> builtUrls = <String>[];
+        const MarkdownUrlPolicy permissiveNonScript = MarkdownUrlPolicy(
+          blockedSchemes: <String>{'javascript', 'vbscript'},
+          allowProtocolRelative: true,
+        );
+        const String md =
+            '![Obf](<ht\ttp://evil.example/obf.png>)\n\n'
+            '![Ftp](ftp://evil.example/a.png)\n\n'
+            '![Smb](smb://evil.example/b.png)\n\n'
+            '![File](file:///etc/passwd)\n\n'
+            '![Local](assets/local.png)';
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                md,
+                options: const MarkdownOptions.gfm(
+                  sanitizeUrls: false,
+                  urlPolicy: permissiveNonScript,
+                ),
+                scrollable: false,
+                delegates: MarkdownBuilderDelegates(
+                  imagePolicy: MarkdownImagePolicy.block,
+                  urlPolicy: permissiveNonScript,
+                  imageBuilder: (BuildContext context, ImageNode node) {
+                    builtUrls.add(node.destination);
+                    return Text('LOCAL:${node.destination}');
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+
+        expect(builtUrls, <String>['assets/local.png']);
+        expect(find.text('LOCAL:assets/local.png'), findsOneWidget);
+        expect(find.text('Load remote images'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'renders safely with selectable: true inside pure WidgetsApp without MaterialLocalizations',
+      (WidgetTester tester) async {
+        // Without Navigator/Overlay, MarkdownView degrades safely to non-crash content.
+        await tester.pumpWidget(
+          WidgetsApp(
+            color: const Color(0xFFFFFFFF),
+            builder: (BuildContext context, Widget? child) {
+              return const MarkdownTheme(
+                data: MarkdownThemeData.light(),
+                child: MarkdownView(
+                  '# Bare WidgetsApp\n\nRenders without MaterialLocalizations or Overlay.',
+                  selectable: true,
+                  scrollable: false,
+                ),
+              );
+            },
+          ),
+        );
+
+        expect(find.byType(SelectionArea), findsNothing);
+        expect(find.text('Bare WidgetsApp'), findsOneWidget);
+
+        // With routed WidgetsApp (Navigator provides Overlay, still zero MaterialLocalizations),
+        // MarkdownView uses SelectableRegion directly without crashing.
+        await tester.pumpWidget(
+          WidgetsApp(
+            color: const Color(0xFFFFFFFF),
+            pageRouteBuilder:
+                <T>(RouteSettings settings, WidgetBuilder builder) =>
+                    PageRouteBuilder<T>(
+                      settings: settings,
+                      pageBuilder:
+                          (
+                            BuildContext ctx,
+                            Animation<double> a,
+                            Animation<double> b,
+                          ) => builder(ctx),
+                    ),
+            home: const MarkdownTheme(
+              data: MarkdownThemeData.light(),
+              child: MarkdownView(
+                '# Pure WidgetsApp\n\nSelectable prose without Material.',
+                selectable: true,
+                scrollable: false,
+              ),
+            ),
+          ),
+        );
+
+        expect(find.byType(SelectionArea), findsNothing);
+        expect(find.byType(SelectableRegion), findsOneWidget);
+        expect(find.text('Pure WidgetsApp'), findsOneWidget);
+        expect(find.text('Selectable prose without Material.'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'excludes non-prose UI chrome from selection and exports clean plain text on Cmd+A / Copy',
+      (WidgetTester tester) async {
+        String? clipboardText;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                clipboardText = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        final FocusNode focusNode = FocusNode();
+        addTearDown(focusNode.dispose);
+
+        const String docSource = '''
+# Chrome Exclusion
+
+- Bullet item
+- [x] Checked task
+
+> [!NOTE]
+> Alert body text.
+
+```dart
+final int x = 1;
+```
+
+<details open>
+<summary>Toggle details</summary>
+
+Inside details body[^1].
+
+</details>
+
+![Remote](https://example.com/pixel.png)
+
+[^1]: Footnote body text.
+''';
+
+        final MarkdownController controller = MarkdownController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                docSource,
+                options: const MarkdownOptions.extended(),
+                controller: controller,
+                focusNode: focusNode,
+                delegates: const MarkdownBuilderDelegates(
+                  imagePolicy: MarkdownImagePolicy.ask,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // Chrome widgets sit inside SelectionContainer.disabled.
+        for (final String chrome in <String>[
+          'Copy',
+          'dart',
+          '•',
+          '✓',
+          'Note',
+          '▾',
+          '↩',
+          'Load remote images',
+        ]) {
+          final Finder chromeFinder = find.text(chrome);
+          expect(chromeFinder, findsOneWidget, reason: 'Missing "$chrome"');
+          expect(
+            find.ancestor(
+              of: chromeFinder,
+              matching: find.byWidgetPredicate(
+                (Widget w) => w is SelectionContainer && w.delegate == null,
+              ),
+            ),
+            findsWidgets,
+            reason:
+                'Chrome "$chrome" must be inside SelectionContainer.disabled',
+          );
+        }
+
+        // Select All + Copy via focusNode Actions exports exact document plain text.
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+
+        expect(clipboardText, controller.document.toPlainText());
+        expect(clipboardText, isNot(contains('Load remote images')));
+        expect(clipboardText, isNot(contains('↩')));
+      },
+    );
+
+    testWidgets(
+      'verifies headingLevel, table headers, single-speak abbr, linked WidgetSpan semantics, and FocusableActionDetector keyboard activation',
+      (WidgetTester tester) async {
+        final SemanticsHandle semanticsHandle = tester.ensureSemantics();
+        try {
+          String? copiedCode;
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, (
+                MethodCall call,
+              ) async {
+                if (call.method == 'Clipboard.setData') {
+                  final Map<Object?, Object?> args =
+                      call.arguments as Map<Object?, Object?>;
+                  copiedCode = args['text'] as String?;
+                }
+                return null;
+              });
+          addTearDown(() {
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null);
+          });
+
+          int loadRemoteCalls = 0;
+          final List<String> tappedLinks = <String>[];
+          const String doc = r'''
+### Level Three Heading
+
+| Name | Role |
+| :--- | :--- |
+| Alice | Maintainer |
+
+- [x] Done task
+
+Inspect AST inside [$x$](https://example.com/math) link.
+
+*[AST]: Abstract Syntax Tree
+
+```python
+print("ok")
+```
+
+<details>
+<summary>Expand section</summary>
+
+Hidden keyboard body[^k1].
+
+</details>
+
+![Img](https://example.com/pic.png)
+
+[^k1]: Footnote target.
+''';
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: MarkdownView(
+                    doc,
+                    options: const MarkdownOptions.extended(),
+                    scrollable: false,
+                    selectable: false,
+                    delegates: MarkdownBuilderDelegates(
+                      imagePolicy: MarkdownImagePolicy.ask,
+                      onLoadRemoteImages: () => loadRemoteCalls++,
+                      onTapLink: (String dest, String? _) =>
+                          tappedLinks.add(dest),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          // Heading exposes header + headingLevel: 3.
+          final Semantics headingSem = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.text('Level Three Heading'),
+                  matching: find.byWidgetPredicate(
+                    (Widget w) => w is Semantics && w.properties.header == true,
+                  ),
+                )
+                .first,
+          );
+          expect(headingSem.properties.headingLevel, 3);
+
+          // Table header cell exposes Semantics(header: true, container: true).
+          final Semantics tableHeaderSem = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.text('Name'),
+                  matching: find.byWidgetPredicate(
+                    (Widget w) =>
+                        w is Semantics &&
+                        w.properties.header == true &&
+                        w.container == true,
+                  ),
+                )
+                .first,
+          );
+          expect(tableHeaderSem.properties.header, isTrue);
+
+          // Task checkbox exposes checked + readOnly.
+          final Semantics taskSem = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.text('✓'),
+                  matching: find.byWidgetPredicate(
+                    (Widget w) =>
+                        w is Semantics && w.properties.checked == true,
+                  ),
+                )
+                .first,
+          );
+          expect(taskSem.properties.readOnly, isTrue);
+
+          // <abbr> Tooltip has excludeFromSemantics: true and outer Semantics has excludeSemantics: true.
+          final Tooltip abbrTooltip = tester.widget<Tooltip>(
+            find.byType(Tooltip),
+          );
+          expect(abbrTooltip.excludeFromSemantics, isTrue);
+          final Semantics abbrSem = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.byType(Tooltip),
+                  matching: find.byWidgetPredicate(
+                    (Widget w) =>
+                        w is Semantics && w.properties.tooltip != null,
+                  ),
+                )
+                .first,
+          );
+          expect(abbrSem.excludeSemantics, isTrue);
+          expect(abbrSem.properties.hint, isNull);
+
+          // Linked WidgetSpan exposes Semantics(link: true).
+          expect(
+            find.ancestor(
+              of: find.text('x'),
+              matching: find.byWidgetPredicate(
+                (Widget w) => w is Semantics && w.properties.link == true,
+              ),
+            ),
+            findsOneWidget,
+          );
+
+          // Interactive Copy, <details>, Load remote images use FocusableActionDetector & Enter/ActivateIntent activates.
+          final Finder copyDetectorFinder = find.ancestor(
+            of: find.text('Copy'),
+            matching: find.byType(FocusableActionDetector),
+          );
+          expect(copyDetectorFinder, findsOneWidget);
+          Focus.of(tester.element(find.text('Copy'))).requestFocus();
+          await tester.pump();
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          expect(copiedCode, 'print("ok")\n');
+
+          final Finder detailsDetectorFinder = find.ancestor(
+            of: find.text('Expand section'),
+            matching: find.byType(FocusableActionDetector),
+          );
+          expect(detailsDetectorFinder, findsOneWidget);
+          Actions.invoke(
+            tester.element(find.text('Expand section')),
+            const ActivateIntent(),
+          );
+          await tester.pump();
+          expect(find.textContaining('Hidden keyboard body'), findsOneWidget);
+
+          final Finder loadDetectorFinder = find.ancestor(
+            of: find.text('Load remote images'),
+            matching: find.byType(FocusableActionDetector),
+          );
+          expect(loadDetectorFinder, findsOneWidget);
+          Actions.invoke(
+            tester.element(find.text('Load remote images')),
+            const ActivateIntent(),
+          );
+          await tester.pump();
+          expect(loadRemoteCalls, 1);
+        } finally {
+          semanticsHandle.dispose();
+        }
+      },
+    );
+
+    testWidgets(
+      'renders <a name>, <img width/height>, <u>, <small>, <q>, reuses recognizers, caches data:image bytes, and preserves #fragment scroll',
+      (WidgetTester tester) async {
+        // Minimal 1x1 transparent PNG data URI.
+        const String oneByOnePngDataUri =
+            'data:image/png;base64,'
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+        final MarkdownController controller = MarkdownController();
+        addTearDown(controller.dispose);
+
+        final List<String> linkEvents = <String>[];
+        bool isDark = false;
+        String source =
+            'Before <u>under</u> <small>tiny</small> <q>quote</q> '
+            '[Link A](https://example.com/a) '
+            '[Jump](#named-anchor)\n\n'
+            '<img src="$oneByOnePngDataUri" width="72" height="48" alt="Inline Pic">\n\n'
+            '<a name="named-anchor"></a>Anchored paragraph.';
+
+        late StateSetter rebuild;
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext context, StateSetter setState) {
+              rebuild = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: MarkdownTheme(
+                    data: isDark
+                        ? const MarkdownThemeData.dark()
+                        : const MarkdownThemeData.light(),
+                    child: MarkdownView(
+                      source,
+                      options: const MarkdownOptions.extended(
+                        urlPolicy: MarkdownUrlPolicy.strict(
+                          allowSafeImageDataUrls: true,
+                        ),
+                      ),
+                      controller: controller,
+                      scrollable: false,
+                      selectable: false,
+                      delegates: MarkdownBuilderDelegates(
+                        urlPolicy: const MarkdownUrlPolicy.strict(
+                          allowSafeImageDataUrls: true,
+                        ),
+                        onTapLink: (String dest, String? _) =>
+                            linkEvents.add(dest),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+
+        // Verify <u>, <small>, <q> styling and text.
+        final RichText proseRich = tester.widget<RichText>(
+          find.byWidgetPredicate(
+            (Widget w) =>
+                w is RichText && w.text.toPlainText().contains('under'),
+          ),
+        );
+        final String prosePlain = proseRich.text.toPlainText();
+        expect(prosePlain, contains('\u201Cquote\u201D'));
+        bool sawUnderline = false;
+        bool sawSmall = false;
+        GestureRecognizer? firstLinkRecognizer;
+        proseRich.text.visitChildren((InlineSpan span) {
+          if (span is TextSpan) {
+            if (span.text == 'under' &&
+                span.style?.decoration != null &&
+                span.style!.decoration!.contains(TextDecoration.underline)) {
+              sawUnderline = true;
+            }
+            if (span.text == 'tiny' &&
+                span.style?.fontSize != null &&
+                span.style!.fontSize! < 15.0) {
+              sawSmall = true;
+            }
+            if (span.text == 'Link A') {
+              firstLinkRecognizer = span.recognizer;
+            }
+          }
+          return true;
+        });
+        expect(sawUnderline, isTrue);
+        expect(sawSmall, isTrue);
+        expect(firstLinkRecognizer, isA<TapGestureRecognizer>());
+
+        // Verify <img width="72" height="48"> dimensions and decoded bytes.
+        final Image imgWidget = tester.widget<Image>(find.byType(Image));
+        expect(imgWidget.width, 72.0);
+        expect(imgWidget.height, 48.0);
+        final Uint8List firstBytes = (imgWidget.image as MemoryImage).bytes;
+
+        // Verify #fragment link triggers BOTH automatic controller scroll AND onTapLink.
+        final Finder jumpFinder = find.byWidgetPredicate(
+          (Widget w) => w is RichText && w.text.toPlainText().contains('Jump'),
+        );
+        final RenderParagraph jumpPara = tester.renderObject<RenderParagraph>(
+          jumpFinder,
+        );
+        final int jumpIdx = jumpPara.text.toPlainText().indexOf('Jump');
+        final List<TextBox> jumpBoxes = jumpPara.getBoxesForSelection(
+          TextSelection(baseOffset: jumpIdx, extentOffset: jumpIdx + 4),
+        );
+        await tester.tapAt(
+          jumpPara.localToGlobal(jumpBoxes.first.toRect().center),
+        );
+        await tester.pumpAndSettle();
+        expect(linkEvents, <String>['#named-anchor']);
+
+        // Toggle theme -> recognizer AND cached data:image Uint8List are reused identically.
+        rebuild(() => isDark = true);
+        await tester.pump();
+
+        final RichText darkProseRich = tester.widget<RichText>(
+          find.byWidgetPredicate(
+            (Widget w) =>
+                w is RichText && w.text.toPlainText().contains('Link A'),
+          ),
+        );
+        GestureRecognizer? secondLinkRecognizer;
+        darkProseRich.text.visitChildren((InlineSpan span) {
+          if (span is TextSpan && span.text == 'Link A') {
+            secondLinkRecognizer = span.recognizer;
+          }
+          return true;
+        });
+        expect(identical(firstLinkRecognizer, secondLinkRecognizer), isTrue);
+
+        final Image darkImgWidget = tester.widget<Image>(find.byType(Image));
+        final Uint8List secondBytes =
+            (darkImgWidget.image as MemoryImage).bytes;
+        expect(identical(firstBytes, secondBytes), isTrue);
+
+        // Remove Link A and pump post-frame cleanup cleanly without error.
+        rebuild(() => source = '<a name="named-anchor"></a>No links left.');
+        await tester.pumpAndSettle();
+        expect(find.textContaining('No links left.'), findsOneWidget);
+      },
+    );
+  });
 }

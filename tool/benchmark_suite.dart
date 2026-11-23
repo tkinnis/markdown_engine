@@ -296,6 +296,8 @@ _SuiteRun _executeSuite() {
     largeFixture.editedSource,
     previousDocument: baseLargeDoc,
     editStartOffset: largeFixture.editStartOffset,
+    editOldEndOffset: largeFixture.editOldEndOffset,
+    editNewEndOffset: largeFixture.editNewEndOffset,
   );
   if (verifiedInc.document.toHtml() != expectedEditedDoc.toHtml()) {
     throw StateError(
@@ -398,6 +400,8 @@ _SuiteRun _executeSuite() {
         largeFixture.editedSource,
         previousDocument: baseLargeDoc,
         editStartOffset: largeFixture.editStartOffset,
+        editOldEndOffset: largeFixture.editOldEndOffset,
+        editNewEndOffset: largeFixture.editNewEndOffset,
       );
       sink ^= res.reusedBlockCount;
     },
@@ -676,6 +680,8 @@ _LargeFixture _buildLargeDocumentFixture() {
 
   final StringBuffer edited = StringBuffer()..write(base.toString());
   int editStartOffset = 0;
+  int editOldEndOffset = 0;
+  int editNewEndOffset = 0;
   int editedLineNumber = 0;
 
   for (int i = 1; i <= totalSections; i++) {
@@ -725,6 +731,9 @@ _LargeFixture _buildLargeDocumentFixture() {
       editedLineNumber = _countLines(base.toString());
       base.write(editableOriginal);
       edited.write(editableModified);
+      // Exclude trailing `\n\n` so the edit window stays inside the paragraph.
+      editOldEndOffset = base.length - 2;
+      editNewEndOffset = edited.length - 2;
     } else {
       base.write(editableOriginal);
       edited.write(editableOriginal);
@@ -748,6 +757,8 @@ _LargeFixture _buildLargeDocumentFixture() {
     baseSource: baseSource,
     editedSource: editedSource,
     editStartOffset: editStartOffset,
+    editOldEndOffset: editOldEndOffset,
+    editNewEndOffset: editNewEndOffset,
     editedLineNumber: editedLineNumber,
     lineCount: _countLines(baseSource),
   );
@@ -878,7 +889,7 @@ String _renderBenchmarksMarkdown({
     <_BenchmarkResult>[small, medium, inc, stream],
     title:
         'Native AOT Median Latency (Sub-Millisecond & Interactive Workloads)',
-    stepUs: 250.0,
+    stepUs: 100.0,
   );
 
   _writeHorizontalMedianChart(
@@ -886,7 +897,7 @@ String _renderBenchmarksMarkdown({
     <_BenchmarkResult>[large, inc],
     title:
         '5,000-Line Document: Full Parse vs Incremental Single-Paragraph Edit',
-    stepUs: 1000.0,
+    stepUs: 500.0,
   );
 
   out
@@ -1110,6 +1121,8 @@ final class _LargeFixture {
     required this.baseSource,
     required this.editedSource,
     required this.editStartOffset,
+    required this.editOldEndOffset,
+    required this.editNewEndOffset,
     required this.editedLineNumber,
     required this.lineCount,
   });
@@ -1117,6 +1130,8 @@ final class _LargeFixture {
   final String baseSource;
   final String editedSource;
   final int editStartOffset;
+  final int editOldEndOffset;
+  final int editNewEndOffset;
   final int editedLineNumber;
   final int lineCount;
 }

@@ -74,13 +74,13 @@ Widget buildMarkdownSample(BuildContext context, MarkdownController controller) 
 }
 ```
 
-Use `MarkdownView.document(document: preParsed)` alongside `MarkdownDocumentReader` (which automatically offloads documents `>= 4096` code units to a background isolate with latest-wins coalescing) or `MarkdownView.streaming(controller: streamController)` for live token feeds.
+Use `MarkdownView.document(document: preParsed)` alongside `MarkdownDocumentReader` (which implements `ValueListenable<MarkdownDocument>`, automatically offloads documents `>= 4096` code units to a background isolate with latest-wins coalescing, and falls back synchronously on `IsolateSpawnException`) or `MarkdownView.streaming(controller: streamController)` for zero-poll push-based token feeds. Pass an optional `focusNode` for keyboard Select-All (`Cmd+A`) and Copy across virtualized slivers.
 
 ## Incremental Editing & Streaming Feeds
 
 ### Incremental Document Diffing (`IncrementalMarkdownParser`)
 
-Avoid full-document reparses in live editors by reusing blank-line-isolated unchanged prefix and suffix blocks with preserved `blockId` values and shifted UTF-16 `SourceSpan`s:
+Avoid full-document reparses in live editors by reusing blank-line-isolated unchanged prefix and suffix blocks with preserved `blockId` values, $O(1)$ edit-offset windowing (`editStartOffset`, `editOldEndOffset`, `editNewEndOffset`), and $O(1)$ lazy span shifting:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -97,6 +97,8 @@ void main() {
     '# Architecture\n\nEdited paragraph.\n\nSecond paragraph.\n',
     previousResult: first,
     editStartOffset: 16,
+    editOldEndOffset: 32,
+    editNewEndOffset: 33,
   );
 
   print('Reused ${updated.reusedBlockCount} blocks, reparsed ${updated.reparsedBlockCount}.');
@@ -105,7 +107,7 @@ void main() {
 
 ### Streaming Chunked Accumulation (`StreamingMarkdownController`)
 
-Accumulate chunked responses (such as token-by-token SSE or LLM streams) while freezing settled prefix blocks (`settledBlocks`) and re-parsing only the active trailing slice:
+Accumulate chunked responses (such as token-by-token SSE or LLM streams) while freezing settled prefix blocks (`settledBlocks`), notifying pure-Dart push listeners (`addListener`/`removeListener`), and re-parsing only the active trailing slice:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -135,9 +137,9 @@ void main() {
 * **Two-Phase CommonMark & GFM Engine**: Implements strict CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.gfm.13` block structuring, flanking delimiter resolution, Unicode punctuation/case folding, HTML5 entities, pipe tables, strikethrough, task lists, autolinks, and `tagfilter`.
 * **Rich Opt-In Extensions**: `MarkdownOptions.extended()` enables YAML/TOML frontmatter, GitHub alerts (`[!NOTE]`–`[!CAUTION]`), footnotes, PHP Markdown Extra definition lists, inline/display LaTeX math (`$...$` / `$$...$$`), highlight (`==mark==`), subscript (`~sub~`), superscript (`^sup^`), emoji shortcodes, smart punctuation, explicit heading IDs (`{#id}`), `<details>`, `<figure>`, `<div align="...">`, `<kbd>`, `<abbr>`, and `<picture>`.
 * **Dart 3 Sealed AST**: 18 `MarkdownBlockNode` and 20 `MarkdownInlineNode` immutable sealed subtypes with stable `blockId` identity, UTF-16 `SourceSpan` tracking, and exhaustive `switch` support.
-* **Defense-in-Depth Security**: Enforces `MarkdownUrlPolicy` (control-character stripping, default blocking of `javascript:`, `vbscript:`, and `data:`, optional scheme/host allowlists, and opt-in raster image data URIs), GFM `tagfilter`, deep HTML sanitization (`sanitizeHtml: true` stripping `<script>`, `<iframe>`, `<svg>`, `<math>`, `on*` handlers, `srcdoc`, and unsafe inline CSS), and `MarkdownBudgets` (`maxInputLength`, `maxNestingDepth`, `maxBlocks`, `maxTableColumns`, `maxTableRows`, `maxHtmlBytes`, `maxTokens`). See [`SECURITY.md`](SECURITY.md).
+* **Defense-in-Depth Security**: Enforces `MarkdownUrlPolicy.strict()` by default on `MarkdownOptions()` (allowing `http`, `https`, `mailto`, relative, and `#fragment` URLs while blocking protocol-relative `//`, userinfo `@`, `javascript:`, `vbscript:`, unsafe `data:`, and Unicode/control-char obfuscated URIs), GFM `tagfilter`, a linear-time HTML5 state-machine sanitizer (`sanitizeHtml: true` stripping `<script>`, `<style>`, `<noscript>`, `<template>`, `<iframe>`, `<svg>`, `<math>`, `<form>`, `<meta>`, `on*` handlers, `srcdoc`, and unsafe CSS `url(...)`), bounded inline emphasis nesting, and `MarkdownBudgets` (`maxInputLength`, `maxNestingDepth`, `maxBlocks`, `maxTableColumns`, `maxTableRows`, `maxHtmlBytes`, `maxTokens`, `maxOutputBytes`). See [`SECURITY.md`](SECURITY.md).
 
-* **Flutter Sliver Rendering Suite (`markdown_engine_flutter`)**: Zero-reparse Light/Dark `MarkdownTheme` switching (`MarkdownThemeData.light()`/`.dark()`/`.fromTheme()`), lazy `SliverMarkdownDocument` virtualization keyed by `blockId`, `MarkdownView.document` and `MarkdownView.streaming`, background isolate loading via `MarkdownDocumentReader`, outline/anchor navigation via `MarkdownController` & `MarkdownReadingPlace`, and `MarkdownImagePolicy` (`block`, `ask`, `load`) privacy controls.
+* **Flutter Sliver Rendering Suite (`markdown_engine_flutter`)**: Zero-reparse Light/Dark `MarkdownTheme` switching, automatic incremental diffing inside `MarkdownView` edits, lazy `SliverMarkdownDocument` virtualization keyed by `blockId` (`addAutomaticKeepAlives: true`), zero-poll push-based `MarkdownView.streaming`, `WidgetsApp`-safe selection with full-document `Cmd+A` / Copy and excluded UI chrome, background isolate `ValueListenable` loading via `MarkdownDocumentReader`, `readingPlaceNotifier` & `scrollToAnchor` navigation via `MarkdownController`, `Semantics` & `FocusableActionDetector` accessibility, and `MarkdownImagePolicy` (`block`, `ask`, `load`) privacy controls.
 
 ## Companion Ecosystem Integration
 
@@ -157,15 +159,15 @@ Verified offline against vendored upstream specifications tracked in [`REFERENCE
 | `gfm_spec` | `cmark-gfm 0.29.0.gfm.13` (`test/spec.txt`) | 670 | 0 | 2 | 672 | **100.0%** |
 | `gfm_extensions` | `cmark-gfm 0.29.0.gfm.13` (`test/extensions.txt`) | 30 | 0 | 0 | 30 | **100.0%** |
 
-Native Dart AOT timings on Apple M4 (`arm64`, macOS 15.6, Dart `3.13.5`) under `MarkdownOptions.gfm()` — see [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md) for methodology, charts, and CI regression ceilings:
+Native Dart AOT timings on Apple M4 (`arm64`, macOS 15.6, Dart `3.13.5`) under `MarkdownOptions.gfm()` — see [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md) for methodology, charts, head-to-head comparisons (`package:markdown`, `flutter_md`, `flutter_markdown_plus`), and CI regression ceilings:
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) | Highlights |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| `small_doc_parse_and_html` | 937 B (18 lines) | 28.30 us | **27.80 us** | 32.15 MB/s | Full GFM parse + `toHtml()` |
-| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 1.060 ms | **999.36 us** | 24.09 MB/s | Sub-ms README parse + `toHtml()` |
-| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 7.038 ms | **7.013 ms** | 23.52 MB/s | Full AST parse (1,458 blocks) |
-| `incremental_single_paragraph_edit` | 168.9 KB (4,996 lines) | 1.717 ms | **1.747 ms** | 94.43 MB/s | **4.01x faster**, **1,457/1,458 (99.93%)** blocks reused |
-| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks | 13.18 us | **13.29 us** | 3.09 MB/s | Avg/chunk (`664.50 us` total, **14/15** settled) |
+| `small_doc_parse_and_html` | 937 B (18 lines) | 12.78 us | **12.77 us** | 70.00 MB/s | Full GFM parse + `toHtml()` (`15.39x` vs `package:markdown`) |
+| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 402.74 us | **399.72 us** | 60.23 MB/s | Sub-ms README parse + `toHtml()` (`13.15x` vs `package:markdown`) |
+| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 2.595 ms | **2.601 ms** | 63.43 MB/s | Full AST parse (`1,458` blocks, `15.14x` vs `package:markdown`) |
+| `incremental_single_paragraph_edit` | 168.9 KB (4,996 lines) | 160.04 us | **159.80 us** | 1032.33 MB/s | **16.28x faster** vs own full parse, **1,457/1,458 (99.93%)** blocks reused |
+| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks | 3.06 us | **3.05 us** | 13.47 MB/s | Avg/chunk (`152.50 us` total, **14/15** settled, `74.22x` vs `package:markdown`) |
 
 ## Workspace Packages
 

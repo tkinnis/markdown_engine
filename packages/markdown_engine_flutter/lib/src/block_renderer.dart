@@ -65,6 +65,31 @@ final class MarkdownBlockRenderContext {
       onRequestLoadRemoteImages: onRequestLoadRemoteImages,
     );
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MarkdownBlockRenderContext &&
+          theme == other.theme &&
+          delegates == other.delegates &&
+          urlPolicy == other.urlPolicy &&
+          identical(controller, other.controller) &&
+          textAlign == other.textAlign &&
+          listDepth == other.listDepth &&
+          remoteImagesApproved == other.remoteImagesApproved &&
+          onRequestLoadRemoteImages == other.onRequestLoadRemoteImages;
+
+  @override
+  int get hashCode => Object.hash(
+    theme,
+    delegates,
+    urlPolicy,
+    controller,
+    textAlign,
+    listDepth,
+    remoteImagesApproved,
+    onRequestLoadRemoteImages,
+  );
 }
 
 /// Top-level block wrapper registering its [MarkdownBlockNode.blockId] with
@@ -190,7 +215,7 @@ Widget buildMarkdownBlockWidget(
         child: Container(height: 1.0, color: theme.border),
       );
     case HtmlBlockNode():
-      return _buildHtmlBlockFallback(node, theme);
+      return _buildHtmlBlockFallback(context, node, renderContext);
     case DetailsBlockNode():
       return _MarkdownDetailsBlock(
         key: ValueKey<String>('details-${node.blockId}'),
@@ -400,6 +425,7 @@ Widget _buildHeading(
     controller: renderContext.controller,
     child: Semantics(
       header: true,
+      headingLevel: node.level.clamp(1, 6),
       child: Padding(
         padding: EdgeInsets.only(top: node.level <= 2 ? 8.0 : 4.0),
         child: headingContent,
@@ -569,48 +595,48 @@ final class _MarkdownCodeBlockState extends State<_MarkdownCodeBlock> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: <Widget>[
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6.0,
-                    vertical: 2.0,
-                  ),
-                  decoration: BoxDecoration(
-                    color: theme.border.withValues(alpha: 0.45),
-                    borderRadius: BorderRadius.circular(4.0),
-                  ),
-                  child: Text(
-                    badgeText,
-                    style: TextStyle(
-                      color: theme.muted,
-                      fontSize: theme.codeFontSize * 0.8,
-                      fontWeight: FontWeight.w600,
-                      fontFamily: theme.effectiveCodeFontFamily,
-                      fontFamilyFallback:
-                          MarkdownThemeData.defaultCodeFontFallback,
+                SelectionContainer.disabled(
+                  child: ExcludeSemantics(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6.0,
+                        vertical: 2.0,
+                      ),
+                      decoration: BoxDecoration(
+                        color: theme.border.withValues(alpha: 0.45),
+                        borderRadius: BorderRadius.circular(4.0),
+                      ),
+                      child: Text(
+                        badgeText,
+                        style: TextStyle(
+                          color: theme.muted,
+                          fontSize: theme.codeFontSize * 0.8,
+                          fontWeight: FontWeight.w600,
+                          fontFamily: theme.effectiveCodeFontFamily,
+                          fontFamilyFallback:
+                              MarkdownThemeData.defaultCodeFontFallback,
+                        ),
+                      ),
                     ),
                   ),
                 ),
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: _copyCode,
-                    child: Semantics(
-                      button: true,
-                      label: _copied ? 'Copied' : 'Copy code',
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6.0,
-                          vertical: 2.0,
-                        ),
-                        child: Text(
-                          _copied ? 'Copied' : 'Copy',
-                          style: TextStyle(
-                            color: _copied ? theme.accent : theme.muted,
-                            fontSize: theme.fontSize * 0.78,
-                            fontWeight: FontWeight.w600,
-                            fontFamily: theme.fontFamily,
-                          ),
+                SelectionContainer.disabled(
+                  child: MarkdownInteractiveAction(
+                    onActivate: _copyCode,
+                    semanticLabel: _copied ? 'Copied' : 'Copy code',
+                    focusBorderColor: theme.accent,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6.0,
+                        vertical: 2.0,
+                      ),
+                      child: Text(
+                        _copied ? 'Copied' : 'Copy',
+                        style: TextStyle(
+                          color: _copied ? theme.accent : theme.muted,
+                          fontSize: theme.fontSize * 0.78,
+                          fontWeight: FontWeight.w600,
+                          fontFamily: theme.fontFamily,
                         ),
                       ),
                     ),
@@ -679,38 +705,42 @@ Widget _buildAlert(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Container(
-                width: 20.0,
-                height: 20.0,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: colors.border.withValues(alpha: 0.18),
-                  shape: BoxShape.circle,
-                ),
-                child: Text(
-                  glyph,
-                  style: TextStyle(
-                    color: colors.foreground,
-                    fontSize: 12.0,
-                    fontWeight: FontWeight.w800,
-                    height: 1.0,
+          SelectionContainer.disabled(
+            child: ExcludeSemantics(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Container(
+                    width: 20.0,
+                    height: 20.0,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: colors.border.withValues(alpha: 0.18),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      glyph,
+                      style: TextStyle(
+                        color: colors.foreground,
+                        fontSize: 12.0,
+                        fontWeight: FontWeight.w800,
+                        height: 1.0,
+                      ),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 8.0),
+                  Text(
+                    node.title,
+                    style: TextStyle(
+                      color: colors.foreground,
+                      fontSize: theme.fontSize * 0.94,
+                      fontWeight: FontWeight.w700,
+                      fontFamily: theme.fontFamily,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8.0),
-              Text(
-                node.title,
-                style: TextStyle(
-                  color: colors.foreground,
-                  fontSize: theme.fontSize * 0.94,
-                  fontWeight: FontWeight.w700,
-                  fontFamily: theme.fontFamily,
-                ),
-              ),
-            ],
+            ),
           ),
           if (node.children.isNotEmpty) ...<Widget>[
             const SizedBox(height: 8.0),
@@ -742,7 +772,8 @@ Widget _buildList(
   ListNode node,
   MarkdownBlockRenderContext renderContext,
 ) {
-  if (node.items.isEmpty) {
+  final List<ListItemNode> items = node.items;
+  if (items.isEmpty) {
     return const SizedBox.shrink();
   }
   final double itemGap = node.tight ? 4.0 : 8.0;
@@ -750,14 +781,14 @@ Widget _buildList(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
-      for (int i = 0; i < node.items.length; i++)
+      for (int i = 0; i < items.length; i++)
         Padding(
           padding: EdgeInsets.only(
-            bottom: i == node.items.length - 1 ? 0.0 : itemGap,
+            bottom: i == items.length - 1 ? 0.0 : itemGap,
           ),
           child: _buildListItem(
             context,
-            node.items[i],
+            items[i],
             renderContext,
             ordered: node.ordered,
             index: i,
@@ -788,48 +819,55 @@ Widget _buildListItem(
   final Widget marker;
   if (item.isTaskItem) {
     final bool checked = item.taskState ?? false;
-    marker = Semantics(
-      checked: checked,
-      label: checked ? 'Completed task' : 'Incomplete task',
-      child: Padding(
-        padding: EdgeInsets.only(
-          top: (theme.fontSize * theme.lineHeight - 16.0) / 2.0,
-        ),
-        child: Container(
-          width: 16.0,
-          height: 16.0,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: checked ? theme.accent : const Color(0x00000000),
-            borderRadius: BorderRadius.circular(3.5),
-            border: Border.all(
-              color: checked ? theme.accent : theme.muted,
-              width: 1.5,
+    marker = SelectionContainer.disabled(
+      child: Semantics(
+        checked: checked,
+        readOnly: true,
+        label: checked ? 'Completed task' : 'Incomplete task',
+        child: ExcludeSemantics(
+          child: Padding(
+            padding: EdgeInsets.only(
+              top: (theme.fontSize * theme.lineHeight - 16.0) / 2.0,
+            ),
+            child: Container(
+              width: 16.0,
+              height: 16.0,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: checked ? theme.accent : const Color(0x00000000),
+                borderRadius: BorderRadius.circular(3.5),
+                border: Border.all(
+                  color: checked ? theme.accent : theme.muted,
+                  width: 1.5,
+                ),
+              ),
+              child: checked
+                  ? Text(
+                      '✓',
+                      style: TextStyle(
+                        color: theme.brightness == Brightness.dark
+                            ? const Color(0xFF0F172A)
+                            : const Color(0xFFFFFFFF),
+                        fontSize: 11.0,
+                        fontWeight: FontWeight.w800,
+                        height: 1.0,
+                      ),
+                    )
+                  : null,
             ),
           ),
-          child: checked
-              ? Text(
-                  '✓',
-                  style: TextStyle(
-                    color: theme.brightness == Brightness.dark
-                        ? const Color(0xFF0F172A)
-                        : const Color(0xFFFFFFFF),
-                    fontSize: 11.0,
-                    fontWeight: FontWeight.w800,
-                    height: 1.0,
-                  ),
-                )
-              : null,
         ),
       ),
     );
   } else if (ordered) {
-    marker = SizedBox(
-      width: 26.0,
-      child: Text(
-        '${start + index}$delimiter',
-        textAlign: TextAlign.right,
-        style: theme.bodyTextStyle(color: theme.muted),
+    marker = SelectionContainer.disabled(
+      child: SizedBox(
+        width: 26.0,
+        child: Text(
+          '${start + index}$delimiter',
+          textAlign: TextAlign.right,
+          style: theme.bodyTextStyle(color: theme.muted),
+        ),
       ),
     );
   } else {
@@ -838,12 +876,16 @@ Widget _buildListItem(
       1 => '◦',
       _ => '▪',
     };
-    marker = SizedBox(
-      width: 18.0,
-      child: Text(
-        bullet,
-        textAlign: TextAlign.center,
-        style: theme.bodyTextStyle(color: theme.muted),
+    marker = SelectionContainer.disabled(
+      child: ExcludeSemantics(
+        child: SizedBox(
+          width: 18.0,
+          child: Text(
+            bullet,
+            textAlign: TextAlign.center,
+            style: theme.bodyTextStyle(color: theme.muted),
+          ),
+        ),
       ),
     );
   }
@@ -867,8 +909,11 @@ Widget _buildListItem(
 
 Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
   final MarkdownThemeData theme = renderContext.theme;
-  int columnCount = node.headers.length;
-  for (final List<TableCellNode> row in node.rows) {
+  final List<TableCellNode> headers = node.headers;
+  final List<List<TableCellNode>> rows = node.rows;
+  final List<TableAlignment> alignments = node.alignments;
+  int columnCount = headers.length;
+  for (final List<TableCellNode> row in rows) {
     if (row.length > columnCount) {
       columnCount = row.length;
     }
@@ -881,8 +926,8 @@ Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
     if (col < row.length) {
       return row[col];
     }
-    final TableAlignment fallbackAlign = col < node.alignments.length
-        ? node.alignments[col]
+    final TableAlignment fallbackAlign = col < alignments.length
+        ? alignments[col]
         : TableAlignment.none;
     return TableCellNode(alignment: fallbackAlign);
   }
@@ -891,8 +936,8 @@ Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
     if (cell.alignment != TableAlignment.none) {
       return cell.alignment;
     }
-    if (col < node.alignments.length) {
-      return node.alignments[col];
+    if (col < alignments.length) {
+      return alignments[col];
     }
     return TableAlignment.none;
   }
@@ -904,19 +949,26 @@ Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
     final TextStyle style = theme.bodyTextStyle().copyWith(
       fontWeight: isHeader ? FontWeight.w700 : FontWeight.w400,
     );
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
-      alignment: boxAlign,
-      child: MarkdownInlineText(
-        nodes: cell.children,
-        baseStyle: style,
-        theme: theme,
-        delegates: renderContext.delegates,
-        urlPolicy: renderContext.urlPolicy,
-        controller: renderContext.controller,
-        textAlign: textAlign,
-        remoteImagesApproved: renderContext.remoteImagesApproved,
-        onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+    return Semantics(
+      container: true,
+      header: isHeader ? true : null,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420.0),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+          alignment: boxAlign,
+          child: MarkdownInlineText(
+            nodes: cell.children,
+            baseStyle: style,
+            theme: theme,
+            delegates: renderContext.delegates,
+            urlPolicy: renderContext.urlPolicy,
+            controller: renderContext.controller,
+            textAlign: textAlign,
+            remoteImagesApproved: renderContext.remoteImagesApproved,
+            onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+          ),
+        ),
       ),
     );
   }
@@ -926,17 +978,17 @@ Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
       decoration: BoxDecoration(color: theme.effectiveTableHeaderBackground),
       children: <Widget>[
         for (int col = 0; col < columnCount; col++)
-          buildCell(cellAt(node.headers, col), col, isHeader: true),
+          buildCell(cellAt(headers, col), col, isHeader: true),
       ],
     ),
-    for (int r = 0; r < node.rows.length; r++)
+    for (int r = 0; r < rows.length; r++)
       TableRow(
         decoration: r.isOdd
             ? BoxDecoration(color: theme.effectiveTableStripeBackground)
             : null,
         children: <Widget>[
           for (int col = 0; col < columnCount; col++)
-            buildCell(cellAt(node.rows[r], col), col, isHeader: false),
+            buildCell(cellAt(rows[r], col), col, isHeader: false),
         ],
       ),
   ];
@@ -1011,24 +1063,23 @@ final class _MarkdownDetailsBlockState extends State<_MarkdownDetailsBlock> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _toggle,
-              child: Semantics(
-                button: true,
-                expanded: _isOpen,
-                label: widget.node.summary,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12.0,
-                    vertical: 10.0,
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: <Widget>[
-                      SizedBox(
+          MarkdownInteractiveAction(
+            onActivate: _toggle,
+            semanticLabel: widget.node.summary,
+            expanded: _isOpen,
+            focusBorderColor: theme.accent,
+            borderRadius: BorderRadius.circular(8.0),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12.0,
+                vertical: 10.0,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: <Widget>[
+                  SelectionContainer.disabled(
+                    child: ExcludeSemantics(
+                      child: SizedBox(
                         width: 18.0,
                         child: Text(
                           _isOpen ? '▾' : '▸',
@@ -1040,26 +1091,26 @@ final class _MarkdownDetailsBlockState extends State<_MarkdownDetailsBlock> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 4.0),
-                      Expanded(
-                        child: MarkdownInlineText(
-                          nodes: summaryNodes,
-                          baseStyle: theme.bodyTextStyle().copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                          theme: theme,
-                          delegates: widget.renderContext.delegates,
-                          urlPolicy: widget.renderContext.urlPolicy,
-                          controller: widget.renderContext.controller,
-                          remoteImagesApproved:
-                              widget.renderContext.remoteImagesApproved,
-                          onRequestLoadRemoteImages:
-                              widget.renderContext.onRequestLoadRemoteImages,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 4.0),
+                  Expanded(
+                    child: MarkdownInlineText(
+                      nodes: summaryNodes,
+                      baseStyle: theme.bodyTextStyle().copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                      theme: theme,
+                      delegates: widget.renderContext.delegates,
+                      urlPolicy: widget.renderContext.urlPolicy,
+                      controller: widget.renderContext.controller,
+                      remoteImagesApproved:
+                          widget.renderContext.remoteImagesApproved,
+                      onRequestLoadRemoteImages:
+                          widget.renderContext.onRequestLoadRemoteImages,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -1171,6 +1222,7 @@ Widget _buildMathBlock(
   return Semantics(
     container: true,
     label: 'Display math: ${node.latex}',
+    excludeSemantics: true,
     child: Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 12.0),
@@ -1197,7 +1249,8 @@ Widget _buildDefinitionList(
   DefinitionListNode node,
   MarkdownBlockRenderContext renderContext,
 ) {
-  if (node.groups.isEmpty) {
+  final List<DefinitionGroup> groups = node.groups;
+  if (groups.isEmpty) {
     return const SizedBox.shrink();
   }
   final MarkdownThemeData theme = renderContext.theme;
@@ -1206,17 +1259,15 @@ Widget _buildDefinitionList(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
-      for (int g = 0; g < node.groups.length; g++)
+      for (int g = 0; g < groups.length; g++)
         Padding(
-          padding: EdgeInsets.only(
-            bottom: g == node.groups.length - 1 ? 0.0 : 10.0,
-          ),
+          padding: EdgeInsets.only(bottom: g == groups.length - 1 ? 0.0 : 10.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
               MarkdownInlineText(
-                nodes: node.groups[g].term,
+                nodes: groups[g].term,
                 baseStyle: theme.bodyTextStyle().copyWith(
                   fontWeight: FontWeight.w700,
                 ),
@@ -1228,8 +1279,7 @@ Widget _buildDefinitionList(
                 onRequestLoadRemoteImages:
                     renderContext.onRequestLoadRemoteImages,
               ),
-              for (final List<MarkdownBlockNode> def
-                  in node.groups[g].definitions)
+              for (final List<MarkdownBlockNode> def in groups[g].definitions)
                 Padding(
                   padding: const EdgeInsets.only(left: 16.0, top: 4.0),
                   child: Container(
@@ -1254,7 +1304,8 @@ Widget _buildFootnoteSection(
   FootnoteSectionNode node,
   MarkdownBlockRenderContext renderContext,
 ) {
-  if (node.definitions.isEmpty) {
+  final List<FootnoteDefinitionNode> definitions = node.definitions;
+  if (definitions.isEmpty) {
     return const SizedBox.shrink();
   }
   final MarkdownThemeData theme = renderContext.theme;
@@ -1266,14 +1317,14 @@ Widget _buildFootnoteSection(
         padding: const EdgeInsets.only(top: 8.0, bottom: 10.0),
         child: Container(height: 1.0, color: theme.border),
       ),
-      for (int i = 0; i < node.definitions.length; i++)
+      for (int i = 0; i < definitions.length; i++)
         Padding(
           padding: EdgeInsets.only(
-            bottom: i == node.definitions.length - 1 ? 0.0 : 8.0,
+            bottom: i == definitions.length - 1 ? 0.0 : 8.0,
           ),
           child: _buildFootnoteDefinition(
             context,
-            node.definitions[i],
+            definitions[i],
             renderContext,
           ),
         ),
@@ -1332,21 +1383,18 @@ Widget _buildFootnoteDefinition(
                 spacing: 6.0,
                 children: <Widget>[
                   for (int occ = 1; occ <= backCount; occ++)
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => navigateBack(occ),
-                        child: Semantics(
-                          button: true,
-                          label: 'Back to footnote reference ${node.index}',
-                          child: Text(
-                            occ == 1 ? '↩' : '↩$occ',
-                            style: TextStyle(
-                              color: theme.effectiveLinkColor,
-                              fontSize: noteTheme.fontSize,
-                              fontWeight: FontWeight.w600,
-                            ),
+                    SelectionContainer.disabled(
+                      child: MarkdownInteractiveAction(
+                        onActivate: () => navigateBack(occ),
+                        semanticLabel:
+                            'Back to footnote reference ${node.index}',
+                        focusBorderColor: theme.accent,
+                        child: Text(
+                          occ == 1 ? '↩' : '↩$occ',
+                          style: TextStyle(
+                            color: theme.effectiveLinkColor,
+                            fontSize: noteTheme.fontSize,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
@@ -1368,7 +1416,12 @@ final RegExp _dangerousHtmlBlockPattern = RegExp(
 final RegExp _htmlCommentPattern = RegExp(r'<!--[\s\S]*?-->');
 final RegExp _htmlTagStripPattern = RegExp(r'<[^>]+>');
 
-Widget _buildHtmlBlockFallback(HtmlBlockNode node, MarkdownThemeData theme) {
+Widget _buildHtmlBlockFallback(
+  BuildContext context,
+  HtmlBlockNode node,
+  MarkdownBlockRenderContext renderContext,
+) {
+  final MarkdownThemeData theme = renderContext.theme;
   final String trimmed = node.literal.trim();
   if (trimmed.isEmpty || _dangerousHtmlBlockPattern.hasMatch(trimmed)) {
     return const SizedBox.shrink();
@@ -1378,6 +1431,21 @@ Widget _buildHtmlBlockFallback(HtmlBlockNode node, MarkdownThemeData theme) {
       .trim();
   if (withoutComments.isEmpty) {
     return const SizedBox.shrink();
+  }
+  final ImageNode? htmlImg = tryParseHtmlImageTag(withoutComments);
+  if (htmlImg != null) {
+    return Align(
+      alignment: _alignmentForTextAlign(renderContext.textAlign),
+      child: buildMarkdownImageWidget(
+        context: context,
+        node: htmlImg,
+        theme: theme,
+        delegates: renderContext.delegates,
+        urlPolicy: renderContext.urlPolicy,
+        remoteImagesApproved: renderContext.remoteImagesApproved,
+        onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+      ),
+    );
   }
   final String stripped = withoutComments
       .replaceAll(_htmlTagStripPattern, '')

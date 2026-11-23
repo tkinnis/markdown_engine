@@ -1,4 +1,49 @@
+import 'dart:collection';
+
 import 'package:meta/meta.dart';
+
+/// Returns an unmodifiable view of [list] in O(1), avoiding redundant wrapping
+/// when [list] is already empty or an [UnmodifiableListView].
+List<T> freezeList<T>(List<T> list) {
+  if (list.isEmpty) {
+    return const <Never>[];
+  }
+  if (list is UnmodifiableListView<T>) {
+    return list;
+  }
+  return UnmodifiableListView<T>(List<T>.of(list, growable: false));
+}
+
+/// Returns an unmodifiable map view of [map] in O(1), avoiding redundant wrapping.
+Map<K, V> freezeMap<K, V>(Map<K, V> map) {
+  if (map.isEmpty) {
+    return const <Never, Never>{};
+  }
+  if (map is UnmodifiableMapView<K, V>) {
+    return map;
+  }
+  return UnmodifiableMapView<K, V>(Map<K, V>.of(map));
+}
+
+List<T> _asUnmodifiableListView<T>(List<T> list) {
+  if (list.isEmpty) {
+    return const <Never>[];
+  }
+  if (list is UnmodifiableListView<T>) {
+    return list;
+  }
+  return UnmodifiableListView<T>(list);
+}
+
+Map<K, V> _asUnmodifiableMapView<K, V>(Map<K, V> map) {
+  if (map.isEmpty) {
+    return const <Never, Never>{};
+  }
+  if (map is UnmodifiableMapView<K, V>) {
+    return map;
+  }
+  return UnmodifiableMapView<K, V>(map);
+}
 
 /// UTF-16 source offset and 1-based line span for a parsed AST node.
 @immutable
@@ -121,8 +166,7 @@ final class MarkdownFrontmatter {
   final Map<String, Object?> _entries;
 
   /// Parsed top-level structured scalar, list, and map entries.
-  Map<String, Object?> get entries =>
-      Map<String, Object?>.unmodifiable(_entries);
+  Map<String, Object?> get entries => _asUnmodifiableMapView(_entries);
 
   /// Looks up a scalar or structured entry by [key].
   Object? operator [](String key) => _entries[key];
@@ -239,13 +283,33 @@ final class TableCellNode {
     this.alignment = TableAlignment.none,
     this.span = SourceSpan.zero,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const TableCellNode._shifted({
+    required List<MarkdownInlineNode> children,
+    required this.alignment,
+    required this.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<MarkdownInlineNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Parsed inline children within this cell.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownInlineNode>(
+      _shiftInlines(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   /// Column alignment assigned to this cell.
   final TableAlignment alignment;
@@ -261,23 +325,38 @@ final class TableCellNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return TableCellNode(
-      children: _shiftInlines(_children, offsetDelta, lineDelta),
+    return TableCellNode._shifted(
+      children: _children,
       alignment: alignment,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is TableCellNode &&
-          alignment == other.alignment &&
-          span == other.span &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! TableCellNode ||
+        alignment != other.alignment ||
+        span != other.span) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode => Object.hash(alignment, span, Object.hashAll(_children));
+  int get hashCode {
+    final List<MarkdownInlineNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(alignment, span, Object.hashAll(resolved));
+  }
 }
 
 /// Term-and-definitions group within a [DefinitionListNode].
@@ -291,25 +370,52 @@ final class DefinitionGroup {
     this.span = SourceSpan.zero,
     // ignore: prefer_initializing_formals
   }) : _term = term,
-       _definitions = definitions;
+       _definitions = definitions,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const DefinitionGroup._shifted({
+    required List<MarkdownInlineNode> term,
+    required List<List<MarkdownBlockNode>> definitions,
+    required this.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _term = term,
+       _definitions = definitions,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<MarkdownInlineNode> _term;
   final List<List<MarkdownBlockNode>> _definitions;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Inline nodes comprising the defined term (`<dt>`).
-  List<MarkdownInlineNode> get term =>
-      List<MarkdownInlineNode>.unmodifiable(_term);
+  List<MarkdownInlineNode> get term {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_term);
+    }
+    return UnmodifiableListView<MarkdownInlineNode>(
+      _shiftInlines(_term, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   /// Block sequences for each `: ...` definition (`<dd>`) belonging to [term].
-  List<List<MarkdownBlockNode>> get definitions =>
-      List<List<MarkdownBlockNode>>.unmodifiable(
-        _definitions
-            .map(
-              (List<MarkdownBlockNode> d) =>
-                  List<MarkdownBlockNode>.unmodifiable(d),
-            )
-            .toList(growable: false),
-      );
+  List<List<MarkdownBlockNode>> get definitions {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_definitions);
+    }
+    return UnmodifiableListView<List<MarkdownBlockNode>>(
+      _definitions
+          .map(
+            (List<MarkdownBlockNode> d) =>
+                UnmodifiableListView<MarkdownBlockNode>(
+                  _shiftBlocks(d, _childOffsetDelta, _childLineDelta),
+                ),
+          )
+          .toList(growable: false),
+    );
+  }
 
   /// Source span covering this term and its definitions.
   final SourceSpan span;
@@ -335,34 +441,47 @@ final class DefinitionGroup {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return DefinitionGroup(
-      term: _shiftInlines(_term, offsetDelta, lineDelta),
-      definitions: _definitions
-          .map(
-            (List<MarkdownBlockNode> def) =>
-                _shiftBlocks(def, offsetDelta, lineDelta),
-          )
-          .toList(growable: false),
+    return DefinitionGroup._shifted(
+      term: _term,
+      definitions: _definitions,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is DefinitionGroup &&
-          span == other.span &&
-          _listEquals(_term, other._term) &&
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! DefinitionGroup || span != other.span) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_term, other._term) &&
           _nestedBlockListEquals(_definitions, other._definitions);
+    }
+    return _listEquals(term, other.term) &&
+        _nestedBlockListEquals(definitions, other.definitions);
+  }
 
   @override
-  int get hashCode => Object.hash(
-    span,
-    Object.hashAll(_term),
-    Object.hashAll(
-      _definitions.map((List<MarkdownBlockNode> d) => Object.hashAll(d)),
-    ),
-  );
+  int get hashCode {
+    final bool unshifted = _childOffsetDelta == 0 && _childLineDelta == 0;
+    final List<MarkdownInlineNode> resolvedTerm = unshifted ? _term : term;
+    final List<List<MarkdownBlockNode>> resolvedDefs = unshifted
+        ? _definitions
+        : definitions;
+    return Object.hash(
+      span,
+      Object.hashAll(resolvedTerm),
+      Object.hashAll(
+        resolvedDefs.map((List<MarkdownBlockNode> d) => Object.hashAll(d)),
+      ),
+    );
+  }
 }
 
 /// Base class for all immutable block-level Markdown AST nodes.
@@ -445,7 +564,24 @@ final class HeadingNode extends MarkdownBlockNode {
     this.isSetext = false,
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const HeadingNode._shifted({
+    required super.blockId,
+    required this.level,
+    required this.text,
+    required this.slug,
+    required this.explicitId,
+    required List<MarkdownInlineNode> children,
+    required this.isSetext,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   /// Heading level (`1` through `6`).
   final int level;
@@ -460,10 +596,18 @@ final class HeadingNode extends MarkdownBlockNode {
   final String? explicitId;
 
   final List<MarkdownInlineNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Parsed inline children within the heading.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownInlineNode>(
+      _shiftInlines(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   /// Whether this heading was parsed from a setext underline (`===` / `---`).
   final bool isSetext;
@@ -476,42 +620,57 @@ final class HeadingNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return HeadingNode(
+    return HeadingNode._shifted(
       blockId: blockId,
       level: level,
       text: text,
       slug: slug,
       explicitId: explicitId,
-      children: _shiftInlines(_children, offsetDelta, lineDelta),
+      children: _children,
       isSetext: isSetext,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is HeadingNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          level == other.level &&
-          text == other.text &&
-          slug == other.slug &&
-          explicitId == other.explicitId &&
-          isSetext == other.isSetext &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! HeadingNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        level != other.level ||
+        text != other.text ||
+        slug != other.slug ||
+        explicitId != other.explicitId ||
+        isSetext != other.isSetext) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode => Object.hash(
-    blockId,
-    span,
-    level,
-    text,
-    slug,
-    explicitId,
-    isSetext,
-    Object.hashAll(_children),
-  );
+  int get hashCode {
+    final List<MarkdownInlineNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(
+      blockId,
+      span,
+      level,
+      text,
+      slug,
+      explicitId,
+      isSetext,
+      Object.hashAll(resolved),
+    );
+  }
 }
 
 /// Paragraph block (`<p>`).
@@ -522,13 +681,33 @@ final class ParagraphNode extends MarkdownBlockNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const ParagraphNode._shifted({
+    required super.blockId,
+    required List<MarkdownInlineNode> children,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<MarkdownInlineNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Parsed inline children within this paragraph.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownInlineNode>(
+      _shiftInlines(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -538,23 +717,38 @@ final class ParagraphNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return ParagraphNode(
+    return ParagraphNode._shifted(
       blockId: blockId,
-      children: _shiftInlines(_children, offsetDelta, lineDelta),
+      children: _children,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is ParagraphNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! ParagraphNode ||
+        blockId != other.blockId ||
+        span != other.span) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode => Object.hash(blockId, span, Object.hashAll(_children));
+  int get hashCode {
+    final List<MarkdownInlineNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(blockId, span, Object.hashAll(resolved));
+  }
 }
 
 /// Indented or fenced code block (`<pre><code>`).
@@ -638,13 +832,33 @@ final class BlockQuoteNode extends MarkdownBlockNode {
     List<MarkdownBlockNode> children = const <MarkdownBlockNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const BlockQuoteNode._shifted({
+    required super.blockId,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<MarkdownBlockNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Nested blocks inside this blockquote.
-  List<MarkdownBlockNode> get children =>
-      List<MarkdownBlockNode>.unmodifiable(_children);
+  List<MarkdownBlockNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownBlockNode>(
+      _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() => _blocksToPlainText(_children);
@@ -654,23 +868,38 @@ final class BlockQuoteNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return BlockQuoteNode(
+    return BlockQuoteNode._shifted(
       blockId: blockId,
-      children: _shiftBlocks(_children, offsetDelta, lineDelta),
+      children: _children,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is BlockQuoteNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! BlockQuoteNode ||
+        blockId != other.blockId ||
+        span != other.span) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode => Object.hash(blockId, span, Object.hashAll(_children));
+  int get hashCode {
+    final List<MarkdownBlockNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(blockId, span, Object.hashAll(resolved));
+  }
 }
 
 /// GitHub-style callout/alert container (`> [!NOTE]`, `> [!WARNING]`, etc.).
@@ -683,7 +912,21 @@ final class AlertNode extends MarkdownBlockNode {
     List<MarkdownBlockNode> children = const <MarkdownBlockNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const AlertNode._shifted({
+    required super.blockId,
+    required this.kind,
+    required this.title,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   /// Alert severity/kind.
   final AlertKind kind;
@@ -693,10 +936,18 @@ final class AlertNode extends MarkdownBlockNode {
   final String title;
 
   final List<MarkdownBlockNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Nested body blocks inside the alert.
-  List<MarkdownBlockNode> get children =>
-      List<MarkdownBlockNode>.unmodifiable(_children);
+  List<MarkdownBlockNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownBlockNode>(
+      _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() {
@@ -709,28 +960,42 @@ final class AlertNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return AlertNode(
+    return AlertNode._shifted(
       blockId: blockId,
       kind: kind,
       title: title,
-      children: _shiftBlocks(_children, offsetDelta, lineDelta),
+      children: _children,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AlertNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          kind == other.kind &&
-          title == other.title &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! AlertNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        kind != other.kind ||
+        title != other.title) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode =>
-      Object.hash(blockId, span, kind, title, Object.hashAll(_children));
+  int get hashCode {
+    final List<MarkdownBlockNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(blockId, span, kind, title, Object.hashAll(resolved));
+  }
 }
 
 /// Ordered or bullet list (`<ol>` / `<ul>`).
@@ -745,7 +1010,23 @@ final class ListNode extends MarkdownBlockNode {
     List<ListItemNode> items = const <ListItemNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _items = items;
+  }) : _items = items,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const ListNode._shifted({
+    required super.blockId,
+    required this.ordered,
+    required this.start,
+    required this.tight,
+    required this.delimiter,
+    required List<ListItemNode> items,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _items = items,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   /// Whether this is an ordered list (`<ol>`) rather than a bullet list (`<ul>`).
   final bool ordered;
@@ -760,9 +1041,23 @@ final class ListNode extends MarkdownBlockNode {
   final String delimiter;
 
   final List<ListItemNode> _items;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Ordered items belonging to this list.
-  List<ListItemNode> get items => List<ListItemNode>.unmodifiable(_items);
+  List<ListItemNode> get items {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_items);
+    }
+    return UnmodifiableListView<ListItemNode>(
+      _items
+          .map(
+            (ListItemNode item) =>
+                item.shiftSpan(_childOffsetDelta, _childLineDelta),
+          )
+          .toList(growable: false),
+    );
+  }
 
   @override
   String toPlainText() =>
@@ -773,41 +1068,54 @@ final class ListNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return ListNode(
+    return ListNode._shifted(
       blockId: blockId,
       ordered: ordered,
       start: start,
       tight: tight,
       delimiter: delimiter,
-      items: _items
-          .map((ListItemNode item) => item.shiftSpan(offsetDelta, lineDelta))
-          .toList(growable: false),
+      items: _items,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is ListNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          ordered == other.ordered &&
-          start == other.start &&
-          tight == other.tight &&
-          delimiter == other.delimiter &&
-          _listEquals(_items, other._items);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! ListNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        ordered != other.ordered ||
+        start != other.start ||
+        tight != other.tight ||
+        delimiter != other.delimiter) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_items, other._items);
+    }
+    return _listEquals(items, other.items);
+  }
 
   @override
-  int get hashCode => Object.hash(
-    blockId,
-    span,
-    ordered,
-    start,
-    tight,
-    delimiter,
-    Object.hashAll(_items),
-  );
+  int get hashCode {
+    final List<ListItemNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _items : items;
+    return Object.hash(
+      blockId,
+      span,
+      ordered,
+      start,
+      tight,
+      delimiter,
+      Object.hashAll(resolved),
+    );
+  }
 }
 
 /// Single list item (`<li>`), optionally carrying a GFM task checkbox state.
@@ -819,7 +1127,20 @@ final class ListItemNode extends MarkdownBlockNode {
     List<MarkdownBlockNode> children = const <MarkdownBlockNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const ListItemNode._shifted({
+    required super.blockId,
+    required this.taskState,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   /// GFM task checkbox state (`true` checked, `false` unchecked, `null` normal).
   final bool? taskState;
@@ -831,10 +1152,18 @@ final class ListItemNode extends MarkdownBlockNode {
   bool get isTaskItem => taskState != null;
 
   final List<MarkdownBlockNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Nested blocks inside this list item.
-  List<MarkdownBlockNode> get children =>
-      List<MarkdownBlockNode>.unmodifiable(_children);
+  List<MarkdownBlockNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownBlockNode>(
+      _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() => _blocksToPlainText(_children);
@@ -844,26 +1173,40 @@ final class ListItemNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return ListItemNode(
+    return ListItemNode._shifted(
       blockId: blockId,
       taskState: taskState,
-      children: _shiftBlocks(_children, offsetDelta, lineDelta),
+      children: _children,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is ListItemNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          taskState == other.taskState &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! ListItemNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        taskState != other.taskState) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode =>
-      Object.hash(blockId, span, taskState, Object.hashAll(_children));
+  int get hashCode {
+    final List<MarkdownBlockNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(blockId, span, taskState, Object.hashAll(resolved));
+  }
 }
 
 /// GFM pipe table (`<table>`).
@@ -878,25 +1221,78 @@ final class TableNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _alignments = alignments,
        _headers = headers,
-       _rows = rows;
+       _rows = rows,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const TableNode._shifted({
+    required super.blockId,
+    required List<TableAlignment> alignments,
+    required List<TableCellNode> headers,
+    required List<List<TableCellNode>> rows,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _alignments = alignments,
+       _headers = headers,
+       _rows = rows,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<TableAlignment> _alignments;
   final List<TableCellNode> _headers;
   final List<List<TableCellNode>> _rows;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Column alignment specifications from the delimiter row.
-  List<TableAlignment> get alignments =>
-      List<TableAlignment>.unmodifiable(_alignments);
+  List<TableAlignment> get alignments => _asUnmodifiableListView(_alignments);
 
   /// Header cells (`<thead><tr><th>`).
-  List<TableCellNode> get headers => List<TableCellNode>.unmodifiable(_headers);
+  List<TableCellNode> get headers {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_headers);
+    }
+    return UnmodifiableListView<TableCellNode>(
+      _headers
+          .map(
+            (TableCellNode c) =>
+                c.shiftSpan(_childOffsetDelta, _childLineDelta),
+          )
+          .toList(growable: false),
+    );
+  }
 
   /// Body rows (`<tbody><tr><td>`).
-  List<List<TableCellNode>> get rows => List<List<TableCellNode>>.unmodifiable(
-    _rows
-        .map((List<TableCellNode> row) => List<TableCellNode>.unmodifiable(row))
-        .toList(growable: false),
-  );
+  List<List<TableCellNode>> get rows {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      if (_rows.isEmpty) {
+        return const <List<TableCellNode>>[];
+      }
+      if (_rows is UnmodifiableListView<List<TableCellNode>>) {
+        return _rows;
+      }
+      return UnmodifiableListView<List<TableCellNode>>(
+        _rows
+            .map((List<TableCellNode> r) => _asUnmodifiableListView(r))
+            .toList(growable: false),
+      );
+    }
+    return UnmodifiableListView<List<TableCellNode>>(
+      _rows
+          .map(
+            (List<TableCellNode> r) => UnmodifiableListView<TableCellNode>(
+              r
+                  .map(
+                    (TableCellNode c) =>
+                        c.shiftSpan(_childOffsetDelta, _childLineDelta),
+                  )
+                  .toList(growable: false),
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
 
   @override
   String toPlainText() {
@@ -917,41 +1313,52 @@ final class TableNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return TableNode(
+    return TableNode._shifted(
       blockId: blockId,
       alignments: _alignments,
-      headers: _headers
-          .map((TableCellNode c) => c.shiftSpan(offsetDelta, lineDelta))
-          .toList(growable: false),
-      rows: _rows
-          .map(
-            (List<TableCellNode> r) => r
-                .map((TableCellNode c) => c.shiftSpan(offsetDelta, lineDelta))
-                .toList(growable: false),
-          )
-          .toList(growable: false),
+      headers: _headers,
+      rows: _rows,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is TableNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          _listEquals(_alignments, other._alignments) &&
-          _listEquals(_headers, other._headers) &&
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! TableNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        !_listEquals(_alignments, other._alignments)) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_headers, other._headers) &&
           _nestedCellListEquals(_rows, other._rows);
+    }
+    return _listEquals(headers, other.headers) &&
+        _nestedCellListEquals(rows, other.rows);
+  }
 
   @override
-  int get hashCode => Object.hash(
-    blockId,
-    span,
-    Object.hashAll(_alignments),
-    Object.hashAll(_headers),
-    Object.hashAll(_rows.map((List<TableCellNode> r) => Object.hashAll(r))),
-  );
+  int get hashCode {
+    final bool unshifted = _childOffsetDelta == 0 && _childLineDelta == 0;
+    final List<TableCellNode> resolvedHeaders = unshifted ? _headers : headers;
+    final List<List<TableCellNode>> resolvedRows = unshifted ? _rows : rows;
+    return Object.hash(
+      blockId,
+      span,
+      Object.hashAll(_alignments),
+      Object.hashAll(resolvedHeaders),
+      Object.hashAll(
+        resolvedRows.map((List<TableCellNode> r) => Object.hashAll(r)),
+      ),
+    );
+  }
 }
 
 /// Thematic break (`<hr />`).
@@ -1044,7 +1451,23 @@ final class DetailsBlockNode extends MarkdownBlockNode {
     super.span,
     // ignore: prefer_initializing_formals
   }) : _summaryInlines = summaryInlines,
-       _children = children;
+       _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const DetailsBlockNode._shifted({
+    required super.blockId,
+    required this.summary,
+    required List<MarkdownInlineNode> summaryInlines,
+    required this.initiallyOpen,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _summaryInlines = summaryInlines,
+       _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   /// Plain-text summary heading.
   final String summary;
@@ -1052,17 +1475,31 @@ final class DetailsBlockNode extends MarkdownBlockNode {
   final List<MarkdownInlineNode> _summaryInlines;
 
   /// Parsed inline nodes for the summary line.
-  List<MarkdownInlineNode> get summaryInlines =>
-      List<MarkdownInlineNode>.unmodifiable(_summaryInlines);
+  List<MarkdownInlineNode> get summaryInlines {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_summaryInlines);
+    }
+    return UnmodifiableListView<MarkdownInlineNode>(
+      _shiftInlines(_summaryInlines, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   /// Whether the disclosure block carries the `open` attribute.
   final bool initiallyOpen;
 
   final List<MarkdownBlockNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Nested body blocks inside `<details>`.
-  List<MarkdownBlockNode> get children =>
-      List<MarkdownBlockNode>.unmodifiable(_children);
+  List<MarkdownBlockNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownBlockNode>(
+      _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() {
@@ -1075,36 +1512,51 @@ final class DetailsBlockNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return DetailsBlockNode(
+    return DetailsBlockNode._shifted(
       blockId: blockId,
       summary: summary,
-      summaryInlines: _shiftInlines(_summaryInlines, offsetDelta, lineDelta),
+      summaryInlines: _summaryInlines,
       initiallyOpen: initiallyOpen,
-      children: _shiftBlocks(_children, offsetDelta, lineDelta),
+      children: _children,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is DetailsBlockNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          summary == other.summary &&
-          initiallyOpen == other.initiallyOpen &&
-          _listEquals(_summaryInlines, other._summaryInlines) &&
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! DetailsBlockNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        summary != other.summary ||
+        initiallyOpen != other.initiallyOpen) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_summaryInlines, other._summaryInlines) &&
           _listEquals(_children, other._children);
+    }
+    return _listEquals(summaryInlines, other.summaryInlines) &&
+        _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode => Object.hash(
-    blockId,
-    span,
-    summary,
-    initiallyOpen,
-    Object.hashAll(_summaryInlines),
-    Object.hashAll(_children),
-  );
+  int get hashCode {
+    final bool unshifted = _childOffsetDelta == 0 && _childLineDelta == 0;
+    return Object.hash(
+      blockId,
+      span,
+      summary,
+      initiallyOpen,
+      Object.hashAll(unshifted ? _summaryInlines : summaryInlines),
+      Object.hashAll(unshifted ? _children : children),
+    );
+  }
 }
 
 /// Explicitly aligned container block (`<div align="...">` or container).
@@ -1116,16 +1568,37 @@ final class AlignedBlockNode extends MarkdownBlockNode {
     List<MarkdownBlockNode> children = const <MarkdownBlockNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const AlignedBlockNode._shifted({
+    required super.blockId,
+    required this.alignment,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   /// Alignment applied to the contained blocks.
   final TableAlignment alignment;
 
   final List<MarkdownBlockNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Contained block nodes.
-  List<MarkdownBlockNode> get children =>
-      List<MarkdownBlockNode>.unmodifiable(_children);
+  List<MarkdownBlockNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownBlockNode>(
+      _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() => _blocksToPlainText(_children);
@@ -1135,26 +1608,40 @@ final class AlignedBlockNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return AlignedBlockNode(
+    return AlignedBlockNode._shifted(
       blockId: blockId,
       alignment: alignment,
-      children: _shiftBlocks(_children, offsetDelta, lineDelta),
+      children: _children,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is AlignedBlockNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          alignment == other.alignment &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! AlignedBlockNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        alignment != other.alignment) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode =>
-      Object.hash(blockId, span, alignment, Object.hashAll(_children));
+  int get hashCode {
+    final List<MarkdownBlockNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(blockId, span, alignment, Object.hashAll(resolved));
+  }
 }
 
 /// Figure container (`<figure>` + optional `<figcaption>`).
@@ -1168,22 +1655,51 @@ final class FigureBlockNode extends MarkdownBlockNode {
     super.span,
     // ignore: prefer_initializing_formals
   }) : _children = children,
-       _captionInlines = captionInlines;
+       _captionInlines = captionInlines,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const FigureBlockNode._shifted({
+    required super.blockId,
+    required List<MarkdownBlockNode> children,
+    required this.caption,
+    required List<MarkdownInlineNode> captionInlines,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _captionInlines = captionInlines,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<MarkdownBlockNode> _children;
 
   /// Body blocks inside the figure.
-  List<MarkdownBlockNode> get children =>
-      List<MarkdownBlockNode>.unmodifiable(_children);
+  List<MarkdownBlockNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownBlockNode>(
+      _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   /// Plain-text figure caption, if present.
   final String? caption;
 
   final List<MarkdownInlineNode> _captionInlines;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Parsed inline nodes for `<figcaption>`.
-  List<MarkdownInlineNode> get captionInlines =>
-      List<MarkdownInlineNode>.unmodifiable(_captionInlines);
+  List<MarkdownInlineNode> get captionInlines {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_captionInlines);
+    }
+    return UnmodifiableListView<MarkdownInlineNode>(
+      _shiftInlines(_captionInlines, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() {
@@ -1200,33 +1716,48 @@ final class FigureBlockNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return FigureBlockNode(
+    return FigureBlockNode._shifted(
       blockId: blockId,
-      children: _shiftBlocks(_children, offsetDelta, lineDelta),
+      children: _children,
       caption: caption,
-      captionInlines: _shiftInlines(_captionInlines, offsetDelta, lineDelta),
+      captionInlines: _captionInlines,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is FigureBlockNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          caption == other.caption &&
-          _listEquals(_children, other._children) &&
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! FigureBlockNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        caption != other.caption) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children) &&
           _listEquals(_captionInlines, other._captionInlines);
+    }
+    return _listEquals(children, other.children) &&
+        _listEquals(captionInlines, other.captionInlines);
+  }
 
   @override
-  int get hashCode => Object.hash(
-    blockId,
-    span,
-    caption,
-    Object.hashAll(_children),
-    Object.hashAll(_captionInlines),
-  );
+  int get hashCode {
+    final bool unshifted = _childOffsetDelta == 0 && _childLineDelta == 0;
+    return Object.hash(
+      blockId,
+      span,
+      caption,
+      Object.hashAll(unshifted ? _children : children),
+      Object.hashAll(unshifted ? _captionInlines : captionInlines),
+    );
+  }
 }
 
 /// Display-math block delimited by `$$ ... $$`.
@@ -1276,13 +1807,38 @@ final class DefinitionListNode extends MarkdownBlockNode {
     List<DefinitionGroup> groups = const <DefinitionGroup>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _groups = groups;
+  }) : _groups = groups,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const DefinitionListNode._shifted({
+    required super.blockId,
+    required List<DefinitionGroup> groups,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _groups = groups,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<DefinitionGroup> _groups;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Term/definition groups in this definition list.
-  List<DefinitionGroup> get groups =>
-      List<DefinitionGroup>.unmodifiable(_groups);
+  List<DefinitionGroup> get groups {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_groups);
+    }
+    return UnmodifiableListView<DefinitionGroup>(
+      _groups
+          .map(
+            (DefinitionGroup g) =>
+                g.shiftSpan(_childOffsetDelta, _childLineDelta),
+          )
+          .toList(growable: false),
+    );
+  }
 
   @override
   String toPlainText() =>
@@ -1293,25 +1849,38 @@ final class DefinitionListNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return DefinitionListNode(
+    return DefinitionListNode._shifted(
       blockId: blockId,
-      groups: _groups
-          .map((DefinitionGroup g) => g.shiftSpan(offsetDelta, lineDelta))
-          .toList(growable: false),
+      groups: _groups,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is DefinitionListNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          _listEquals(_groups, other._groups);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! DefinitionListNode ||
+        blockId != other.blockId ||
+        span != other.span) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_groups, other._groups);
+    }
+    return _listEquals(groups, other.groups);
+  }
 
   @override
-  int get hashCode => Object.hash(blockId, span, Object.hashAll(_groups));
+  int get hashCode {
+    final List<DefinitionGroup> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _groups : groups;
+    return Object.hash(blockId, span, Object.hashAll(resolved));
+  }
 }
 
 /// Single footnote definition (`[^label]: ...`).
@@ -1325,7 +1894,22 @@ final class FootnoteDefinitionNode extends MarkdownBlockNode {
     this.referenceCount = 0,
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const FootnoteDefinitionNode._shifted({
+    required super.blockId,
+    required this.label,
+    required this.index,
+    required List<MarkdownBlockNode> children,
+    required this.referenceCount,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _children = children,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   /// Raw footnote identifier label.
   final String label;
@@ -1337,10 +1921,18 @@ final class FootnoteDefinitionNode extends MarkdownBlockNode {
   final int referenceCount;
 
   final List<MarkdownBlockNode> _children;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Body blocks inside this footnote definition.
-  List<MarkdownBlockNode> get children =>
-      List<MarkdownBlockNode>.unmodifiable(_children);
+  List<MarkdownBlockNode> get children {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_children);
+    }
+    return UnmodifiableListView<MarkdownBlockNode>(
+      _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
+    );
+  }
 
   @override
   String toPlainText() => _blocksToPlainText(_children);
@@ -1350,36 +1942,51 @@ final class FootnoteDefinitionNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return FootnoteDefinitionNode(
+    return FootnoteDefinitionNode._shifted(
       blockId: blockId,
       label: label,
       index: index,
       referenceCount: referenceCount,
-      children: _shiftBlocks(_children, offsetDelta, lineDelta),
+      children: _children,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is FootnoteDefinitionNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          label == other.label &&
-          index == other.index &&
-          referenceCount == other.referenceCount &&
-          _listEquals(_children, other._children);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! FootnoteDefinitionNode ||
+        blockId != other.blockId ||
+        span != other.span ||
+        label != other.label ||
+        index != other.index ||
+        referenceCount != other.referenceCount) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_children, other._children);
+    }
+    return _listEquals(children, other.children);
+  }
 
   @override
-  int get hashCode => Object.hash(
-    blockId,
-    span,
-    label,
-    index,
-    referenceCount,
-    Object.hashAll(_children),
-  );
+  int get hashCode {
+    final List<MarkdownBlockNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0) ? _children : children;
+    return Object.hash(
+      blockId,
+      span,
+      label,
+      index,
+      referenceCount,
+      Object.hashAll(resolved),
+    );
+  }
 }
 
 /// Rendered footnotes footer section (`<section class="footnotes">`).
@@ -1390,13 +1997,38 @@ final class FootnoteSectionNode extends MarkdownBlockNode {
     List<FootnoteDefinitionNode> definitions = const <FootnoteDefinitionNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _definitions = definitions;
+  }) : _definitions = definitions,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0;
+
+  const FootnoteSectionNode._shifted({
+    required super.blockId,
+    required List<FootnoteDefinitionNode> definitions,
+    required super.span,
+    required int childOffsetDelta,
+    required int childLineDelta,
+  }) : _definitions = definitions,
+       _childOffsetDelta = childOffsetDelta,
+       _childLineDelta = childLineDelta;
 
   final List<FootnoteDefinitionNode> _definitions;
+  final int _childOffsetDelta;
+  final int _childLineDelta;
 
   /// Referenced footnote definitions ordered by first citation.
-  List<FootnoteDefinitionNode> get definitions =>
-      List<FootnoteDefinitionNode>.unmodifiable(_definitions);
+  List<FootnoteDefinitionNode> get definitions {
+    if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      return _asUnmodifiableListView(_definitions);
+    }
+    return UnmodifiableListView<FootnoteDefinitionNode>(
+      _definitions
+          .map(
+            (FootnoteDefinitionNode d) =>
+                d.shiftSpan(_childOffsetDelta, _childLineDelta),
+          )
+          .toList(growable: false),
+    );
+  }
 
   @override
   String toPlainText() => _definitions
@@ -1408,27 +2040,40 @@ final class FootnoteSectionNode extends MarkdownBlockNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return FootnoteSectionNode(
+    return FootnoteSectionNode._shifted(
       blockId: blockId,
-      definitions: _definitions
-          .map(
-            (FootnoteDefinitionNode d) => d.shiftSpan(offsetDelta, lineDelta),
-          )
-          .toList(growable: false),
+      definitions: _definitions,
       span: span.shift(offsetDelta, lineDelta),
+      childOffsetDelta: _childOffsetDelta + offsetDelta,
+      childLineDelta: _childLineDelta + lineDelta,
     );
   }
 
   @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is FootnoteSectionNode &&
-          blockId == other.blockId &&
-          span == other.span &&
-          _listEquals(_definitions, other._definitions);
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is! FootnoteSectionNode ||
+        blockId != other.blockId ||
+        span != other.span) {
+      return false;
+    }
+    if (_childOffsetDelta == other._childOffsetDelta &&
+        _childLineDelta == other._childLineDelta) {
+      return _listEquals(_definitions, other._definitions);
+    }
+    return _listEquals(definitions, other.definitions);
+  }
 
   @override
-  int get hashCode => Object.hash(blockId, span, Object.hashAll(_definitions));
+  int get hashCode {
+    final List<FootnoteDefinitionNode> resolved =
+        (_childOffsetDelta == 0 && _childLineDelta == 0)
+        ? _definitions
+        : definitions;
+    return Object.hash(blockId, span, Object.hashAll(resolved));
+  }
 }
 
 /// Base class for all immutable inline Markdown AST nodes.
@@ -1567,8 +2212,7 @@ final class EmphasisNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Emphasized child inline nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   /// Delimiter character (`'*'` or `'_'`).
   final String delimiter;
@@ -1613,8 +2257,7 @@ final class StrongNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Strongly emphasized child inline nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   /// Delimiter marker (`'**'` or `'__'`).
   final String delimiter;
@@ -1658,8 +2301,7 @@ final class StrikethroughNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Struck child inline nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -1698,8 +2340,7 @@ final class HighlightNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Highlighted child inline nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -1738,8 +2379,7 @@ final class SubscriptNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Subscripted child inline nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -1778,8 +2418,7 @@ final class SuperscriptNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Superscripted child inline nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -1816,7 +2455,17 @@ final class LinkNode extends MarkdownInlineNode {
     this.isAutolink = false,
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _blockedDestination = false;
+
+  const LinkNode._blocked({
+    required this.title,
+    required List<MarkdownInlineNode> children,
+    required this.isAutolink,
+    required super.span,
+  }) : destination = '',
+       _children = children,
+       _blockedDestination = true;
 
   /// Resolved link destination URI (sanitized if URL sanitization is active).
   final String destination;
@@ -1825,10 +2474,10 @@ final class LinkNode extends MarkdownInlineNode {
   final String? title;
 
   final List<MarkdownInlineNode> _children;
+  final bool _blockedDestination;
 
   /// Visible link label inline nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   /// Whether this link was created from a CommonMark or GFM autolink.
   final bool isAutolink;
@@ -1840,6 +2489,14 @@ final class LinkNode extends MarkdownInlineNode {
   LinkNode shiftSpan(int offsetDelta, int lineDelta) {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
+    }
+    if (_blockedDestination) {
+      return LinkNode._blocked(
+        title: title,
+        children: _shiftInlines(_children, offsetDelta, lineDelta),
+        isAutolink: isAutolink,
+        span: span.shift(offsetDelta, lineDelta),
+      );
     }
     return LinkNode(
       destination: destination,
@@ -1882,7 +2539,19 @@ final class ImageNode extends MarkdownInlineNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _blockedDestination = false;
+
+  const ImageNode._blocked({
+    required this.alt,
+    required this.title,
+    required this.width,
+    required this.height,
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : destination = '',
+       _children = children,
+       _blockedDestination = true;
 
   /// Image URI destination (sanitized if URL sanitization is active).
   final String destination;
@@ -1900,10 +2569,10 @@ final class ImageNode extends MarkdownInlineNode {
   final int? height;
 
   final List<MarkdownInlineNode> _children;
+  final bool _blockedDestination;
 
   /// Parsed inline children extracted for the image alt description.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => alt;
@@ -1912,6 +2581,16 @@ final class ImageNode extends MarkdownInlineNode {
   ImageNode shiftSpan(int offsetDelta, int lineDelta) {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
+    }
+    if (_blockedDestination) {
+      return ImageNode._blocked(
+        alt: alt,
+        title: title,
+        width: width,
+        height: height,
+        children: _shiftInlines(_children, offsetDelta, lineDelta),
+        span: span.shift(offsetDelta, lineDelta),
+      );
     }
     return ImageNode(
       destination: destination,
@@ -2036,8 +2715,7 @@ final class KbdInlineNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Inline contents of the `<kbd>` tag.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2080,8 +2758,7 @@ final class AbbrInlineNode extends MarkdownInlineNode {
   final List<MarkdownInlineNode> _children;
 
   /// Visible abbreviation text nodes.
-  List<MarkdownInlineNode> get children =>
-      List<MarkdownInlineNode>.unmodifiable(_children);
+  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2337,14 +3014,14 @@ bool _nestedBlockListEquals(
   return true;
 }
 
-bool _deepMapEquals(Map<String, Object?> a, Map<String, Object?> b) {
+bool _deepMapEquals(Map<Object?, Object?> a, Map<Object?, Object?> b) {
   if (identical(a, b)) {
     return true;
   }
   if (a.length != b.length) {
     return false;
   }
-  for (final MapEntry<String, Object?> entry in a.entries) {
+  for (final MapEntry<Object?, Object?> entry in a.entries) {
     if (!b.containsKey(entry.key) ||
         !_deepValueEquals(entry.value, b[entry.key])) {
       return false;
@@ -2365,16 +3042,16 @@ bool _deepValueEquals(Object? a, Object? b) {
     }
     return true;
   }
-  if (a is Map<String, Object?> && b is Map<String, Object?>) {
+  if (a is Map<Object?, Object?> && b is Map<Object?, Object?>) {
     return _deepMapEquals(a, b);
   }
   return a == b;
 }
 
-int _deepMapHash(Map<String, Object?> map) {
+int _deepMapHash(Map<Object?, Object?> map) {
   return Object.hashAllUnordered(
     map.entries.map(
-      (MapEntry<String, Object?> e) =>
+      (MapEntry<Object?, Object?> e) =>
           Object.hash(e.key, _deepValueHash(e.value)),
     ),
   );
@@ -2384,8 +3061,73 @@ int _deepValueHash(Object? value) {
   if (value is List<Object?>) {
     return Object.hashAll(value.map(_deepValueHash));
   }
-  if (value is Map<String, Object?>) {
+  if (value is Map<Object?, Object?>) {
     return _deepMapHash(value);
   }
   return value.hashCode;
 }
+
+/// Package-internal helper constructing a [LinkNode] whose destination was
+/// blocked by URL policy so HTML export omits `href`.
+LinkNode createBlockedLinkNode({
+  String? title,
+  List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
+  bool isAutolink = false,
+  SourceSpan span = SourceSpan.zero,
+}) => LinkNode._blocked(
+  title: title,
+  children: children,
+  isAutolink: isAutolink,
+  span: span,
+);
+
+/// Package-internal helper constructing an [ImageNode] whose destination was
+/// blocked by URL policy so HTML export omits `src`.
+ImageNode createBlockedImageNode({
+  required String alt,
+  String? title,
+  int? width,
+  int? height,
+  List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
+  SourceSpan span = SourceSpan.zero,
+}) => ImageNode._blocked(
+  alt: alt,
+  title: title,
+  width: width,
+  height: height,
+  children: children,
+  span: span,
+);
+
+/// Returns whether [node]'s original destination was cleared by URL policy.
+bool isBlockedLinkNode(LinkNode node) => node._blockedDestination;
+
+/// Returns whether [node]'s original destination was cleared by URL policy.
+bool isBlockedImageNode(ImageNode node) => node._blockedDestination;
+
+/// Package-internal raw child accessors avoiding span-shift cloning when only
+/// reading non-span content (HTML rendering, plain text, remote image walks).
+List<MarkdownInlineNode> rawHeadingInlines(HeadingNode n) => n._children;
+List<MarkdownInlineNode> rawParagraphInlines(ParagraphNode n) => n._children;
+List<MarkdownBlockNode> rawBlockQuoteChildren(BlockQuoteNode n) => n._children;
+List<MarkdownBlockNode> rawAlertChildren(AlertNode n) => n._children;
+List<ListItemNode> rawListItems(ListNode n) => n._items;
+List<MarkdownBlockNode> rawListItemChildren(ListItemNode n) => n._children;
+List<TableCellNode> rawTableHeaders(TableNode n) => n._headers;
+List<List<TableCellNode>> rawTableRows(TableNode n) => n._rows;
+List<MarkdownInlineNode> rawTableCellInlines(TableCellNode n) => n._children;
+List<MarkdownInlineNode> rawDetailsSummaryInlines(DetailsBlockNode n) =>
+    n._summaryInlines;
+List<MarkdownBlockNode> rawDetailsChildren(DetailsBlockNode n) => n._children;
+List<MarkdownBlockNode> rawAlignedChildren(AlignedBlockNode n) => n._children;
+List<MarkdownBlockNode> rawFigureChildren(FigureBlockNode n) => n._children;
+List<MarkdownInlineNode> rawFigureCaptionInlines(FigureBlockNode n) =>
+    n._captionInlines;
+List<DefinitionGroup> rawDefinitionGroups(DefinitionListNode n) => n._groups;
+List<MarkdownInlineNode> rawDefinitionTerm(DefinitionGroup g) => g._term;
+List<List<MarkdownBlockNode>> rawDefinitionBodies(DefinitionGroup g) =>
+    g._definitions;
+List<MarkdownBlockNode> rawFootnoteDefChildren(FootnoteDefinitionNode n) =>
+    n._children;
+List<FootnoteDefinitionNode> rawFootnoteSectionDefs(FootnoteSectionNode n) =>
+    n._definitions;

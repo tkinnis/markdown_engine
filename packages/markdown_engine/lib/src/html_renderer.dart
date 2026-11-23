@@ -36,73 +36,86 @@ final class _HtmlRenderState {
   int _rawHtmlBytesEmitted = 0;
   bool _inStrong = false;
 
+  bool get _outputBudgetReached => buffer.length >= budgets.maxOutputBytes;
+
   void renderBlocks(List<MarkdownBlockNode> blocks) {
     for (final MarkdownBlockNode block in blocks) {
+      if (_outputBudgetReached) {
+        return;
+      }
       renderBlock(block);
     }
   }
 
   void renderBlock(MarkdownBlockNode block) {
+    if (_outputBudgetReached) {
+      return;
+    }
     switch (block) {
       case FrontmatterNode():
         return;
       case HeadingNode():
         final String tag = 'h${block.level}';
-        buffer.write('<$tag');
+        buffer
+          ..write('<')
+          ..write(tag);
         if (options.explicitHeadingIds && block.explicitId != null) {
-          buffer
-            ..write(' id="')
-            ..write(escapeHtmlText(block.explicitId!))
-            ..write('"');
+          buffer.write(' id="');
+          writeEscapedHtml(buffer, block.explicitId!);
+          buffer.write('"');
         }
         buffer.write('>');
-        renderInlines(block.children);
+        renderInlines(rawHeadingInlines(block));
         buffer
           ..write('</')
           ..write(tag)
           ..writeln('>');
       case ParagraphNode():
         buffer.write('<p>');
-        renderInlines(block.children);
+        renderInlines(rawParagraphInlines(block));
         buffer.writeln('</p>');
       case CodeBlockNode():
         buffer.write('<pre><code');
         final String? lang = block.language;
         if (block.isFenced && lang != null && lang.isNotEmpty) {
-          buffer
-            ..write(' class="language-')
-            ..write(escapeHtmlText(lang))
-            ..write('"');
+          buffer.write(' class="language-');
+          writeEscapedHtml(buffer, lang);
+          buffer.write('"');
         }
-        buffer
-          ..write('>')
-          ..write(escapeHtmlText(block.literal))
-          ..writeln('</code></pre>');
+        buffer.write('>');
+        writeEscapedHtml(buffer, block.literal);
+        buffer.writeln('</code></pre>');
       case BlockQuoteNode():
         buffer.writeln('<blockquote>');
-        renderBlocks(block.children);
+        renderBlocks(rawBlockQuoteChildren(block));
         buffer.writeln('</blockquote>');
       case AlertNode():
         buffer
           ..write('<div class="markdown-alert markdown-alert-')
           ..write(block.kind.name)
           ..writeln('">')
-          ..write('<p class="markdown-alert-title">')
-          ..write(escapeHtmlText(block.title))
-          ..writeln('</p>');
-        renderBlocks(block.children);
+          ..write('<p class="markdown-alert-title">');
+        writeEscapedHtml(buffer, block.title);
+        buffer.writeln('</p>');
+        renderBlocks(rawAlertChildren(block));
         buffer.writeln('</div>');
       case ListNode():
         if (block.ordered) {
           if (block.start == 1) {
             buffer.writeln('<ol>');
           } else {
-            buffer.writeln('<ol start="${block.start}">');
+            buffer
+              ..write('<ol start="')
+              ..write(block.start)
+              ..writeln('">');
           }
         } else {
           buffer.writeln('<ul>');
         }
-        for (final ListItemNode item in block.items) {
+        for (final ListItemNode item in rawListItems(block)) {
+          if (_outputBudgetReached) {
+            break;
+          }
           _renderListItem(item, tight: block.tight);
         }
         buffer.writeln(block.ordered ? '</ol>' : '</ul>');
@@ -113,25 +126,29 @@ final class _HtmlRenderState {
           ..writeln('<table>')
           ..writeln('<thead>')
           ..writeln('<tr>');
-        for (final TableCellNode header in block.headers) {
+        for (final TableCellNode header in rawTableHeaders(block)) {
           buffer.write('<th');
           _writeAlignmentAttr(header.alignment);
           buffer.write('>');
-          renderInlines(header.children);
+          renderInlines(rawTableCellInlines(header));
           buffer.writeln('</th>');
         }
         buffer
           ..writeln('</tr>')
           ..writeln('</thead>');
-        if (block.rows.isNotEmpty) {
+        final List<List<TableCellNode>> rows = rawTableRows(block);
+        if (rows.isNotEmpty) {
           buffer.writeln('<tbody>');
-          for (final List<TableCellNode> row in block.rows) {
+          for (final List<TableCellNode> row in rows) {
+            if (_outputBudgetReached) {
+              break;
+            }
             buffer.writeln('<tr>');
             for (final TableCellNode cell in row) {
               buffer.write('<td');
               _writeAlignmentAttr(cell.alignment);
               buffer.write('>');
-              renderInlines(cell.children);
+              renderInlines(rawTableCellInlines(cell));
               buffer.writeln('</td>');
             }
             buffer.writeln('</tr>');
@@ -151,30 +168,35 @@ final class _HtmlRenderState {
         buffer
           ..writeln('>')
           ..write('<summary>');
-        if (block.summaryInlines.isNotEmpty) {
-          renderInlines(block.summaryInlines);
+        final List<MarkdownInlineNode> summaryInlines =
+            rawDetailsSummaryInlines(block);
+        if (summaryInlines.isNotEmpty) {
+          renderInlines(summaryInlines);
         } else {
-          buffer.write(escapeHtmlText(block.summary));
+          writeEscapedHtml(buffer, block.summary);
         }
         buffer.writeln('</summary>');
-        renderBlocks(block.children);
+        renderBlocks(rawDetailsChildren(block));
         buffer.writeln('</details>');
       case AlignedBlockNode():
         buffer
           ..write('<div align="')
           ..write(block.alignment.name)
           ..writeln('">');
-        renderBlocks(block.children);
+        renderBlocks(rawAlignedChildren(block));
         buffer.writeln('</div>');
       case FigureBlockNode():
         buffer.writeln('<figure>');
-        renderBlocks(block.children);
+        renderBlocks(rawFigureChildren(block));
         if (block.caption != null) {
           buffer.write('<figcaption>');
-          if (block.captionInlines.isNotEmpty) {
-            renderInlines(block.captionInlines);
+          final List<MarkdownInlineNode> capInlines = rawFigureCaptionInlines(
+            block,
+          );
+          if (capInlines.isNotEmpty) {
+            renderInlines(capInlines);
           } else {
-            buffer.write(escapeHtmlText(block.caption!));
+            writeEscapedHtml(buffer, block.caption!);
           }
           buffer.writeln('</figcaption>');
         }
@@ -182,19 +204,27 @@ final class _HtmlRenderState {
       case MathBlockNode():
         buffer
           ..write(r'<div class="math math-display">')
-          ..write('\$\$\n')
-          ..write(escapeHtmlText(block.latex))
-          ..writeln('\n\$\$</div>');
+          ..write('\$\$\n');
+        writeEscapedHtml(buffer, block.latex);
+        buffer.writeln('\n\$\$</div>');
       case DefinitionListNode():
         buffer.writeln('<dl>');
-        for (final DefinitionGroup group in block.groups) {
+        for (final DefinitionGroup group in rawDefinitionGroups(block)) {
+          if (_outputBudgetReached) {
+            break;
+          }
           buffer.write('<dt>');
-          renderInlines(group.term);
+          renderInlines(rawDefinitionTerm(group));
           buffer.writeln('</dt>');
-          for (final List<MarkdownBlockNode> def in group.definitions) {
+          for (final List<MarkdownBlockNode> def in rawDefinitionBodies(
+            group,
+          )) {
+            if (_outputBudgetReached) {
+              break;
+            }
             if (def.length == 1 && def.first is ParagraphNode) {
               buffer.write('<dd>');
-              renderInlines((def.first as ParagraphNode).children);
+              renderInlines(rawParagraphInlines(def.first as ParagraphNode));
               buffer.writeln('</dd>');
             } else {
               buffer.writeln('<dd>');
@@ -210,7 +240,12 @@ final class _HtmlRenderState {
         buffer
           ..writeln('<section class="footnotes" data-footnotes>')
           ..writeln('<ol>');
-        for (final FootnoteDefinitionNode def in block.definitions) {
+        for (final FootnoteDefinitionNode def in rawFootnoteSectionDefs(
+          block,
+        )) {
+          if (_outputBudgetReached) {
+            break;
+          }
           _renderFootnoteDefinition(def);
         }
         buffer
@@ -220,7 +255,7 @@ final class _HtmlRenderState {
   }
 
   void _renderListItem(ListItemNode item, {required bool tight}) {
-    final List<MarkdownBlockNode> children = item.children;
+    final List<MarkdownBlockNode> children = rawListItemChildren(item);
     if (children.isEmpty) {
       if (item.taskState != null) {
         buffer.write('<li>');
@@ -234,6 +269,9 @@ final class _HtmlRenderState {
 
     if (tight) {
       for (int i = 0; i < children.length; i++) {
+        if (_outputBudgetReached) {
+          break;
+        }
         final MarkdownBlockNode child = children[i];
         final bool isFirst = i == 0;
         final bool isLast = i == children.length - 1;
@@ -247,7 +285,7 @@ final class _HtmlRenderState {
           } else if (children[i - 1] is ParagraphNode) {
             buffer.writeln();
           }
-          renderInlines(child.children);
+          renderInlines(rawParagraphInlines(child));
           if (isLast) {
             buffer.writeln('</li>');
           } else if (children[i + 1] is! ParagraphNode) {
@@ -273,12 +311,15 @@ final class _HtmlRenderState {
     // Loose list item.
     buffer.writeln('<li>');
     for (int i = 0; i < children.length; i++) {
+      if (_outputBudgetReached) {
+        break;
+      }
       final MarkdownBlockNode child = children[i];
       if (i == 0 && item.taskState != null && child is ParagraphNode) {
         buffer.write('<p>');
         _writeTaskCheckbox(item.taskState!);
         buffer.write(' ');
-        renderInlines(child.children);
+        renderInlines(rawParagraphInlines(child));
         buffer.writeln('</p>');
       } else {
         if (i == 0 && item.taskState != null) {
@@ -301,8 +342,11 @@ final class _HtmlRenderState {
 
   void _renderFootnoteDefinition(FootnoteDefinitionNode def) {
     final String escapedLabel = percentEncodeHrefFragment(def.label);
-    buffer.writeln('<li id="fn-$escapedLabel">');
-    final List<MarkdownBlockNode> children = def.children;
+    buffer
+      ..write('<li id="fn-')
+      ..write(escapedLabel)
+      ..writeln('">');
+    final List<MarkdownBlockNode> children = rawFootnoteDefChildren(def);
     final String backrefs = _buildFootnoteBackrefs(def, escapedLabel);
 
     if (children.isEmpty) {
@@ -313,11 +357,14 @@ final class _HtmlRenderState {
     }
 
     for (int i = 0; i < children.length; i++) {
+      if (_outputBudgetReached) {
+        break;
+      }
       final MarkdownBlockNode child = children[i];
       final bool isLast = i == children.length - 1;
       if (isLast && child is ParagraphNode) {
         buffer.write('<p>');
-        renderInlines(child.children);
+        renderInlines(rawParagraphInlines(child));
         buffer
           ..write(' ')
           ..write(backrefs)
@@ -370,14 +417,20 @@ final class _HtmlRenderState {
 
   void renderInlines(List<MarkdownInlineNode> nodes) {
     for (final MarkdownInlineNode node in nodes) {
+      if (_outputBudgetReached) {
+        return;
+      }
       _renderInline(node);
     }
   }
 
   void _renderInline(MarkdownInlineNode node) {
+    if (_outputBudgetReached) {
+      return;
+    }
     switch (node) {
       case TextNode():
-        buffer.write(escapeHtmlText(node.text));
+        writeEscapedHtml(buffer, node.text);
       case SoftBreakNode():
         buffer.writeln();
       case HardBreakNode():
@@ -385,10 +438,9 @@ final class _HtmlRenderState {
       case InlineBreakNode():
         buffer.write('<br />');
       case CodeSpanNode():
-        buffer
-          ..write('<code>')
-          ..write(escapeHtmlText(node.literal))
-          ..write('</code>');
+        buffer.write('<code>');
+        writeEscapedHtml(buffer, node.literal);
+        buffer.write('</code>');
       case EmphasisNode():
         final bool prevStrong = _inStrong;
         _inStrong = false;
@@ -424,58 +476,76 @@ final class _HtmlRenderState {
         renderInlines(node.children);
         buffer.write('</sup>');
       case LinkNode():
-        final String href = options.sanitizeUrls
-            ? options.urlPolicy.sanitize(node.destination)
-            : node.destination;
-        buffer
-          ..write('<a href="')
-          ..write(percentEncodeUrl(href))
-          ..write('"');
-        if (node.title != null) {
+        final bool blocked =
+            isBlockedLinkNode(node) ||
+            (options.sanitizeUrls &&
+                node.destination.isNotEmpty &&
+                !options.urlPolicy.isAllowed(node.destination));
+        buffer.write('<a');
+        if (!blocked) {
           buffer
-            ..write(' title="')
-            ..write(escapeHtmlText(node.title!))
+            ..write(' href="')
+            ..write(percentEncodeUrl(node.destination))
             ..write('"');
+        }
+        if (node.title != null) {
+          buffer.write(' title="');
+          writeEscapedHtml(buffer, node.title!);
+          buffer.write('"');
         }
         buffer.write('>');
         renderInlines(node.children);
         buffer.write('</a>');
       case ImageNode():
-        final String src = options.sanitizeUrls
-            ? options.urlPolicy.sanitize(node.destination)
-            : node.destination;
-        buffer
-          ..write('<img src="')
-          ..write(percentEncodeUrl(src))
-          ..write('" alt="')
-          ..write(escapeHtmlText(node.alt))
-          ..write('"');
-        if (node.title != null) {
+        final bool blocked =
+            isBlockedImageNode(node) ||
+            (options.sanitizeUrls &&
+                node.destination.isNotEmpty &&
+                !options.urlPolicy.isAllowed(node.destination));
+        buffer.write('<img');
+        if (!blocked) {
           buffer
-            ..write(' title="')
-            ..write(escapeHtmlText(node.title!))
+            ..write(' src="')
+            ..write(percentEncodeUrl(node.destination))
             ..write('"');
         }
+        buffer.write(' alt="');
+        writeEscapedHtml(buffer, node.alt);
+        buffer.write('"');
+        if (node.title != null) {
+          buffer.write(' title="');
+          writeEscapedHtml(buffer, node.title!);
+          buffer.write('"');
+        }
         if (node.width != null) {
-          buffer.write(' width="${node.width}"');
+          buffer
+            ..write(' width="')
+            ..write(node.width)
+            ..write('"');
         }
         if (node.height != null) {
-          buffer.write(' height="${node.height}"');
+          buffer
+            ..write(' height="')
+            ..write(node.height)
+            ..write('"');
         }
         buffer.write(' />');
       case MathInlineNode():
-        buffer
-          ..write(r'<span class="math math-inline">$')
-          ..write(escapeHtmlText(node.latex))
-          ..write(r'$</span>');
+        buffer.write(r'<span class="math math-inline">$');
+        writeEscapedHtml(buffer, node.latex);
+        buffer.write(r'$</span>');
       case FootnoteRefNode():
         final String escaped = percentEncodeHrefFragment(node.label);
         final String occSuffix = node.occurrenceIndex > 1
             ? '-${node.occurrenceIndex}'
             : '';
         buffer
-          ..write('<sup class="footnote-ref"><a href="#fn-$escaped" ')
-          ..write('id="fnref-$escaped$occSuffix" data-footnote-ref>')
+          ..write('<sup class="footnote-ref"><a href="#fn-')
+          ..write(escaped)
+          ..write('" id="fnref-')
+          ..write(escaped)
+          ..write(occSuffix)
+          ..write('" data-footnote-ref>')
           ..write(node.index)
           ..write('</a></sup>');
       case KbdInlineNode():
@@ -483,17 +553,15 @@ final class _HtmlRenderState {
         renderInlines(node.children);
         buffer.write('</kbd>');
       case AbbrInlineNode():
-        buffer
-          ..write('<abbr title="')
-          ..write(escapeHtmlText(node.title))
-          ..write('">');
+        buffer.write('<abbr title="');
+        writeEscapedHtml(buffer, node.title);
+        buffer.write('">');
         renderInlines(node.children);
         buffer.write('</abbr>');
       case AnchorInlineNode():
-        buffer
-          ..write('<a id="')
-          ..write(escapeHtmlText(node.id))
-          ..write('"></a>');
+        buffer.write('<a id="');
+        writeEscapedHtml(buffer, node.id);
+        buffer.write('"></a>');
       case PictureInlineNode():
         final String light = options.sanitizeUrls
             ? options.urlPolicy.sanitize(node.lightSource)
@@ -501,17 +569,24 @@ final class _HtmlRenderState {
         final String dark = options.sanitizeUrls
             ? options.urlPolicy.sanitize(node.darkSource)
             : node.darkSource;
-        buffer
-          ..write('<picture>')
-          ..write('<source media="(prefers-color-scheme: dark)" srcset="')
-          ..write(percentEncodeUrl(dark))
-          ..write('">')
-          ..write('<img src="')
-          ..write(percentEncodeUrl(light))
-          ..write('" alt="')
-          ..write(escapeHtmlText(node.alt))
-          ..write('">')
-          ..write('</picture>');
+        buffer.write('<picture>');
+        if (dark.isNotEmpty) {
+          buffer
+            ..write('<source media="(prefers-color-scheme: dark)" srcset="')
+            ..write(percentEncodeUrl(dark))
+            ..write('">');
+        }
+        buffer.write('<img');
+        if (light.isNotEmpty) {
+          buffer
+            ..write(' src="')
+            ..write(percentEncodeUrl(light))
+            ..write('"');
+        }
+        buffer.write(' alt="');
+        writeEscapedHtml(buffer, node.alt);
+        buffer.write('">');
+        buffer.write('</picture>');
       case RawHtmlInlineNode():
         _writeRawHtml(node.html, allowLineTermination: false);
     }
@@ -519,9 +594,8 @@ final class _HtmlRenderState {
 
   void _writeRawHtml(String raw, {required bool allowLineTermination}) {
     if (_rawHtmlBytesEmitted + raw.length > budgets.maxHtmlBytes) {
-      final String escaped = escapeHtmlText(raw);
-      buffer.write(escaped);
-      if (allowLineTermination && !escaped.endsWith('\n')) {
+      writeEscapedHtml(buffer, raw);
+      if (allowLineTermination && !raw.endsWith('\n')) {
         buffer.writeln();
       }
       return;

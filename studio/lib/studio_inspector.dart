@@ -45,8 +45,76 @@ final class StudioInspectorPane extends StatefulWidget {
   State<StudioInspectorPane> createState() => _StudioInspectorPaneState();
 }
 
+final RegExp _whitespaceCollapsePattern = RegExp(r'\s+');
+
 final class _StudioInspectorPaneState extends State<StudioInspectorPane> {
   final Set<String> _expandedBlockIds = <String>{};
+  MarkdownDocument? _lastObservedDoc;
+  MarkdownDocument? _cachedHtmlDoc;
+  String _cachedHtml = '';
+  int _cachedHtmlLineCount = 0;
+  MarkdownDocument? _cachedPlainDoc;
+  String _cachedPlainText = '';
+  int _cachedPlainWordCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastObservedDoc = widget.controller.document;
+    widget.controller.addListener(_handleControllerUpdate);
+  }
+
+  @override
+  void didUpdateWidget(StudioInspectorPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.controller, widget.controller)) {
+      oldWidget.controller.removeListener(_handleControllerUpdate);
+      _expandedBlockIds.clear();
+      _cachedHtmlDoc = null;
+      _cachedPlainDoc = null;
+      _lastObservedDoc = widget.controller.document;
+      widget.controller.addListener(_handleControllerUpdate);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_handleControllerUpdate);
+    super.dispose();
+  }
+
+  void _handleControllerUpdate() {
+    final MarkdownDocument doc = widget.controller.document;
+    if (identical(_lastObservedDoc, doc)) {
+      return;
+    }
+    final MarkdownDocument? prevDoc = _lastObservedDoc;
+    _lastObservedDoc = doc;
+    if (_expandedBlockIds.isEmpty) {
+      return;
+    }
+    if (prevDoc == null ||
+        doc.blocks.isEmpty ||
+        prevDoc.options != doc.options) {
+      _expandedBlockIds.clear();
+      return;
+    }
+    final Map<String, MarkdownBlockNode> previousById =
+        <String, MarkdownBlockNode>{
+          for (final MarkdownBlockNode block in prevDoc.blocks)
+            block.blockId: block,
+        };
+    final Set<String> retained = <String>{};
+    for (final MarkdownBlockNode block in doc.blocks) {
+      if (_expandedBlockIds.contains(block.blockId) &&
+          identical(previousById[block.blockId], block)) {
+        retained.add(block.blockId);
+      }
+    }
+    _expandedBlockIds
+      ..clear()
+      ..addAll(retained);
+  }
 
   void _toggleBlockExpanded(String blockId) {
     setState(() {
@@ -59,6 +127,31 @@ final class _StudioInspectorPaneState extends State<StudioInspectorPane> {
   void _copyToClipboard(String label, String text) {
     unawaited(Clipboard.setData(ClipboardData(text: text)));
     widget.onNotify('Copied $label (${text.length} chars) to clipboard.');
+  }
+
+  ({String html, int lineCount}) _memoizedHtml(MarkdownDocument doc) {
+    if (!identical(_cachedHtmlDoc, doc)) {
+      final String html = doc.toHtml();
+      _cachedHtmlDoc = doc;
+      _cachedHtml = html;
+      _cachedHtmlLineCount = html.isEmpty
+          ? 0
+          : '\n'.allMatches(html).length + 1;
+    }
+    return (html: _cachedHtml, lineCount: _cachedHtmlLineCount);
+  }
+
+  ({String plainText, int wordCount}) _memoizedPlainText(MarkdownDocument doc) {
+    if (!identical(_cachedPlainDoc, doc)) {
+      final String plainText = doc.toPlainText();
+      final String trimmed = plainText.trim();
+      _cachedPlainDoc = doc;
+      _cachedPlainText = plainText;
+      _cachedPlainWordCount = trimmed.isEmpty
+          ? 0
+          : trimmed.split(_whitespaceCollapsePattern).length;
+    }
+    return (plainText: _cachedPlainText, wordCount: _cachedPlainWordCount);
   }
 
   @override
@@ -272,8 +365,9 @@ final class _StudioInspectorPaneState extends State<StudioInspectorPane> {
     MarkdownDocument doc,
     ColorScheme scheme,
   ) {
-    final String html = doc.toHtml();
-    final int lineCount = html.isEmpty ? 0 : '\n'.allMatches(html).length + 1;
+    final ({String html, int lineCount}) cached = _memoizedHtml(doc);
+    final String html = cached.html;
+    final int lineCount = cached.lineCount;
     return _CodeExportPane(
       paneKey: const Key('studio-html-output'),
       summary: '$lineCount lines · ${html.length} chars',
@@ -289,10 +383,9 @@ final class _StudioInspectorPaneState extends State<StudioInspectorPane> {
     MarkdownDocument doc,
     ColorScheme scheme,
   ) {
-    final String plainText = doc.toPlainText();
-    final int wordCount = plainText.trim().isEmpty
-        ? 0
-        : plainText.trim().split(RegExp(r'\s+')).length;
+    final ({String plainText, int wordCount}) cached = _memoizedPlainText(doc);
+    final String plainText = cached.plainText;
+    final int wordCount = cached.wordCount;
     return _CodeExportPane(
       paneKey: const Key('studio-plaintext-output'),
       summary: '$wordCount words · ${plainText.length} chars',
@@ -888,7 +981,9 @@ String _describeInline(MarkdownInlineNode node) {
 }
 
 String _truncate(String input, int maxLength) {
-  final String singleLine = input.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final String singleLine = input
+      .replaceAll(_whitespaceCollapsePattern, ' ')
+      .trim();
   if (singleLine.length <= maxLength) {
     return singleLine;
   }

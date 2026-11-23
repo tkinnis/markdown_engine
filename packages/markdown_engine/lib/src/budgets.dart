@@ -12,13 +12,15 @@ final class MarkdownBudgets {
     this.maxTableRows = defaultMaxTableRows,
     this.maxHtmlBytes = defaultMaxHtmlBytes,
     this.maxTokens = defaultMaxTokens,
+    this.maxOutputBytes = defaultMaxOutputBytes,
   }) : assert(maxInputLength >= 0, 'maxInputLength must be non-negative'),
        assert(maxNestingDepth >= 0, 'maxNestingDepth must be non-negative'),
        assert(maxBlocks >= 0, 'maxBlocks must be non-negative'),
        assert(maxTableColumns >= 0, 'maxTableColumns must be non-negative'),
        assert(maxTableRows >= 0, 'maxTableRows must be non-negative'),
        assert(maxHtmlBytes >= 0, 'maxHtmlBytes must be non-negative'),
-       assert(maxTokens >= 0, 'maxTokens must be non-negative');
+       assert(maxTokens >= 0, 'maxTokens must be non-negative'),
+       assert(maxOutputBytes >= 0, 'maxOutputBytes must be non-negative');
 
   /// Default maximum input document length in UTF-16 code units (`500000`).
   static const int defaultMaxInputLength = 500000;
@@ -41,6 +43,9 @@ final class MarkdownBudgets {
   /// Default maximum inline token / delimiter budget (`500000`).
   static const int defaultMaxTokens = 500000;
 
+  /// Default maximum rendered output and reference expansion budget (`4194304`).
+  static const int defaultMaxOutputBytes = 4 * 1024 * 1024;
+
   /// Maximum accepted Markdown input length in UTF-16 code units.
   final int maxInputLength;
 
@@ -62,6 +67,9 @@ final class MarkdownBudgets {
   /// Maximum inline scanner/delimiter budget per document.
   final int maxTokens;
 
+  /// Maximum cumulative rendered HTML and reference expansion budget.
+  final int maxOutputBytes;
+
   /// Returns a copy of these budgets with the specified fields replaced.
   MarkdownBudgets copyWith({
     int? maxInputLength,
@@ -71,6 +79,7 @@ final class MarkdownBudgets {
     int? maxTableRows,
     int? maxHtmlBytes,
     int? maxTokens,
+    int? maxOutputBytes,
   }) {
     return MarkdownBudgets(
       maxInputLength: maxInputLength ?? this.maxInputLength,
@@ -80,6 +89,7 @@ final class MarkdownBudgets {
       maxTableRows: maxTableRows ?? this.maxTableRows,
       maxHtmlBytes: maxHtmlBytes ?? this.maxHtmlBytes,
       maxTokens: maxTokens ?? this.maxTokens,
+      maxOutputBytes: maxOutputBytes ?? this.maxOutputBytes,
     );
   }
 
@@ -93,7 +103,8 @@ final class MarkdownBudgets {
           maxTableColumns == other.maxTableColumns &&
           maxTableRows == other.maxTableRows &&
           maxHtmlBytes == other.maxHtmlBytes &&
-          maxTokens == other.maxTokens;
+          maxTokens == other.maxTokens &&
+          maxOutputBytes == other.maxOutputBytes;
 
   @override
   int get hashCode => Object.hash(
@@ -104,6 +115,7 @@ final class MarkdownBudgets {
     maxTableRows,
     maxHtmlBytes,
     maxTokens,
+    maxOutputBytes,
   );
 
   @override
@@ -115,5 +127,6 @@ final class MarkdownBudgets {
       'maxTableColumns: $maxTableColumns, '
       'maxTableRows: $maxTableRows, '
       'maxHtmlBytes: $maxHtmlBytes, '
-      'maxTokens: $maxTokens)';
+      'maxTokens: $maxTokens, '
+      'maxOutputBytes: $maxOutputBytes)';
 }
