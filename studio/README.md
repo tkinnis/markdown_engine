@@ -2,6 +2,8 @@
 
 **Markdown Studio** (`studio/`) is a macOS Flutter inspection and streaming workbench (`markdown_engine Studio`) for **`markdown_engine`** and **`markdown_engine_flutter`**.
 
+![markdown_engine Studio multi-pane workbench in Light mode](../doc/images/studio_workbench_light.png)
+
 ## Features
 
 * **Preset Sample Selector**: Switch across six built-in presets covering CommonMark/GFM, math, and virtualization stress tests:

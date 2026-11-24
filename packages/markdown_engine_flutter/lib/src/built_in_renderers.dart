@@ -85,8 +85,9 @@ abstract final class MarkdownBuiltInRenderers {
     BuiltInMermaidCache.instance.clear();
   }
 
-  /// Releases pending background rendering state and shuts down any active
-  /// persistent Mermaid worker isolate without altering cache size budgets or
+  /// Releases pending background rendering state and shuts down all active
+  /// primary and auxiliary burst Mermaid worker isolates without altering cache
+  /// size budgets, [maxMermaidConcurrentWorkers], or
   /// [usePersistentMermaidIsolate].
   static Future<void> dispose() => BuiltInMermaidCache.instance.dispose();
 

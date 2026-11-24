@@ -55,7 +55,7 @@ Run dry-run publishing validation for both publishable packages:
 (cd packages/markdown_engine_flutter && flutter pub publish --dry-run)
 ```
 
-Confirm both packages pass with zero errors or warnings across package metadata, `.pubignore` exclusions, examples, and license files. On PRs and release tags, `.github/workflows/ci.yml` enforces both dry-run publish checks alongside `dart doc --dry-run`.
+Confirm both packages pass with zero errors or warnings across package metadata, `.pubignore` exclusions, examples, and license files. On package PRs and release tags, `.github/workflows/ci.yml` enforces the matching dry-run publish and `dart doc --dry-run` checks.
 
 ---
 

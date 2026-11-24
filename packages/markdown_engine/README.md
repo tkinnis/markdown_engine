@@ -53,6 +53,14 @@ Pure-Dart **CommonMark 0.31.2** and **GFM** with ==highlight==, H~2~O, x^2^, and
 * **Incremental & Streaming Engines**: `IncrementalMarkdownParser` reuses unchanged blocks in live editors, while `StreamingMarkdownController` freezes settled prefix blocks across token feeds.
 * **Defense-in-Depth Hardening**: Guards untrusted inputs with `MarkdownUrlPolicy.strict()`, GFM `tagfilter`, a linear-time HTML5 sanitizer, and deterministic `MarkdownBudgets` limits.
 
+## Pipeline Overview
+
+The pure-Dart engine parses Markdown source through two synchronous phases into an immutable `MarkdownDocument` before exporting HTML, plain text, or JSON:
+
+| Light Overview | Dark Overview |
+| :---: | :---: |
+| ![Light-mode pure-Dart parsing pipeline from Markdown source to sealed AST and HTML output](screenshots/showcase_light.png) | ![Dark-mode pure-Dart parsing pipeline from Markdown source to sealed AST and HTML output](screenshots/showcase_dark.png) |
+
 ## Incremental Editing & Streaming
 
 ### Incremental Block Reuse (`IncrementalMarkdownParser`)

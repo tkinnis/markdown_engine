@@ -49,6 +49,8 @@ flowchart LR
 * **Delimiter Stack & Entities**: Resolves emphasis, strikethrough, highlight, subscript, and superscript delimiters via CommonMark flanking rules backed by `unicode.dart`, alongside HTML5 named/numeric entities (`entities.dart`), links, images, CommonMark/GFM autolinks, inline math, inline HTML elements, emoji shortcodes, and smart punctuation.
 * **Footnotes, Slugs & Lazy Document State**: Queues footnote citations (`[^label]`) iteratively in first-reference order (preventing cyclic recursion) to append `FootnoteSectionNode`, computes deduplicated slugs via `HeadingSlugGenerator` (`slugs.dart`), and defers `source`, `outline`, and `remoteImageAddresses` on `MarkdownDocument` via `_DocumentLazyState` until accessed.
 
+![Pure-Dart two-phase pipeline from Markdown source to sealed AST and HTML output](../packages/markdown_engine/screenshots/showcase_light.png)
+
 ---
 
 ## 3. Immutable Sealed AST Hierarchy
@@ -169,7 +171,7 @@ flowchart LR
 
 ### 6.2 Layer 2 — Theme Tokens & Reactive Adapter Derivation
 
-* **Widgets-First Footprint**: Built on `package:flutter/widgets.dart` with scoped `package:flutter/material.dart` `show` imports (`SelectionArea`, `Tooltip`, `ColorScheme`, `Theme`, `ThemeData`) targeting Flutter `>=3.47.0` and Dart `^3.13.0`.
+* **Widgets-First Footprint**: Built on `package:flutter/widgets.dart` with scoped `package:flutter/material.dart` `show` imports (`ColorScheme`, `MaterialLocalizations`, `SelectionArea`, `Theme`, `ThemeData`, `Tooltip`) targeting Flutter `>=3.47.0` and Dart `^3.13.0`.
 * **Hoisted Render Environment**: `MarkdownRenderEnvironment` resolves ambient text scale, directionality, selection registrar, selection color, locale, `boldText`, and overlay presence once per view/sliver instead of per block.
 * **Reactive Math & Mermaid Derivation**: `deriveTexMathThemeData` and `deriveMermaidTheme` (`pele.PelePalette`) map `MarkdownThemeData` colors dynamically so Light/Dark theme switches repaint math and re-palette Mermaid without re-parsing source text or re-running TeX layout.
 
@@ -188,6 +190,8 @@ flowchart LR
 | **Built-In Mermaid & Worker Pool** | `built_in_mermaid.dart`, `built_in_mermaid_worker.dart` (`_io` / `_stub`) | `BuiltInMermaidCache` caches compiled `vector_graphics` payloads under a 128-entry / 16 MiB LRU budget; `PersistentMermaidWorker` keeps 1 pre-warmed primary `Isolate` and lazily scales up to `maxMermaidConcurrentWorkers` burst isolates (15s idle teardown, web `compute()` fallback). |
 | **Native HTML Block & Table Renderer** | `html_block_renderer.dart`, `inline_renderer.dart`, `block_renderer.dart` | `parseHtmlBlockFragment` tokenizes HTML fragments in linear time into native AST blocks (tables with captions/headers/footers/colspan, description lists, `<details>`, `<figure>`, aligned blocks, headings, lists, and block-wrapping anchors) within bounds, while `inline_renderer.dart` renders inline HTML formatting, `<picture>`, and `<img>`. |
 | **Image & Link Security** | `delegates.dart`, `inline_renderer.dart`, `block_renderer.dart` | Enforces `MarkdownUrlPolicy` on interactive taps and `<picture>`/`<img>` sources, gates remote images via `MarkdownImagePolicy`, caches decoded data-URI images, and disposes gesture recognizers post-frame. |
+
+![Native Flutter rendering of HTML tables, description lists, inline typography, and collapsible disclosures](../packages/markdown_engine_flutter/screenshots/html_and_disclosures.png)
 
 ---
 

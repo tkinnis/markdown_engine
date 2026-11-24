@@ -58,9 +58,8 @@ Widget buildMarkdownSample(BuildContext context, MarkdownController controller) 
       delegates: MarkdownBuilderDelegates(
         imagePolicy: MarkdownImagePolicy.ask,
         onTapLink: (String destination, String? title) {
-          if (destination.startsWith('#')) {
-            controller.scrollToAnchor(destination.substring(1));
-          }
+          // `#anchor` fragments auto-scroll when controller is attached;
+          // handle relative documents or custom destinations here.
         },
         onOpenWebLink: (Uri uri) {
           // Open validated http/https URIs externally.
@@ -76,6 +75,18 @@ Choose the right entry point for your workload:
 * **Inline source**: `MarkdownView(source)` parses once in widget state and applies incremental block diffing automatically on subsequent edits.
 * **Pre-parsed or large files**: Pair `MarkdownView.document` with `MarkdownDocumentReader` to parse inputs of `4096` or more UTF-16 code units in a background isolate.
 * **Live streams**: Bind `MarkdownView.streaming` to a `StreamingMarkdownController` for zero-poll push updates, and pass an optional `focusNode` for keyboard Select-All (`Cmd+A`) and Copy across slivers.
+
+## Visual Showcase
+
+`markdown_engine_flutter` renders GitHub alerts, OpenType TeX math, vector Mermaid diagrams, task lists, tables, and HTML blocks directly into virtualized slivers across Light and Dark themes:
+
+| Light Theme (`MarkdownThemeData.light()`) | Dark Theme (`MarkdownThemeData.dark()`) |
+| :---: | :---: |
+| ![Light-theme MarkdownView showcase with OpenType TeX math, vector Mermaid diagram, GitHub alerts, task list, and tables](packages/markdown_engine_flutter/screenshots/showcase_light.png) | ![Dark-theme MarkdownView showcase with OpenType TeX math, vector Mermaid diagram, GitHub alerts, task list, and tables](packages/markdown_engine_flutter/screenshots/showcase_dark.png) |
+
+Native HTML tables with captions and `<kbd>` badges, description lists (`<dl>`), and interactive `<details>` disclosures render directly as Flutter widgets:
+
+![Native HTML table, description list, inline typography, and collapsible details disclosures](packages/markdown_engine_flutter/screenshots/html_and_disclosures.png)
 
 ## Incremental Editing & Streaming Feeds
 
@@ -179,6 +190,12 @@ Native Dart AOT measurements on Apple M4 (arm64, macOS 15.6, Dart 3.13.5) under 
 | **Markdown Studio** | [`studio/`](studio/README.md) | `markdown_engine Studio` macOS desktop inspection and streaming workbench (`>=3.47.0`, Dart `^3.13.0`). |
 | **Verification Corpus** | [`corpus/`](corpus/README.md) | Vendored CommonMark `0.31.2` (`652` examples) and GFM `0.29.0.gfm.13` (`672` + `30` examples) fixtures plus extension, security, and streaming suites. |
 | **Reference & Coverage** | [`REFERENCE.md`](REFERENCE.md) · [`doc/COVERAGE.md`](doc/COVERAGE.md) | Pinned upstream specifications, SHA-256 integrity hashes, and live spec compliance reports. |
+
+## Markdown Studio
+
+`markdown_engine Studio` (`studio/`) is a multi-pane macOS desktop workbench combining a live editor, streaming simulator, interactive heading outline, virtualized preview, link policy auditor, and AST/HTML/plain-text inspector; see the [Studio Guide](doc/STUDIO_GUIDE.md) for setup and workflows.
+
+![markdown_engine Studio multi-pane desktop workbench in Light mode](doc/images/studio_workbench_light.png)
 
 ## Documentation
 

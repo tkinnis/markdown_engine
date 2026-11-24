@@ -409,12 +409,16 @@ All three `MarkdownView` constructors accept the shared configuration parameters
 | `MarkdownAlertPalette` | `const MarkdownAlertPalette({required note, required tip, required important, required warning, required caution})`, `.light()`, `.dark()`, `forKind(AlertKind)`, `copyWith(...)`, `lerp(a, b, t)` | Color palette mapping all five GitHub `AlertKind` severities (`note`, `tip`, `important`, `warning`, `caution`). |
 | `MarkdownAlertColors` | `const MarkdownAlertColors({required border, required background, required foreground})`, `copyWith(...)`, `lerp(a, b, t)` | Border, background tint, and icon/title foreground triple for a single GitHub alert level. |
 
+| Light Theme (`MarkdownThemeData.light()`) | Dark Theme (`MarkdownThemeData.dark()`) |
+| :---: | :---: |
+| ![Light-theme MarkdownView showcase rendered with MarkdownThemeData.light()](../packages/markdown_engine_flutter/screenshots/showcase_light.png) | ![Dark-theme MarkdownView showcase rendered with MarkdownThemeData.dark()](../packages/markdown_engine_flutter/screenshots/showcase_dark.png) |
+
 ### 7.3 Navigation, Reading Position, and Background Isolate Reader
 
 | Symbol | Constructors / Key Members | Behavior |
 | :--- | :--- | :--- |
 | `MarkdownController` (state) | `MarkdownController({MarkdownDocument? initialDocument})`, `document`, `outline`, `parseCount`, `readingPlace`, `readingPlaceNotifier`, `showFrontmatter`, `scrollController` | `ChangeNotifier` tracking parsed document state, heading outline, parse telemetry, and isolated `readingPlaceNotifier` scroll updates. |
-| `MarkdownController` (navigation) | `scrollToAnchor(slug, ...)`, `scrollToLine(line, ...)`, `jumpToPlace(place, ...)` | Animated or instant jumps to headings, `<a id>` anchors, or source lines. |
+| `MarkdownController` (navigation) | `scrollToAnchor(slug, ...)`, `scrollToLine(line, ...)`, `jumpToPlace(place, ...)` | Animated or instant jumps to headings, `<a id>` or footnote anchors, or source lines. |
 | `MarkdownController` (lifecycle) | `attachScrollController(..., {owner, showFrontmatter})`, `detachScrollController(..., {owner})`, `updateDocument(...)`, `registerAnchor`/`unregisterAnchor`, `registerBlock`/`unregisterBlock` | Coordinates owner-scoped scroll listeners and mounted anchor/block tracking. |
 | `MarkdownReadingPlace` | `const MarkdownReadingPlace({required int blockIndex, String? blockId, double offsetFraction = 0.0})`, `MarkdownReadingPlace.start`, `copyWith(...)` | Immutable reading position recording active top-level block index, stable `blockId`, and normalized `0.0..1.0` scroll progress. |
 | `MarkdownDocumentReader` (lifecycle) | `MarkdownDocumentReader({engine, syncThreshold = defaultSyncThreshold, initialDocument})`, `defaultSyncThreshold` (4096), `update(source, {options})`, `clear()`, `dispose()` | `ValueListenable<MarkdownDocument>` parsing short strings synchronously and offloading larger documents to `Isolate.run` with latest-wins coalescing. |
@@ -479,9 +483,8 @@ Widget buildIntegratedMarkdownView(
       delegates: MarkdownBuilderDelegates(
         imagePolicy: MarkdownImagePolicy.ask,
         onTapLink: (String destination, String? title) {
-          if (destination.startsWith('#')) {
-            controller.scrollToAnchor(destination.substring(1));
-          }
+          // `#anchor` fragments auto-scroll automatically (`autoScrollToAnchors: true`);
+          // handle relative documents or custom destinations here.
         },
         onOpenWebLink: (Uri uri) {
           // Open validated http/https links externally.

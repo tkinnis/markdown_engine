@@ -56,6 +56,18 @@ Use `MarkdownView.document(document: preParsed)` to display a pre-parsed `Markdo
 * **Defense-in-Depth Security**: Enforces `MarkdownUrlPolicy` on interactive links and gates remote images via `MarkdownImagePolicy`.
 * **Rich Native Widgets**: Renders headings with anchor navigation, GFM tables, task lists, GitHub alerts, frontmatter cards, disclosures, figures, definition lists, footnotes, and HTML blocks natively.
 
+## Rendered Showcase
+
+All rendered blocks adapt automatically across `MarkdownThemeData.light()` and `MarkdownThemeData.dark()` without re-parsing the source document:
+
+| Light Theme (`MarkdownThemeData.light()`) | Dark Theme (`MarkdownThemeData.dark()`) |
+| :---: | :---: |
+| ![Light-theme MarkdownView rendering headings, alerts, task lists, tables, TeX math, Mermaid diagrams, and HTML keycaps](screenshots/showcase_light.png) | ![Dark-theme MarkdownView rendering headings, alerts, task lists, tables, TeX math, Mermaid diagrams, and HTML keycaps](screenshots/showcase_dark.png) |
+
+HTML tables, aligned columns, `<kbd>` badges, description lists (`<dl>`), and interactive `<details>` disclosures map to native Flutter widgets:
+
+![Native HTML table with keycaps, description lists, expanded details disclosures, and inline HTML typography](screenshots/html_and_disclosures.png)
+
 ## Built-In Math & Mermaid
 
 `markdown_engine_flutter` renders inline and display LaTeX formulas alongside fenced Mermaid code blocks automatically. Pre-warm the font and diagram registry with `MarkdownBuiltInRenderers.warmUp()`, toggle `enableBuiltInMath` or `enableBuiltInMermaid`, or supply a custom `diagramBuilder`:
@@ -119,7 +131,9 @@ Offload large Markdown files (4096 or more UTF-16 code units by default) onto a 
 ```dart
 final MarkdownDocumentReader reader = MarkdownDocumentReader();
 
-await reader.update(largeMarkdownText);
+Future<void> loadMarkdown(String largeMarkdownText) async {
+  await reader.update(largeMarkdownText);
+}
 
 Widget buildLoadedDocument() {
   return ListenableBuilder(

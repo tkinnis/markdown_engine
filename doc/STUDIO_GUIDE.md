@@ -27,6 +27,8 @@ flowchart LR
 | `studio/lib/studio_inspector.dart` | Implements `StudioInspectorPane` with tabs for an expandable AST and `SourceSpan` tree, memoized `toHtml()`, and memoized `toPlainText()` with copy actions. |
 | `studio/lib/profile_benchmark_main.dart` | Headless macOS `--profile` `FrameTiming` benchmark measuring 500-section scrolling and 60Hz streaming via `tool/run_macos_profile_benchmark.dart`. |
 
+![markdown_engine Studio multi-pane workbench in Light mode](images/studio_workbench_light.png)
+
 ### CLI Launch Flags
 
 `MarkdownStudioApp.fromArgs` accepts optional command-line launch flags when running `studio`:
@@ -58,6 +60,8 @@ flowchart LR
 * **LLM Streaming Simulator**: Toggle **Streaming Mode** to step or play chunks (`20..400 ms/chunk`) through `MarkdownView.streaming`, observing `settledBlockCount` grow while per-chunk latency stays low.
 * **Math, Mermaid, Images & Link Audit**: Preview native OpenType math and Mermaid diagrams alongside `MarkdownImagePolicy.ask` consent controls, live allowed/blocked link counts, and link-tap snackbars.
 * **AST, HTML & Plain-Text Inspector**: Inspect the expandable AST with exact `blockId` and `SourceSpan` line/offset ranges, raw `document.toHtml()` output, and `document.toPlainText()` previews.
+
+![markdown_engine Studio in Dark mode with LLM Streaming Simulator active](images/studio_streaming_dark.png)
 
 ---
 
