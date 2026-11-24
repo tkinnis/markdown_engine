@@ -9,6 +9,7 @@ import 'built_in_mermaid.dart';
 import 'controller.dart';
 import 'delegates.dart';
 import 'fast_text.dart';
+import 'html_block_renderer.dart';
 import 'inline_renderer.dart';
 import 'theme.dart';
 
@@ -1457,13 +1458,14 @@ Widget _buildTable(
   }
 
   final List<TableRow> tableRows = <TableRow>[
-    TableRow(
-      decoration: BoxDecoration(color: theme.effectiveTableHeaderBackground),
-      children: <Widget>[
-        for (int col = 0; col < columnCount; col++)
-          buildCell(cellAt(headers, col), col, isHeader: true),
-      ],
-    ),
+    if (headers.isNotEmpty)
+      TableRow(
+        decoration: BoxDecoration(color: theme.effectiveTableHeaderBackground),
+        children: <Widget>[
+          for (int col = 0; col < columnCount; col++)
+            buildCell(cellAt(headers, col), col, isHeader: true),
+        ],
+      ),
     for (int r = 0; r < rows.length; r++)
       TableRow(
         decoration: r.isOdd
@@ -1908,12 +1910,47 @@ Widget _buildFootnoteDefinition(
   );
 }
 
-final RegExp _dangerousHtmlBlockPattern = RegExp(
-  r'<\s*(?:script|style|iframe|object|embed|applet|svg|math|form|textarea|title|xmp)\b',
-  caseSensitive: false,
-);
-final RegExp _htmlCommentPattern = RegExp(r'<!--[\s\S]*?-->');
-final RegExp _htmlTagStripPattern = RegExp(r'<[^>]+>');
+Widget _buildHtmlBlockEntry(
+  BuildContext context,
+  HtmlBlockEntry entry,
+  MarkdownBlockRenderContext renderContext,
+) {
+  final Widget blockWidget = buildMarkdownBlockWidget(
+    context,
+    entry.block,
+    renderContext,
+  );
+  final List<MarkdownInlineNode>? caption = entry.tableCaption;
+  if (entry.block is TableNode && caption != null && caption.isNotEmpty) {
+    final MarkdownThemeData theme = renderContext.theme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6.0),
+          child: buildFastOrRichInlineText(
+            context,
+            nodes: caption,
+            baseStyle: theme
+                .bodyTextStyle(color: theme.muted)
+                .copyWith(fontSize: theme.fontSize * 0.9),
+            theme: theme,
+            delegates: renderContext.delegates,
+            urlPolicy: renderContext.urlPolicy,
+            controller: renderContext.controller,
+            textAlign: TextAlign.center,
+            remoteImagesApproved: renderContext.remoteImagesApproved,
+            onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+            environment: renderContext.environment,
+          ),
+        ),
+        blockWidget,
+      ],
+    );
+  }
+  return blockWidget;
+}
 
 Widget _buildHtmlBlockFallback(
   BuildContext context,
@@ -1922,140 +1959,44 @@ Widget _buildHtmlBlockFallback(
 ) {
   final MarkdownThemeData theme = renderContext.theme;
   final String trimmed = node.literal.trim();
-  if (trimmed.isEmpty || _dangerousHtmlBlockPattern.hasMatch(trimmed)) {
+  if (trimmed.isEmpty) {
     return const SizedBox.shrink();
   }
-  final String withoutComments = trimmed
-      .replaceAll(_htmlCommentPattern, '')
-      .trim();
-  if (withoutComments.isEmpty) {
-    return const SizedBox.shrink();
-  }
-  final ImageNode? htmlImg = tryParseHtmlImageTag(withoutComments);
-  if (htmlImg != null) {
-    return Align(
-      alignment: _alignmentForTextAlign(renderContext.textAlign),
-      child: buildMarkdownImageWidget(
-        context: context,
-        node: htmlImg,
-        theme: theme,
-        delegates: renderContext.delegates,
-        urlPolicy: renderContext.urlPolicy,
-        remoteImagesApproved: renderContext.remoteImagesApproved,
-        onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
-      ),
+  final List<HtmlBlockEntry> entries = parseHtmlBlockFragment(
+    trimmed,
+    parentBlockId: node.blockId,
+    urlPolicy: renderContext.urlPolicy,
+  );
+  if (entries.isNotEmpty) {
+    if (entries.length == 1) {
+      return _buildHtmlBlockEntry(context, entries.first, renderContext);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (int i = 0; i < entries.length; i++)
+          i < entries.length - 1
+              ? Padding(
+                  padding: EdgeInsets.only(bottom: theme.blockSpacing),
+                  child: _buildHtmlBlockEntry(
+                    context,
+                    entries[i],
+                    renderContext,
+                  ),
+                )
+              : _buildHtmlBlockEntry(context, entries[i], renderContext),
+      ],
     );
   }
-  final String stripped = withoutComments
-      .replaceAll(_htmlTagStripPattern, '')
-      .trim();
-  if (stripped.isEmpty) {
+  final String plain = extractSafeHtmlPlainText(trimmed);
+  if (plain.isEmpty) {
     return const SizedBox.shrink();
   }
-  final String decoded = _decodeHtmlEntities(stripped);
   return MarkdownRichText(
-    decoded,
+    plain,
     style: theme.bodyTextStyle(color: theme.muted),
   );
-}
-
-const Map<String, String> _namedHtmlEntities = <String, String>{
-  'amp': '&',
-  'lt': '<',
-  'gt': '>',
-  'quot': '"',
-  'apos': '\'',
-  'nbsp': '\u00A0',
-  'ndash': '\u2013',
-  'mdash': '\u2014',
-  'hellip': '\u2026',
-  'lsquo': '\u2018',
-  'rsquo': '\u2019',
-  'ldquo': '\u201C',
-  'rdquo': '\u201D',
-  'laquo': '\u00AB',
-  'raquo': '\u00BB',
-  'copy': '\u00A9',
-  'reg': '\u00AE',
-  'trade': '\u2122',
-  'times': '\u00D7',
-  'divide': '\u00F7',
-  'plusmn': '\u00B1',
-  'minus': '\u2212',
-  'bull': '\u2022',
-  'middot': '\u00B7',
-  'deg': '\u00B0',
-  'sect': '\u00A7',
-  'para': '\u00B6',
-  'larr': '\u2190',
-  'uarr': '\u2191',
-  'rarr': '\u2192',
-  'darr': '\u2193',
-  'harr': '\u2194',
-  'le': '\u2264',
-  'ge': '\u2265',
-  'ne': '\u2260',
-  'asymp': '\u2248',
-  'infin': '\u221E',
-};
-
-String _decodeHtmlEntities(String input) {
-  if (!input.contains('&')) {
-    return input;
-  }
-  StringBuffer? out;
-  int last = 0;
-  int i = 0;
-  final int len = input.length;
-  while (i < len) {
-    if (input.codeUnitAt(i) != 0x26) {
-      i++;
-      continue;
-    }
-    final int semi = input.indexOf(';', i + 1);
-    if (semi == -1 || semi - i > 16) {
-      i++;
-      continue;
-    }
-    final String body = input.substring(i + 1, semi);
-    String? replacement;
-    if (body.startsWith('#')) {
-      final int? cp;
-      if (body.length > 2 && (body[1] == 'x' || body[1] == 'X')) {
-        cp = int.tryParse(body.substring(2), radix: 16);
-      } else if (body.length > 1) {
-        cp = int.tryParse(body.substring(1), radix: 10);
-      } else {
-        cp = null;
-      }
-      if (cp != null) {
-        final bool valid =
-            cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF);
-        replacement = valid ? String.fromCharCode(cp) : '\uFFFD';
-      }
-    } else {
-      replacement =
-          _namedHtmlEntities[body] ?? _namedHtmlEntities[body.toLowerCase()];
-    }
-    if (replacement != null) {
-      out ??= StringBuffer();
-      if (i > last) {
-        out.write(input.substring(last, i));
-      }
-      out.write(replacement);
-      i = semi + 1;
-      last = i;
-    } else {
-      i++;
-    }
-  }
-  if (out == null) {
-    return input;
-  }
-  if (last < len) {
-    out.write(input.substring(last));
-  }
-  return out.toString();
 }
 
 TextAlign _textAlignForTableAlignment(TableAlignment alignment) {

@@ -14,6 +14,7 @@ import 'built_in_math.dart';
 import 'controller.dart';
 import 'delegates.dart';
 import 'fast_text.dart';
+import 'html_block_renderer.dart' show decodeHtmlEntities;
 import 'theme.dart';
 
 /// Package-internal keyboard- and pointer-accessible interactive wrapper used
@@ -606,7 +607,18 @@ final class _InlineBuildAccumulator {
   bool hasWidgetSpan = false;
 }
 
-enum _InlineHtmlStyleTag { underline, small, quote, code }
+enum _InlineHtmlStyleTag {
+  underline,
+  strikethrough,
+  strong,
+  emphasis,
+  small,
+  quote,
+  code,
+  samp,
+  variable,
+  highlight,
+}
 
 final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
   static const Map<ShortcutActivator, Intent> _linkActivateShortcuts =
@@ -787,6 +799,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     BuildContext context,
     List<MarkdownInlineNode> nodes,
     TextStyle style, {
+    int start = 0,
+    int? end,
+    Map<int, int>? rawPairCloseByOpen,
+    int inlineHtmlDepth = 0,
     required TapGestureRecognizer? linkRecognizer,
     required VoidCallback? onLinkTap,
     required bool isLink,
@@ -795,7 +811,8 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required List<_TrackedRecognizer> nextRecognizers,
     required _InlineBuildAccumulator acc,
   }) {
-    if (nodes.isEmpty) {
+    final int limit = end ?? nodes.length;
+    if (start >= limit) {
       return const <InlineSpan>[];
     }
     final List<InlineSpan> result = <InlineSpan>[];
@@ -804,7 +821,8 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         ? SystemMouseCursors.click
         : null;
 
-    for (final MarkdownInlineNode node in nodes) {
+    for (int i = start; i < limit; i++) {
+      final MarkdownInlineNode node = nodes[i];
       final TextStyle activeStyle = tagStack.isEmpty
           ? style
           : _applyHtmlTagStackStyle(style, tagStack, isLink: isLink);
@@ -815,6 +833,18 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             tagStack.add(_InlineHtmlStyleTag.underline);
           case _RawHtmlDirectiveKind.closeUnderline:
             _popTag(tagStack, _InlineHtmlStyleTag.underline);
+          case _RawHtmlDirectiveKind.openStrikethrough:
+            tagStack.add(_InlineHtmlStyleTag.strikethrough);
+          case _RawHtmlDirectiveKind.closeStrikethrough:
+            _popTag(tagStack, _InlineHtmlStyleTag.strikethrough);
+          case _RawHtmlDirectiveKind.openStrong:
+            tagStack.add(_InlineHtmlStyleTag.strong);
+          case _RawHtmlDirectiveKind.closeStrong:
+            _popTag(tagStack, _InlineHtmlStyleTag.strong);
+          case _RawHtmlDirectiveKind.openEmphasis:
+            tagStack.add(_InlineHtmlStyleTag.emphasis);
+          case _RawHtmlDirectiveKind.closeEmphasis:
+            _popTag(tagStack, _InlineHtmlStyleTag.emphasis);
           case _RawHtmlDirectiveKind.openSmall:
             tagStack.add(_InlineHtmlStyleTag.small);
           case _RawHtmlDirectiveKind.closeSmall:
@@ -844,8 +874,118 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             tagStack.add(_InlineHtmlStyleTag.code);
           case _RawHtmlDirectiveKind.closeCode:
             _popTag(tagStack, _InlineHtmlStyleTag.code);
+          case _RawHtmlDirectiveKind.openSamp:
+            tagStack.add(_InlineHtmlStyleTag.samp);
+          case _RawHtmlDirectiveKind.closeSamp:
+            _popTag(tagStack, _InlineHtmlStyleTag.samp);
+          case _RawHtmlDirectiveKind.openVar:
+            tagStack.add(_InlineHtmlStyleTag.variable);
+          case _RawHtmlDirectiveKind.closeVar:
+            _popTag(tagStack, _InlineHtmlStyleTag.variable);
+          case _RawHtmlDirectiveKind.openHighlight:
+            tagStack.add(_InlineHtmlStyleTag.highlight);
+          case _RawHtmlDirectiveKind.closeHighlight:
+            _popTag(tagStack, _InlineHtmlStyleTag.highlight);
+          case _RawHtmlDirectiveKind.openSubscript:
+          case _RawHtmlDirectiveKind.openSuperscript:
+            if (inlineHtmlDepth >= _maxInlineHtmlDepth) {
+              break;
+            }
+            rawPairCloseByOpen ??= _computeRawHtmlPairCloses(
+              nodes,
+              start,
+              limit,
+            );
+            final int? closeIndex = rawPairCloseByOpen[i];
+            if (closeIndex != null && closeIndex < limit) {
+              if (i + 1 < closeIndex) {
+                final bool isSuperscript =
+                    directive.kind == _RawHtmlDirectiveKind.openSuperscript;
+                result.add(
+                  _buildScriptSpan(
+                    context,
+                    nodes,
+                    activeStyle,
+                    start: i + 1,
+                    end: closeIndex,
+                    rawPairCloseByOpen: rawPairCloseByOpen,
+                    inlineHtmlDepth: inlineHtmlDepth,
+                    isSuperscript: isSuperscript,
+                    linkRecognizer: linkRecognizer,
+                    onLinkTap: onLinkTap,
+                    isLink: isLink,
+                    linkUrl: linkUrl,
+                    recognizerPool: recognizerPool,
+                    nextRecognizers: nextRecognizers,
+                    acc: acc,
+                  ),
+                );
+              }
+              i = closeIndex;
+            }
+          case _RawHtmlDirectiveKind.closeSubscript:
+          case _RawHtmlDirectiveKind.closeSuperscript:
+            break;
+          case _RawHtmlDirectiveKind.openAbbr:
+            if (inlineHtmlDepth >= _maxInlineHtmlDepth) {
+              break;
+            }
+            rawPairCloseByOpen ??= _computeRawHtmlPairCloses(
+              nodes,
+              start,
+              limit,
+            );
+            final int? closeIndex = rawPairCloseByOpen[i];
+            if (closeIndex != null && closeIndex < limit) {
+              if (i + 1 < closeIndex) {
+                final String? title = directive.value;
+                if (title != null && title.isNotEmpty) {
+                  result.add(
+                    _buildAbbrSpan(
+                      context,
+                      nodes,
+                      activeStyle,
+                      title: title,
+                      start: i + 1,
+                      end: closeIndex,
+                      rawPairCloseByOpen: rawPairCloseByOpen,
+                      inlineHtmlDepth: inlineHtmlDepth,
+                      linkRecognizer: linkRecognizer,
+                      onLinkTap: onLinkTap,
+                      isLink: isLink,
+                      linkUrl: linkUrl,
+                      recognizerPool: recognizerPool,
+                      nextRecognizers: nextRecognizers,
+                      acc: acc,
+                    ),
+                  );
+                } else {
+                  result.addAll(
+                    _buildInlines(
+                      context,
+                      nodes,
+                      activeStyle,
+                      start: i + 1,
+                      end: closeIndex,
+                      rawPairCloseByOpen: rawPairCloseByOpen,
+                      inlineHtmlDepth: inlineHtmlDepth + 1,
+                      linkRecognizer: linkRecognizer,
+                      onLinkTap: onLinkTap,
+                      isLink: isLink,
+                      linkUrl: linkUrl,
+                      recognizerPool: recognizerPool,
+                      nextRecognizers: nextRecognizers,
+                      acc: acc,
+                    ),
+                  );
+                }
+              }
+              i = closeIndex;
+            }
+          case _RawHtmlDirectiveKind.closeAbbr:
+            break;
           case _RawHtmlDirectiveKind.anchor:
-            final String? anchorId = directive.anchorId;
+            final String? anchorId = directive.value;
             if (anchorId != null && anchorId.isNotEmpty) {
               acc.hasWidgetSpan = true;
               result.add(
@@ -872,6 +1012,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           context,
           node,
           activeStyle,
+          inlineHtmlDepth: inlineHtmlDepth,
           linkRecognizer: linkRecognizer,
           onLinkTap: onLinkTap,
           isLink: isLink,
@@ -900,12 +1041,25 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
               TextDecoration.underline,
             ),
           );
+        case _InlineHtmlStyleTag.strikethrough:
+          current = current.copyWith(
+            decoration: _combineDecoration(
+              current.decoration,
+              TextDecoration.lineThrough,
+            ),
+          );
+        case _InlineHtmlStyleTag.strong:
+          current = current.copyWith(fontWeight: FontWeight.w700);
+        case _InlineHtmlStyleTag.emphasis:
+        case _InlineHtmlStyleTag.variable:
+          current = current.copyWith(fontStyle: FontStyle.italic);
         case _InlineHtmlStyleTag.small:
           final double baseSize = current.fontSize ?? widget.theme.fontSize;
           current = current.copyWith(fontSize: baseSize * 0.85);
         case _InlineHtmlStyleTag.quote:
           break;
         case _InlineHtmlStyleTag.code:
+        case _InlineHtmlStyleTag.samp:
           final double baseSize = current.fontSize ?? widget.theme.fontSize;
           current = current.copyWith(
             fontFamily: widget.theme.effectiveCodeFontFamily,
@@ -915,6 +1069,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
                 ? current.color
                 : widget.theme.effectiveCodeForeground,
             backgroundColor: widget.theme.codeBackground,
+          );
+        case _InlineHtmlStyleTag.highlight:
+          current = current.copyWith(
+            backgroundColor: widget.theme.highlightFill,
           );
       }
     }
@@ -938,6 +1096,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     BuildContext context,
     MarkdownInlineNode node,
     TextStyle style, {
+    int inlineHtmlDepth = 0,
     required TapGestureRecognizer? linkRecognizer,
     required VoidCallback? onLinkTap,
     required bool isLink,
@@ -995,6 +1154,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             context,
             node.children,
             emStyle,
+            inlineHtmlDepth: inlineHtmlDepth,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
             isLink: isLink,
@@ -1014,6 +1174,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             context,
             node.children,
             strongStyle,
+            inlineHtmlDepth: inlineHtmlDepth,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
             isLink: isLink,
@@ -1036,6 +1197,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             context,
             node.children,
             strikeStyle,
+            inlineHtmlDepth: inlineHtmlDepth,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
             isLink: isLink,
@@ -1055,6 +1217,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             context,
             node.children,
             highlightStyle,
+            inlineHtmlDepth: inlineHtmlDepth,
             linkRecognizer: linkRecognizer,
             onLinkTap: onLinkTap,
             isLink: isLink,
@@ -1065,12 +1228,13 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           ),
         );
       case SubscriptNode():
-        acc.hasWidgetSpan = true;
         return _buildScriptSpan(
           context,
           node.children,
           style,
+          inlineHtmlDepth: inlineHtmlDepth,
           isSuperscript: false,
+          linkRecognizer: linkRecognizer,
           onLinkTap: onLinkTap,
           isLink: isLink,
           linkUrl: linkUrl,
@@ -1079,12 +1243,13 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           acc: acc,
         );
       case SuperscriptNode():
-        acc.hasWidgetSpan = true;
         return _buildScriptSpan(
           context,
           node.children,
           style,
+          inlineHtmlDepth: inlineHtmlDepth,
           isSuperscript: true,
+          linkRecognizer: linkRecognizer,
           onLinkTap: onLinkTap,
           isLink: isLink,
           linkUrl: linkUrl,
@@ -1097,6 +1262,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           context,
           node,
           style,
+          inlineHtmlDepth: inlineHtmlDepth,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
           acc: acc,
@@ -1239,6 +1405,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           context,
           node.children,
           kbdStyle,
+          inlineHtmlDepth: inlineHtmlDepth,
           linkRecognizer: null,
           onLinkTap: null,
           isLink: false,
@@ -1278,52 +1445,19 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           ),
         );
       case AbbrInlineNode():
-        acc.hasWidgetSpan = true;
-        final TextStyle abbrStyle = style.copyWith(
-          decoration: _combineDecoration(
-            style.decoration,
-            TextDecoration.underline,
-          ),
-          decorationStyle: TextDecorationStyle.dotted,
-          decorationColor: theme.muted,
-        );
-        final List<InlineSpan> abbrChildren = _buildInlines(
+        return _buildAbbrSpan(
           context,
           node.children,
-          abbrStyle,
-          linkRecognizer: null,
-          onLinkTap: null,
-          isLink: false,
-          linkUrl: null,
+          style,
+          title: node.title,
+          inlineHtmlDepth: inlineHtmlDepth,
+          linkRecognizer: linkRecognizer,
+          onLinkTap: onLinkTap,
+          isLink: isLink,
+          linkUrl: linkUrl,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
           acc: acc,
-        );
-        Widget labelWidget = MarkdownRichText.rich(
-          TextSpan(style: abbrStyle, children: abbrChildren),
-        );
-        if (acc.env.hasOverlay) {
-          labelWidget = Tooltip(
-            message: node.title,
-            excludeFromSemantics: true,
-            child: labelWidget,
-          );
-        }
-        final Widget semanticAbbr = Semantics(
-          label: node.toPlainText(),
-          tooltip: node.title,
-          excludeSemantics: true,
-          child: labelWidget,
-        );
-        return WidgetSpan(
-          alignment: PlaceholderAlignment.baseline,
-          baseline: TextBaseline.alphabetic,
-          child: _wrapWidgetWithLink(
-            semanticAbbr,
-            onLinkTap: onLinkTap,
-            isLink: isLink,
-            linkUrl: linkUrl,
-          ),
         );
       case AnchorInlineNode():
         acc.hasWidgetSpan = true;
@@ -1365,9 +1499,14 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
 
   InlineSpan _buildScriptSpan(
     BuildContext context,
-    List<MarkdownInlineNode> children,
+    List<MarkdownInlineNode> nodes,
     TextStyle style, {
+    int start = 0,
+    int? end,
+    Map<int, int>? rawPairCloseByOpen,
+    required int inlineHtmlDepth,
     required bool isSuperscript,
+    required TapGestureRecognizer? linkRecognizer,
     required VoidCallback? onLinkTap,
     required bool isLink,
     required Uri? linkUrl,
@@ -1375,6 +1514,28 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required List<_TrackedRecognizer> nextRecognizers,
     required _InlineBuildAccumulator acc,
   }) {
+    if (inlineHtmlDepth >= _maxInlineHtmlDepth) {
+      return TextSpan(
+        style: style,
+        children: _buildInlines(
+          context,
+          nodes,
+          style,
+          start: start,
+          end: end,
+          rawPairCloseByOpen: rawPairCloseByOpen,
+          inlineHtmlDepth: inlineHtmlDepth,
+          linkRecognizer: linkRecognizer,
+          onLinkTap: onLinkTap,
+          isLink: isLink,
+          linkUrl: linkUrl,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
+          acc: acc,
+        ),
+      );
+    }
+    acc.hasWidgetSpan = true;
     final double baseSize = style.fontSize ?? widget.theme.fontSize;
     final TextStyle scriptStyle = style.copyWith(
       fontSize: baseSize * 0.74,
@@ -1382,8 +1543,12 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     );
     final List<InlineSpan> childSpans = _buildInlines(
       context,
-      children,
+      nodes,
       scriptStyle,
+      start: start,
+      end: end,
+      rawPairCloseByOpen: rawPairCloseByOpen,
+      inlineHtmlDepth: inlineHtmlDepth + 1,
       linkRecognizer: null,
       onLinkTap: null,
       isLink: false,
@@ -1411,10 +1576,104 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     );
   }
 
+  InlineSpan _buildAbbrSpan(
+    BuildContext context,
+    List<MarkdownInlineNode> nodes,
+    TextStyle style, {
+    required String title,
+    int start = 0,
+    int? end,
+    Map<int, int>? rawPairCloseByOpen,
+    required int inlineHtmlDepth,
+    required TapGestureRecognizer? linkRecognizer,
+    required VoidCallback? onLinkTap,
+    required bool isLink,
+    required Uri? linkUrl,
+    required Map<String, List<TapGestureRecognizer>>? recognizerPool,
+    required List<_TrackedRecognizer> nextRecognizers,
+    required _InlineBuildAccumulator acc,
+  }) {
+    final MarkdownThemeData theme = widget.theme;
+    final int limit = end ?? nodes.length;
+    final TextStyle abbrStyle = style.copyWith(
+      decoration: _combineDecoration(
+        style.decoration,
+        TextDecoration.underline,
+      ),
+      decorationStyle: TextDecorationStyle.dotted,
+      decorationColor: theme.muted,
+    );
+    if (inlineHtmlDepth >= _maxInlineHtmlDepth) {
+      return TextSpan(
+        style: abbrStyle,
+        children: _buildInlines(
+          context,
+          nodes,
+          abbrStyle,
+          start: start,
+          end: limit,
+          rawPairCloseByOpen: rawPairCloseByOpen,
+          inlineHtmlDepth: inlineHtmlDepth,
+          linkRecognizer: linkRecognizer,
+          onLinkTap: onLinkTap,
+          isLink: isLink,
+          linkUrl: linkUrl,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
+          acc: acc,
+        ),
+      );
+    }
+    acc.hasWidgetSpan = true;
+    final List<InlineSpan> abbrChildren = _buildInlines(
+      context,
+      nodes,
+      abbrStyle,
+      start: start,
+      end: limit,
+      rawPairCloseByOpen: rawPairCloseByOpen,
+      inlineHtmlDepth: inlineHtmlDepth + 1,
+      linkRecognizer: null,
+      onLinkTap: null,
+      isLink: false,
+      linkUrl: null,
+      recognizerPool: recognizerPool,
+      nextRecognizers: nextRecognizers,
+      acc: acc,
+    );
+    Widget labelWidget = MarkdownRichText.rich(
+      TextSpan(style: abbrStyle, children: abbrChildren),
+    );
+    if (acc.env.hasOverlay) {
+      labelWidget = Tooltip(
+        message: title,
+        excludeFromSemantics: true,
+        child: labelWidget,
+      );
+    }
+    final Widget semanticAbbr = Semantics(
+      label: _inlinesSliceToPlainText(nodes, start, limit),
+      tooltip: title,
+      excludeSemantics: true,
+      child: labelWidget,
+    );
+    return WidgetSpan(
+      alignment: PlaceholderAlignment.baseline,
+      baseline: TextBaseline.alphabetic,
+      child: _wrapWidgetWithLink(
+        semanticAbbr,
+        onLinkTap: onLinkTap,
+        isLink: isLink,
+        linkUrl: linkUrl,
+      ),
+    );
+  }
+
   InlineSpan _buildLinkSpan(
     BuildContext context,
     LinkNode node,
     TextStyle style, {
+    int inlineHtmlDepth = 0,
     required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
     required _InlineBuildAccumulator acc,
@@ -1431,6 +1690,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           context,
           node.children,
           style,
+          inlineHtmlDepth: inlineHtmlDepth,
           linkRecognizer: null,
           onLinkTap: null,
           isLink: false,
@@ -1502,6 +1762,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         context,
         node.children,
         linkStyle,
+        inlineHtmlDepth: inlineHtmlDepth,
         linkRecognizer: recognizer,
         onLinkTap: onTap,
         isLink: true,
@@ -1805,20 +2066,38 @@ enum _RawHtmlDirectiveKind {
   none,
   openUnderline,
   closeUnderline,
+  openStrikethrough,
+  closeStrikethrough,
+  openStrong,
+  closeStrong,
+  openEmphasis,
+  closeEmphasis,
   openSmall,
   closeSmall,
   openQuote,
   closeQuote,
   openCode,
   closeCode,
+  openSamp,
+  closeSamp,
+  openVar,
+  closeVar,
+  openHighlight,
+  closeHighlight,
+  openSubscript,
+  closeSubscript,
+  openSuperscript,
+  closeSuperscript,
+  openAbbr,
+  closeAbbr,
   anchor,
 }
 
 final class _RawHtmlDirective {
-  const _RawHtmlDirective(this.kind, [this.anchorId]);
+  const _RawHtmlDirective(this.kind, [this.value]);
 
   final _RawHtmlDirectiveKind kind;
-  final String? anchorId;
+  final String? value;
 
   static const _RawHtmlDirective none = _RawHtmlDirective(
     _RawHtmlDirectiveKind.none,
@@ -1852,11 +2131,12 @@ ImageNode? tryParseHtmlImageTag(String rawHtml) {
 
   for (final RegExpMatch match in _rawHtmlAttrPattern.allMatches(attrs)) {
     final String name = (match.group(1) ?? '').toLowerCase();
-    final String value =
-        match.group(2) ?? match.group(3) ?? match.group(4) ?? '';
+    final String value = decodeHtmlEntities(
+      match.group(2) ?? match.group(3) ?? match.group(4) ?? '',
+    );
     switch (name) {
       case 'src':
-        src = value.replaceAll('&amp;', '&');
+        src = value;
       case 'alt':
         alt = value;
       case 'title':
@@ -1886,6 +2166,149 @@ ImageNode? tryParseHtmlImageTag(String rawHtml) {
   );
 }
 
+bool _isInlineHtmlWhitespace(int cu) =>
+    cu == 0x20 || cu == 0x09 || cu == 0x0A || cu == 0x0C || cu == 0x0D;
+
+const int _maxInlineHtmlDepth = 32;
+
+Map<int, int> _computeRawHtmlPairCloses(
+  List<MarkdownInlineNode> nodes,
+  int start,
+  int limit,
+) {
+  final Map<int, int> closeByOpen = <int, int>{};
+  final List<int> subStack = <int>[];
+  final List<int> supStack = <int>[];
+  final List<int> abbrStack = <int>[];
+
+  for (int i = start; i < limit; i++) {
+    final MarkdownInlineNode candidate = nodes[i];
+    if (candidate is! RawHtmlInlineNode) {
+      continue;
+    }
+    switch (_parseRawHtmlDirective(candidate.html).kind) {
+      case _RawHtmlDirectiveKind.openSubscript:
+        subStack.add(i);
+      case _RawHtmlDirectiveKind.closeSubscript:
+        if (subStack.isNotEmpty) {
+          closeByOpen[subStack.removeLast()] = i;
+        }
+      case _RawHtmlDirectiveKind.openSuperscript:
+        supStack.add(i);
+      case _RawHtmlDirectiveKind.closeSuperscript:
+        if (supStack.isNotEmpty) {
+          closeByOpen[supStack.removeLast()] = i;
+        }
+      case _RawHtmlDirectiveKind.openAbbr:
+        abbrStack.add(i);
+      case _RawHtmlDirectiveKind.closeAbbr:
+        if (abbrStack.isNotEmpty) {
+          closeByOpen[abbrStack.removeLast()] = i;
+        }
+      default:
+        break;
+    }
+  }
+  return closeByOpen;
+}
+
+String _inlinesSliceToPlainText(
+  List<MarkdownInlineNode> nodes,
+  int start,
+  int end,
+) {
+  if (start >= end) {
+    return '';
+  }
+  if (end - start == 1) {
+    return nodes[start].toPlainText();
+  }
+  final StringBuffer out = StringBuffer();
+  for (int i = start; i < end; i++) {
+    out.write(nodes[i].toPlainText());
+  }
+  return out.toString();
+}
+
+_RawHtmlDirective _parseAbbrOpenDirective(String rawHtml, int start, int end) {
+  int i = start;
+  String? title;
+  bool selfClosing = false;
+
+  while (i < end) {
+    while (i < end && _isInlineHtmlWhitespace(rawHtml.codeUnitAt(i))) {
+      i++;
+    }
+    if (i >= end) {
+      break;
+    }
+    final int cu = rawHtml.codeUnitAt(i);
+    if (cu == 0x2F) {
+      if (i == end - 1) {
+        selfClosing = true;
+      }
+      i++;
+      continue;
+    }
+    final int attrNameStart = i;
+    while (i < end) {
+      final int c = rawHtml.codeUnitAt(i);
+      if (_isInlineHtmlWhitespace(c) || c == 0x3D || c == 0x2F) {
+        break;
+      }
+      i++;
+    }
+    if (i == attrNameStart) {
+      i++;
+      continue;
+    }
+    final String attrName = rawHtml.substring(attrNameStart, i).toLowerCase();
+    while (i < end && _isInlineHtmlWhitespace(rawHtml.codeUnitAt(i))) {
+      i++;
+    }
+    String rawVal = '';
+    if (i < end && rawHtml.codeUnitAt(i) == 0x3D) {
+      i++;
+      while (i < end && _isInlineHtmlWhitespace(rawHtml.codeUnitAt(i))) {
+        i++;
+      }
+      if (i < end) {
+        final int q = rawHtml.codeUnitAt(i);
+        if (q == 0x22 || q == 0x27) {
+          i++;
+          final int valStart = i;
+          while (i < end && rawHtml.codeUnitAt(i) != q) {
+            i++;
+          }
+          rawVal = rawHtml.substring(valStart, i);
+          if (i < end && rawHtml.codeUnitAt(i) == q) {
+            i++;
+          }
+        } else {
+          final int valStart = i;
+          while (i < end && !_isInlineHtmlWhitespace(rawHtml.codeUnitAt(i))) {
+            i++;
+          }
+          if (i == end && i > valStart && rawHtml.codeUnitAt(i - 1) == 0x2F) {
+            rawVal = rawHtml.substring(valStart, i - 1);
+            selfClosing = true;
+          } else {
+            rawVal = rawHtml.substring(valStart, i);
+          }
+        }
+      }
+    }
+    if (attrName == 'title' && title == null) {
+      title = decodeHtmlEntities(rawVal).trim();
+    }
+  }
+
+  if (selfClosing) {
+    return _RawHtmlDirective.none;
+  }
+  return _RawHtmlDirective(_RawHtmlDirectiveKind.openAbbr, title);
+}
+
 _RawHtmlDirective _parseRawHtmlDirective(String rawHtml) {
   final int len = rawHtml.length;
   if (len < 3 ||
@@ -1909,16 +2332,59 @@ _RawHtmlDirective _parseRawHtmlDirective(String rawHtml) {
   if (pos == nameStart) {
     return _RawHtmlDirective.none;
   }
+  if (pos < len - 1) {
+    final int afterCu = rawHtml.codeUnitAt(pos);
+    if (!_isInlineHtmlWhitespace(afterCu) && (isClosing || afterCu != 0x2F)) {
+      return _RawHtmlDirective.none;
+    }
+    if (isClosing) {
+      int scan = pos;
+      while (scan < len - 1) {
+        if (!_isInlineHtmlWhitespace(rawHtml.codeUnitAt(scan))) {
+          return _RawHtmlDirective.none;
+        }
+        scan++;
+      }
+    }
+  }
   final String tag = rawHtml.substring(nameStart, pos).toLowerCase();
   final bool isSelfClosing = !isClosing && len >= 4 && rawHtml.endsWith('/>');
   switch (tag) {
     case 'u':
+    case 'ins':
       if (isClosing) {
         return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeUnderline);
       }
       return isSelfClosing
           ? _RawHtmlDirective.none
           : const _RawHtmlDirective(_RawHtmlDirectiveKind.openUnderline);
+    case 'del':
+    case 's':
+    case 'strike':
+      if (isClosing) {
+        return const _RawHtmlDirective(
+          _RawHtmlDirectiveKind.closeStrikethrough,
+        );
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openStrikethrough);
+    case 'strong':
+    case 'b':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeStrong);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openStrong);
+    case 'em':
+    case 'i':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeEmphasis);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openEmphasis);
     case 'small':
       if (isClosing) {
         return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeSmall);
@@ -1940,6 +2406,46 @@ _RawHtmlDirective _parseRawHtmlDirective(String rawHtml) {
       return isSelfClosing
           ? _RawHtmlDirective.none
           : const _RawHtmlDirective(_RawHtmlDirectiveKind.openCode);
+    case 'samp':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeSamp);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openSamp);
+    case 'var':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeVar);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openVar);
+    case 'mark':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeHighlight);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openHighlight);
+    case 'sub':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeSubscript);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openSubscript);
+    case 'sup':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeSuperscript);
+      }
+      return isSelfClosing
+          ? _RawHtmlDirective.none
+          : const _RawHtmlDirective(_RawHtmlDirectiveKind.openSuperscript);
+    case 'abbr':
+      if (isClosing) {
+        return const _RawHtmlDirective(_RawHtmlDirectiveKind.closeAbbr);
+      }
+      return _parseAbbrOpenDirective(rawHtml, pos, len - 1);
     case 'a':
       if (isClosing) {
         return _RawHtmlDirective.none;

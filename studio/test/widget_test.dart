@@ -854,6 +854,128 @@ void main() {
   );
 
   testWidgets(
+    'Comprehensive Markdown Guide renders Section 7 HTML table, <kbd> badges, and <dl> natively',
+    (WidgetTester tester) async {
+      _setDesktopViewport(tester);
+      await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+      addTearDown(() async {
+        rootBundle.evict('assets/comprehensive_markdown_guide.md');
+        MarkdownBuiltInRenderers.clearCaches();
+        await MarkdownBuiltInRenderers.dispose();
+      });
+
+      await tester.pumpWidget(
+        const MarkdownStudioApp(
+          initialPreset: StudioPresetId.comprehensiveGuide,
+        ),
+      );
+      await _pumpUntilFound(
+        tester,
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+      );
+      expect(tester.takeException(), isNull);
+
+      final Finder outlineItem = find.descendant(
+        of: find.byKey(const Key('studio-outline-list')),
+        matching: find.text('7. Embedded HTML (GFM)'),
+      );
+      await tester.scrollUntilVisible(
+        outlineItem,
+        200.0,
+        scrollable: find.descendant(
+          of: find.byKey(const Key('studio-outline-list')),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.tap(outlineItem);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      final Finder previewScrollable = find
+          .descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      final Finder htmlTableFinder = find.ancestor(
+        of: find.text('Collapsible disclosure card'),
+        matching: find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.byType(Table),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        htmlTableFinder,
+        250.0,
+        scrollable: previewScrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      expect(htmlTableFinder, findsOneWidget);
+      final Table htmlTable = tester.widget<Table>(htmlTableFinder);
+      expect(htmlTable.children, hasLength(3));
+      expect(htmlTable.children.first.children, hasLength(3));
+      expect(
+        find.descendant(of: htmlTableFinder, matching: find.text('Element')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: htmlTableFinder, matching: find.text('Category')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: htmlTableFinder, matching: find.text('Example')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: htmlTableFinder,
+          matching: find.text('Collapsible disclosure card'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: htmlTableFinder, matching: find.text('<kbd>')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: htmlTableFinder, matching: find.text('Cmd')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: htmlTableFinder, matching: find.text('P')),
+        findsOneWidget,
+      );
+
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.text('Single-Tab Invariant'),
+        ),
+        200.0,
+        scrollable: previewScrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.text('Single-Tab Invariant'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.textContaining('Offscreen Vector Engine'),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
     'Selecting Comprehensive Markdown Guide from dropdown renders and handles async preset switch & edit races cleanly',
     (WidgetTester tester) async {
       _setDesktopViewport(tester);

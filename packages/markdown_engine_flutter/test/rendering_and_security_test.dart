@@ -4,12 +4,22 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:markdown_engine/markdown_engine.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
 import 'package:markdown_engine_flutter/src/fast_text.dart'
     show
         MarkdownParagraphLeaf,
         RenderMarkdownParagraph,
         compareScreenOrderRects;
+import 'package:markdown_engine_flutter/src/html_block_renderer.dart'
+    show
+        HtmlBlockEntry,
+        decodeHtmlEntities,
+        maxHtmlColspan,
+        maxHtmlTableRows,
+        parseHtmlBlockFragment;
+import 'package:markdown_engine_flutter/src/inline_renderer.dart'
+    show MarkdownAnchorTarget, MarkdownInlineText;
 import 'package:tex_math_flutter/tex_math_flutter.dart' show TexMath;
 
 void main() {
@@ -2437,6 +2447,1238 @@ Hidden keyboard body[^k1].
       rects.sort(compareScreenOrderRects);
       expect(rects.last, r3);
     });
+  });
+
+  group('HTML block parsing, rendering, and security', () {
+    test('parseHtmlBlockFragment enforces post-tokenization entity decoding, deterministic blockIds, and budgets', () {
+      expect(
+        decodeHtmlEntities('A &amp; B &lt;tag&gt; &#x27;ok&#x27;'),
+        "A & B <tag> 'ok'",
+      );
+
+      const String raw =
+          '<table><tr><td><code>&lt;kbd&gt;</code></td></tr></table>'
+          '<dl><dt>Term</dt><dd>Def</dd></dl>';
+      final List<HtmlBlockEntry> entries = parseHtmlBlockFragment(
+        raw,
+        parentBlockId: 'b-7',
+      );
+      expect(entries, hasLength(2));
+      expect(entries[0].block, isA<TableNode>());
+      expect(entries[0].block.blockId, 'b-7-h0');
+      expect(entries[1].block, isA<DefinitionListNode>());
+      expect(entries[1].block.blockId, 'b-7-h1');
+
+      final TableNode table = entries[0].block as TableNode;
+      expect(table.rows.single.single.children.single, isA<CodeSpanNode>());
+      expect(
+        (table.rows.single.single.children.single as CodeSpanNode).literal,
+        '<kbd>',
+      );
+
+      // Colspan is bounded to maxHtmlColspan (16) and row count to maxHtmlTableRows (500).
+      final StringBuffer hugeTable = StringBuffer('<table>');
+      for (int i = 0; i < maxHtmlTableRows + 25; i++) {
+        hugeTable.write('<tr><td colspan="999">R$i</td></tr>');
+      }
+      hugeTable.write('</table>');
+      final List<HtmlBlockEntry> boundedEntries = parseHtmlBlockFragment(
+        hugeTable.toString(),
+        parentBlockId: 'b-99',
+      );
+      expect(boundedEntries, hasLength(1));
+      final TableNode boundedTable = boundedEntries.single.block as TableNode;
+      expect(boundedTable.rows.length, maxHtmlTableRows);
+      expect(boundedTable.rows.first.length, maxHtmlColspan);
+    });
+
+    testWidgets(
+      'renders HTML <table> with alignment, literal <code>&lt;kbd&gt;</code>, <kbd> badges, thead/tbody/tfoot, caption, headerless tables, and ragged colspan',
+      (WidgetTester tester) async {
+        const String doc = '''
+<table>
+  <caption>Widget <strong>Summary</strong></caption>
+  <thead>
+    <tr>
+      <th>Element</th>
+      <th align="center">Category</th>
+      <th style="text-align: right;">Example</th>
+    </tr>
+    <tr>
+      <th>Extra</th>
+      <th>Header</th>
+      <th>Row</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>&lt;kbd&gt;</code></td>
+      <td align="center">Inline</td>
+      <td><kbd>Cmd</kbd> + <kbd>P</kbd></td>
+    </tr>
+    <tr>
+      <td colspan="2">Spanning two</td>
+      <td style="text-align: right">Right cell</td>
+    </tr>
+    <tr>
+      <td>Ragged single cell</td>
+    </tr>
+  </tbody>
+  <tfoot>
+    <tr>
+      <th>Total</th>
+      <td colspan="2">3 entries</td>
+    </tr>
+  </tfoot>
+</table>
+
+<table>
+  <tbody>
+    <tr>
+      <td>Headerless Alpha</td>
+      <td>Headerless Beta</td>
+    </tr>
+  </tbody>
+</table>
+''';
+
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: MarkdownView(
+                  doc,
+                  options: MarkdownOptions.extended(),
+                  scrollable: false,
+                  selectable: false,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        final Finder tables = find.byType(Table);
+        expect(tables, findsNWidgets(2));
+
+        // First table has 1 promoted header row + 1 extra thead row + 3 tbody rows + 1 tfoot row = 6 TableRows.
+        final Table firstTable = tester.widget<Table>(tables.at(0));
+        expect(firstTable.children, hasLength(6));
+        for (final TableRow row in firstTable.children) {
+          expect(row.children, hasLength(3));
+        }
+
+        // Second table is headerless -> NO phantom empty header row (1 TableRow total).
+        final Table secondTable = tester.widget<Table>(tables.at(1));
+        expect(secondTable.children, hasLength(1));
+        expect(secondTable.children.single.children, hasLength(2));
+        expect(find.text('Headerless Alpha'), findsOneWidget);
+        expect(find.text('Headerless Beta'), findsOneWidget);
+
+        // Caption sits centered and above the first Table widget.
+        final Finder captionFinder = find.byWidgetPredicate(
+          (Widget w) =>
+              w is Text &&
+              w.textSpan != null &&
+              w.textSpan!.toPlainText() == 'Widget Summary',
+        );
+        expect(captionFinder, findsOneWidget);
+        final Text captionWidget = tester.widget<Text>(captionFinder);
+        expect(captionWidget.textAlign, TextAlign.center);
+        expect(
+          tester.getBottomLeft(captionFinder).dy,
+          lessThanOrEqualTo(tester.getTopLeft(tables.at(0)).dy),
+        );
+
+        // Alignment check on <th align="center"> and <td align="center">.
+        final Text categoryText = tester.widget<Text>(find.text('Category'));
+        expect(categoryText.textAlign, TextAlign.center);
+        final Text inlineText = tester.widget<Text>(find.text('Inline'));
+        expect(inlineText.textAlign, TextAlign.center);
+        final Text rightCellText = tester.widget<Text>(find.text('Right cell'));
+        expect(rightCellText.textAlign, TextAlign.right);
+
+        // Literal <code>&lt;kbd&gt;</code> renders as `<kbd>` text (not a keycap).
+        expect(find.text('<kbd>'), findsOneWidget);
+
+        // <kbd>Cmd</kbd> + <kbd>P</kbd> preserves spaces and renders keycap badges.
+        final Finder cmdPlusPFinder = find.byWidgetPredicate(
+          (Widget w) => w is RichText && w.text.toPlainText().contains(' + '),
+        );
+        expect(cmdPlusPFinder, findsOneWidget);
+        expect(find.text('Cmd'), findsOneWidget);
+        expect(find.text('P'), findsOneWidget);
+
+        // Body <th> in extra thead / tfoot renders bolded via StrongNode.
+        final Text totalText = tester.widget<Text>(find.text('Total'));
+        FontWeight? totalWeight;
+        totalText.textSpan?.visitChildren((InlineSpan span) {
+          if (span is TextSpan && span.text == 'Total') {
+            totalWeight = span.style?.fontWeight;
+            return false;
+          }
+          return true;
+        });
+        expect(totalWeight, FontWeight.w700);
+      },
+    );
+
+    testWidgets(
+      'renders HTML <dl>, <ul>, <ol start="3"> with nested lists and implicit closes',
+      (WidgetTester tester) async {
+        const String doc = '''
+<dl>
+  <dt>Single-Tab Invariant</dt>
+  <dd>Focuses existing tab without duplication.
+  <dt>Offscreen Engine</dt>
+  <dd><p>Compiles diagrams cleanly.</p></dd>
+</dl>
+
+<ul>
+  <li>Bullet A
+    <ul>
+      <li>Nested bullet B</li>
+    </ul>
+  <li>Bullet C</li>
+</ul>
+
+<ol start="3">
+  <li>Third item</li>
+  <li>Fourth item</li>
+</ol>
+''';
+
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: MarkdownView(
+                  doc,
+                  options: MarkdownOptions.extended(),
+                  scrollable: false,
+                  selectable: false,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        expect(find.text('Single-Tab Invariant'), findsOneWidget);
+        expect(
+          find.text('Focuses existing tab without duplication.'),
+          findsOneWidget,
+        );
+        expect(find.text('Offscreen Engine'), findsOneWidget);
+        expect(find.text('Compiles diagrams cleanly.'), findsOneWidget);
+
+        expect(find.text('Bullet A'), findsOneWidget);
+        expect(find.text('Nested bullet B'), findsOneWidget);
+        expect(find.text('Bullet C'), findsOneWidget);
+        expect(find.text('•'), findsNWidgets(2));
+        expect(find.text('◦'), findsOneWidget);
+
+        expect(find.text('3.'), findsOneWidget);
+        expect(find.text('4.'), findsOneWidget);
+        expect(find.text('Third item'), findsOneWidget);
+        expect(find.text('Fourth item'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'renders aligned blocks, sized <img>, linked <picture> hero with MarkdownUrlPolicy and MarkdownImagePolicy',
+      (WidgetTester tester) async {
+        const String oneByOnePngDataUri =
+            'data:image/png;base64,'
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+        const String doc =
+            '''
+<a href="https://flutter.dev/">
+  <h1 align="center">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://docs.flutter.dev/logo_dark.png">
+      <img alt="Flutter Hero" src="https://docs.flutter.dev/logo.png">
+    </picture>
+  </h1>
+</a>
+
+<p align="center">
+  <img src="$oneByOnePngDataUri" alt="Centered Data Logo" width="72" height="48" />
+</p>
+
+<p align="center">
+  <strong>Centered HTML bold text</strong>
+</p>
+
+<table>
+  <tr>
+    <td><a href="https://dart.dev">Allowed Table Link</a></td>
+    <td><a href="javascript:alert(1)">Blocked Table Link</a></td>
+  </tr>
+</table>
+''';
+
+        final List<String> tappedLinks = <String>[];
+        final List<String> builtImages = <String>[];
+
+        // 1. MarkdownImagePolicy.block renders placeholder without Image widgets.
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: MarkdownView(
+                  doc,
+                  options: const MarkdownOptions.extended(
+                    urlPolicy: MarkdownUrlPolicy.strict(
+                      allowSafeImageDataUrls: true,
+                    ),
+                  ),
+                  scrollable: false,
+                  selectable: false,
+                  delegates: MarkdownBuilderDelegates(
+                    imagePolicy: MarkdownImagePolicy.block,
+                    urlPolicy: const MarkdownUrlPolicy.strict(
+                      allowSafeImageDataUrls: true,
+                    ),
+                    onTapLink: (String dest, String? _) =>
+                        tappedLinks.add(dest),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Flutter Hero'), findsOneWidget);
+        expect(find.text('docs.flutter.dev'), findsOneWidget);
+        // Only the safe data:image renders as an Image; remote <picture> is blocked.
+        expect(find.byType(Image), findsOneWidget);
+        final Image sizedDataImg = tester.widget<Image>(find.byType(Image));
+        expect(sizedDataImg.width, 72.0);
+        expect(sizedDataImg.height, 48.0);
+
+        // Centered bold text has TextAlign.center and FontWeight.w700.
+        final Text centeredBold = tester.widget<Text>(
+          find.text('Centered HTML bold text'),
+        );
+        expect(centeredBold.textAlign, TextAlign.center);
+
+        // Allowed table link fires onTapLink; javascript: table link does NOT.
+        await tester.tap(find.text('Allowed Table Link'));
+        await tester.pump();
+        expect(tappedLinks, <String>['https://dart.dev']);
+
+        await tester.tap(find.text('Blocked Table Link'));
+        await tester.pump();
+        expect(tappedLinks, <String>['https://dart.dev']);
+
+        final Text blockedText = tester.widget<Text>(
+          find.text('Blocked Table Link'),
+        );
+        bool hasBlockedRecognizer = false;
+        blockedText.textSpan?.visitChildren((InlineSpan span) {
+          if (span is TextSpan && span.recognizer != null) {
+            hasBlockedRecognizer = true;
+          }
+          return true;
+        });
+        expect(hasBlockedRecognizer, isFalse);
+
+        // Tapping linked <picture> hero placeholder triggers https://flutter.dev/.
+        await tester.tap(find.text('Flutter Hero'));
+        await tester.pump();
+        expect(tappedLinks, <String>[
+          'https://dart.dev',
+          'https://flutter.dev/',
+        ]);
+
+        // 2. MarkdownImagePolicy.load in dark theme selects dark <source> and stays clickable.
+        tappedLinks.clear();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownTheme(
+                data: const MarkdownThemeData.dark(),
+                child: SingleChildScrollView(
+                  child: MarkdownView(
+                    doc,
+                    options: const MarkdownOptions.extended(
+                      urlPolicy: MarkdownUrlPolicy.strict(
+                        allowSafeImageDataUrls: true,
+                      ),
+                    ),
+                    scrollable: false,
+                    selectable: false,
+                    delegates: MarkdownBuilderDelegates(
+                      imagePolicy: MarkdownImagePolicy.load,
+                      urlPolicy: const MarkdownUrlPolicy.strict(
+                        allowSafeImageDataUrls: true,
+                      ),
+                      onTapLink: (String dest, String? _) =>
+                          tappedLinks.add(dest),
+                      imageBuilder: (BuildContext context, ImageNode node) {
+                        builtImages.add(node.destination);
+                        return Text('IMG:${node.destination}');
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(builtImages, contains('https://docs.flutter.dev/logo_dark.png'));
+        await tester.tap(
+          find.text('IMG:https://docs.flutter.dev/logo_dark.png'),
+        );
+        await tester.pump();
+        expect(tappedLinks, <String>['https://flutter.dev/']);
+      },
+    );
+
+    testWidgets(
+      'strips dangerous elements, preserves entity-escaped <script>, and survives 200x nested unclosed <table><tr><td> without overflow or assertions',
+      (WidgetTester tester) async {
+        final String deepUnclosedTable =
+            '${'<table><tr><td>' * 200}Deep surviving cell';
+        final String doc =
+            '''
+<table>
+  <tr>
+    <td>Safe cell<script>alert("xss")</script><style>.x{color:red}</style><iframe src="https://evil.example">evil</iframe></td>
+    <td><code>&lt;script&gt;alert(1)&lt;/script&gt;</code></td>
+  </tr>
+</table>
+
+<p>Literal escaped &lt;script&gt; text<!-- hidden comment --></p>
+
+$deepUnclosedTable
+''';
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: MarkdownView(
+                  doc,
+                  options: const MarkdownOptions.extended(sanitizeHtml: false),
+                  scrollable: false,
+                  selectable: false,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        expect(find.text('Safe cell'), findsOneWidget);
+        expect(find.textContaining('alert("xss")'), findsNothing);
+        expect(find.textContaining('color:red'), findsNothing);
+        expect(find.text('evil'), findsNothing);
+        expect(find.text('hidden comment'), findsNothing);
+
+        expect(find.text('<script>alert(1)</script>'), findsOneWidget);
+        expect(find.text('Literal escaped <script> text'), findsOneWidget);
+        expect(find.text('Deep surviving cell'), findsOneWidget);
+        expect(find.byType(Table), findsNWidgets(2));
+      },
+    );
+
+    testWidgets(
+      'renders inline <samp>, <var>, <strong>, <b>, <em>, <i>, <del>, <s>, <strike>, and <ins> inside Markdown paragraphs',
+      (WidgetTester tester) async {
+        const String doc =
+            'Inline <samp>stdout</samp>, <var>x</var>, <b>bold-b</b>, <i>italic-i</i>, <del>deleted</del>, <s>struck</s>, and <ins>inserted</ins>.';
+
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                doc,
+                options: MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        final Text para = tester.widget<Text>(
+          find.byWidgetPredicate(
+            (Widget w) =>
+                w is Text &&
+                w.textSpan != null &&
+                w.textSpan!.toPlainText().contains('stdout'),
+          ),
+        );
+        final MarkdownThemeData resolvedTheme = MarkdownTheme.of(
+          tester.element(find.bySubtype<Text>().first),
+        );
+
+        TextStyle? sampStyle;
+        TextStyle? varStyle;
+        TextStyle? boldStyle;
+        TextStyle? italicStyle;
+        TextStyle? delStyle;
+        TextStyle? sStyle;
+        TextStyle? insStyle;
+
+        para.textSpan!.visitChildren((InlineSpan span) {
+          if (span is TextSpan) {
+            switch (span.text) {
+              case 'stdout':
+                sampStyle = span.style;
+              case 'x':
+                varStyle = span.style;
+              case 'bold-b':
+                boldStyle = span.style;
+              case 'italic-i':
+                italicStyle = span.style;
+              case 'deleted':
+                delStyle = span.style;
+              case 'struck':
+                sStyle = span.style;
+              case 'inserted':
+                insStyle = span.style;
+            }
+          }
+          return true;
+        });
+
+        expect(sampStyle?.fontFamily, resolvedTheme.effectiveCodeFontFamily);
+        expect(sampStyle?.backgroundColor, resolvedTheme.codeBackground);
+        expect(varStyle?.fontStyle, FontStyle.italic);
+        expect(boldStyle?.fontWeight, FontWeight.w700);
+        expect(italicStyle?.fontStyle, FontStyle.italic);
+        expect(
+          delStyle?.decoration?.contains(TextDecoration.lineThrough),
+          isTrue,
+        );
+        expect(
+          sStyle?.decoration?.contains(TextDecoration.lineThrough),
+          isTrue,
+        );
+        expect(
+          insStyle?.decoration?.contains(TextDecoration.underline),
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets(
+      'renders HTML <pre><code>, <blockquote>, <hr>, <details>, <figure>, <abbr>, <mark>, <q>, <sub>, <sup>, and <small> inside HTML blocks',
+      (WidgetTester tester) async {
+        const String doc = '''
+<div>
+  <pre><code class="language-dart">  void main() {
+    print('&lt;ok&gt;');
+  }</code></pre>
+  <blockquote><p>Quoted <mark>highlight</mark>, <q>inner</q>, H<sub>2</sub>O, 2<sup>10</sup>, <small>tiny</small>, and <abbr title="HyperText Markup Language">HTML</abbr>.</p></blockquote>
+  <hr />
+  <details open>
+    <summary>HTML Disclosure</summary>
+    <p>Inside HTML details.</p>
+  </details>
+  <figure>
+    <p>Figure body</p>
+    <figcaption>HTML Fig Caption</figcaption>
+  </figure>
+</div>
+''';
+
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: MarkdownView(
+                  doc,
+                  options: MarkdownOptions.extended(),
+                  scrollable: false,
+                  selectable: false,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        expect(find.text('dart'), findsOneWidget);
+        expect(
+          find.text("  void main() {\n    print('<ok>');\n  }"),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Quoted highlight'), findsOneWidget);
+        expect(find.textContaining('\u201Cinner\u201D'), findsOneWidget);
+        expect(find.byType(Tooltip), findsOneWidget);
+        expect(find.text('HTML Disclosure'), findsOneWidget);
+        expect(find.text('Inside HTML details.'), findsOneWidget);
+        expect(find.text('Figure body'), findsOneWidget);
+        expect(find.text('HTML Fig Caption'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'renders inline <sub>, <sup>, <mark>, and <abbr title> inside regular Markdown paragraphs with nesting, links, and unclosed fallbacks',
+      (WidgetTester tester) async {
+        const String doc =
+            'Water is H<sub>2</sub>O, 2<sup>10</sup> = 1024, '
+            '<mark>highlighted terms</mark>, '
+            '<abbr title="GitHub Flavored Markdown">GFM</abbr>, '
+            '<abbr title="A &amp; B">AB</abbr>, '
+            'nested x<sub>i<sub>j</sub></sub>, '
+            '[Link H<sub>2</sub>O <abbr title="HyperText">HT</abbr>](https://example.com/chem), '
+            'and unclosed H<sub>2 2<sup>10 <abbr title="Open">Unclosed.';
+
+        final List<String> tappedLinks = <String>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: MarkdownView(
+                  doc,
+                  options: const MarkdownOptions.extended(),
+                  scrollable: false,
+                  selectable: false,
+                  delegates: MarkdownBuilderDelegates(
+                    onTapLink: (String dest, String? _) =>
+                        tappedLinks.add(dest),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        final MarkdownThemeData resolvedTheme = MarkdownTheme.of(
+          tester.element(find.byType(MarkdownView)),
+        );
+
+        // Verify <sub> and <sup> use Transform.translate with downward/upward offsets.
+        final List<Transform> transforms = tester
+            .widgetList<Transform>(find.byType(Transform))
+            .toList();
+        expect(
+          transforms.any((Transform t) => t.transform.getTranslation().y > 0),
+          isTrue,
+        );
+        expect(
+          transforms.any((Transform t) => t.transform.getTranslation().y < 0),
+          isTrue,
+        );
+        expect(find.text('2'), findsWidgets);
+        expect(find.text('10'), findsOneWidget);
+        expect(find.text('j'), findsOneWidget);
+
+        // Verify <mark>highlighted terms</mark> receives theme.highlightFill.
+        final RichText para = tester.widget<RichText>(
+          find.byWidgetPredicate(
+            (Widget w) =>
+                w is RichText &&
+                w.text.toPlainText().contains('highlighted terms'),
+          ),
+        );
+        Color? markBackground;
+        para.text.visitChildren((InlineSpan span) {
+          if (span is TextSpan && span.text == 'highlighted terms') {
+            markBackground = span.style?.backgroundColor;
+            return false;
+          }
+          return true;
+        });
+        expect(markBackground, resolvedTheme.highlightFill);
+
+        // Verify <abbr title="..."> renders Tooltip with decoded title and dotted underline.
+        final List<Tooltip> tooltips = tester
+            .widgetList<Tooltip>(find.byType(Tooltip))
+            .toList();
+        expect(
+          tooltips.any((Tooltip t) => t.message == 'GitHub Flavored Markdown'),
+          isTrue,
+        );
+        expect(tooltips.any((Tooltip t) => t.message == 'A & B'), isTrue);
+        expect(tooltips.any((Tooltip t) => t.message == 'HyperText'), isTrue);
+        // Unclosed <abbr title="Open"> must not create a Tooltip.
+        expect(tooltips.any((Tooltip t) => t.message == 'Open'), isFalse);
+
+        final RichText gfmText = tester.widget<RichText>(
+          find.descendant(
+            of: find.byWidgetPredicate(
+              (Widget w) =>
+                  w is Tooltip && w.message == 'GitHub Flavored Markdown',
+            ),
+            matching: find.bySubtype<RichText>(),
+          ),
+        );
+        TextStyle? gfmStyle;
+        gfmText.text.visitChildren((InlineSpan span) {
+          if (span is TextSpan && span.text == 'GFM') {
+            gfmStyle = span.style;
+            return false;
+          }
+          return true;
+        });
+        expect(
+          gfmStyle?.decoration?.contains(TextDecoration.underline),
+          isTrue,
+        );
+        expect(gfmStyle?.decorationStyle, TextDecorationStyle.dotted);
+
+        // Verify link inheritance for <sub> and <abbr> inside a Markdown link.
+        await tester.tap(find.text('HT'));
+        await tester.pump();
+        expect(tappedLinks, <String>['https://example.com/chem']);
+
+        // Unclosed tags still preserve visible text cleanly.
+        expect(
+          find.byWidgetPredicate(
+            (Widget w) =>
+                w is RichText && w.text.toPlainText().contains('Unclosed.'),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'preserves full data:image URI in <picture><source srcset> in dark mode while enforcing URL and image policies',
+      (WidgetTester tester) async {
+        const String oneByOnePngDataUri =
+            'data:image/png;base64,'
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+        const String doc =
+            '''
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="$oneByOnePngDataUri 2x, https://example.com/dark-fallback.png 1x">
+  <img src="https://example.com/light.png" alt="Logo">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="data:text/html,<script>alert(1)</script>">
+  <img src="https://example.com/light2.png" alt="Unsafe Data">
+</picture>
+''';
+
+        final List<String> builtImages = <String>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownTheme(
+                data: const MarkdownThemeData.dark(),
+                child: SingleChildScrollView(
+                  child: MarkdownView(
+                    doc,
+                    options: const MarkdownOptions.extended(
+                      urlPolicy: MarkdownUrlPolicy.strict(
+                        allowSafeImageDataUrls: true,
+                      ),
+                    ),
+                    scrollable: false,
+                    selectable: false,
+                    delegates: MarkdownBuilderDelegates(
+                      imagePolicy: MarkdownImagePolicy.block,
+                      urlPolicy: const MarkdownUrlPolicy.strict(
+                        allowSafeImageDataUrls: true,
+                      ),
+                      imageBuilder: (BuildContext context, ImageNode node) {
+                        builtImages.add(node.destination);
+                        return Text('DATA-IMG:${node.alt}');
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        // Full base64 data URI past `,` is preserved and descriptor `2x` stripped.
+        expect(builtImages, <String>[oneByOnePngDataUri]);
+        expect(find.text('DATA-IMG:Logo'), findsOneWidget);
+        // Non-image data:text/html URI remains blocked by URL policy.
+        expect(find.text('Unsafe Data'), findsOneWidget);
+        expect(find.text('Disallowed URL scheme'), findsOneWidget);
+
+        // Default strict URL policy (allowSafeImageDataUrls: false) blocks data:image too.
+        builtImages.clear();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownTheme(
+                data: const MarkdownThemeData.dark(),
+                child: SingleChildScrollView(
+                  child: MarkdownView(
+                    doc,
+                    options: const MarkdownOptions.extended(),
+                    scrollable: false,
+                    selectable: false,
+                    delegates: MarkdownBuilderDelegates(
+                      imagePolicy: MarkdownImagePolicy.load,
+                      imageBuilder: (BuildContext context, ImageNode node) {
+                        builtImages.add(node.destination);
+                        return Text('DATA-IMG:${node.alt}');
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(builtImages, isEmpty);
+        expect(find.text('Disallowed URL scheme'), findsNWidgets(2));
+      },
+    );
+
+    testWidgets(
+      'registers anchors for block-wrapping <a id> and <a name> at top level and inside nested containers',
+      (WidgetTester tester) async {
+        const String htmlFragment = '''
+<a id="hero">
+  <h1>Hero Title</h1>
+</a>
+
+<a name="sub-anchor">
+  <h2 align="center">Sub Section</h2>
+</a>
+
+<div><a id="div-hero"><h1>Div Section</h1></a></div>
+
+<details open>
+  <summary>Section</summary>
+  <a id="nested-hero"><h3>Nested Title</h3></a>
+</details>
+
+<a id="pre-hero">
+  <pre><code>pre ok</code></pre>
+</a>
+''';
+
+        // 1. AST-level check: AnchorInlineNode is emitted alongside wrapped headings without phantom paragraphs before headings.
+        final List<HtmlBlockEntry> entries = parseHtmlBlockFragment(
+          htmlFragment,
+          parentBlockId: 'b0',
+        );
+        expect(entries, hasLength(6));
+        expect(entries[0].block, isA<HeadingNode>());
+        final HeadingNode heroHeading = entries[0].block as HeadingNode;
+        expect(heroHeading.children.first, const AnchorInlineNode('hero'));
+        expect(heroHeading.text, 'Hero Title');
+
+        expect(entries[1].block, isA<AlignedBlockNode>());
+        final AlignedBlockNode subAligned =
+            entries[1].block as AlignedBlockNode;
+        final HeadingNode subHeading =
+            subAligned.children.single as HeadingNode;
+        expect(subHeading.children.first, const AnchorInlineNode('sub-anchor'));
+
+        expect(entries[2].block, isA<HeadingNode>());
+        final HeadingNode divHeading = entries[2].block as HeadingNode;
+        expect(divHeading.children.first, const AnchorInlineNode('div-hero'));
+
+        expect(entries[3].block, isA<DetailsBlockNode>());
+        final DetailsBlockNode details = entries[3].block as DetailsBlockNode;
+        expect(details.children.single, isA<HeadingNode>());
+        final HeadingNode nestedHeading =
+            details.children.single as HeadingNode;
+        expect(
+          nestedHeading.children.first,
+          const AnchorInlineNode('nested-hero'),
+        );
+
+        expect(entries[4].block, isA<ParagraphNode>());
+        expect(
+          (entries[4].block as ParagraphNode).children,
+          const <MarkdownInlineNode>[AnchorInlineNode('pre-hero')],
+        );
+        expect(entries[5].block, isA<CodeBlockNode>());
+
+        // 2. Widget + MarkdownController check: targets register and headings still render with semantics.
+        final MarkdownController controller = MarkdownController();
+        addTearDown(controller.dispose);
+        final SemanticsHandle semanticsHandle = tester.ensureSemantics();
+        try {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: SingleChildScrollView(
+                  child: MarkdownView(
+                    htmlFragment,
+                    options: const MarkdownOptions.extended(),
+                    controller: controller,
+                    scrollable: false,
+                    selectable: false,
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+
+          for (final String slug in <String>[
+            'hero',
+            'sub-anchor',
+            'div-hero',
+            'nested-hero',
+            'pre-hero',
+          ]) {
+            expect(
+              find.byWidgetPredicate(
+                (Widget w) =>
+                    w is MarkdownAnchorTarget && w.slugs.contains(slug),
+              ),
+              findsOneWidget,
+              reason: 'Expected MarkdownAnchorTarget for #$slug',
+            );
+            expect(await controller.scrollToAnchor(slug), isTrue);
+          }
+
+          expect(find.textContaining('Hero Title'), findsOneWidget);
+          expect(find.textContaining('Sub Section'), findsOneWidget);
+          expect(find.textContaining('Div Section'), findsOneWidget);
+          expect(find.textContaining('Nested Title'), findsOneWidget);
+          expect(find.text('pre ok'), findsOneWidget);
+
+          final Semantics heroSem = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.textContaining('Hero Title'),
+                  matching: find.byWidgetPredicate(
+                    (Widget w) => w is Semantics && w.properties.header == true,
+                  ),
+                )
+                .first,
+          );
+          expect(heroSem.properties.headingLevel, 1);
+
+          final Semantics nestedSem = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.textContaining('Nested Title'),
+                  matching: find.byWidgetPredicate(
+                    (Widget w) => w is Semantics && w.properties.header == true,
+                  ),
+                )
+                .first,
+          );
+          expect(nestedSem.properties.headingLevel, 3);
+        } finally {
+          semanticsHandle.dispose();
+        }
+      },
+    );
+
+    testWidgets(
+      'handles unclosed <sub>, <sup>, and <abbr> bursts in linear time without throwing or stalling',
+      (WidgetTester tester) async {
+        final String unclosedSubDoc = '${'<sub>' * 5000}tail';
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                unclosedSubDoc,
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.textContaining('tail'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Transform),
+          ),
+          findsNothing,
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                '<sub>' * 5000,
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownInlineText(
+                nodes: <MarkdownInlineNode>[
+                  ...List<MarkdownInlineNode>.filled(
+                    5000,
+                    const RawHtmlInlineNode('<sup>'),
+                  ),
+                  ...List<MarkdownInlineNode>.filled(
+                    5000,
+                    const RawHtmlInlineNode('<abbr title="t">'),
+                  ),
+                  const TextNode('after-burst'),
+                ],
+                baseStyle: const TextStyle(fontSize: 16.0),
+                theme: const MarkdownThemeData.light(),
+                delegates: const MarkdownBuilderDelegates(),
+                urlPolicy: const MarkdownUrlPolicy.strict(),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.textContaining('after-burst'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownInlineText),
+            matching: find.byType(Transform),
+          ),
+          findsNothing,
+        );
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownInlineText),
+            matching: find.byType(Tooltip),
+          ),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'caps deeply nested <sub>, <sup>, <abbr>, and AST script/abbr nodes at 32 wrappers',
+      (WidgetTester tester) async {
+        final String nestedSubDoc = '${'<sub>' * 5000}core${'</sub>' * 5000}';
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                nestedSubDoc,
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('core'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Transform),
+          ),
+          findsNWidgets(32),
+        );
+
+        final String nestedSupDoc = '${'<sup>' * 500}core${'</sup>' * 500}';
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                nestedSupDoc,
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('core'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Transform),
+          ),
+          findsNWidgets(32),
+        );
+
+        final String nestedAbbrDoc =
+            '${'<abbr title="t">' * 500}core${'</abbr>' * 500}';
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                nestedAbbrDoc,
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('core'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Tooltip),
+          ),
+          findsNWidgets(32),
+        );
+
+        final String nestedTitlelessAbbrDoc =
+            '${'<abbr>' * 500}no-title${'</abbr>' * 500}';
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                nestedTitlelessAbbrDoc,
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('no-title'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Tooltip),
+          ),
+          findsNothing,
+        );
+
+        // AST SubscriptNode, SuperscriptNode, and AbbrInlineNode nesting also caps at 32.
+        MarkdownInlineNode astSub = const TextNode('ast-sub');
+        MarkdownInlineNode astSup = const TextNode('ast-sup');
+        MarkdownInlineNode astAbbr = const TextNode('ast-abbr');
+        for (int depth = 0; depth < 40; depth++) {
+          astSub = SubscriptNode(children: <MarkdownInlineNode>[astSub]);
+          astSup = SuperscriptNode(children: <MarkdownInlineNode>[astSup]);
+          astAbbr = AbbrInlineNode(
+            title: 't',
+            children: <MarkdownInlineNode>[astAbbr],
+          );
+        }
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Column(
+                children: <Widget>[
+                  MarkdownInlineText(
+                    nodes: <MarkdownInlineNode>[astSub],
+                    baseStyle: const TextStyle(fontSize: 16.0),
+                    theme: const MarkdownThemeData.light(),
+                    delegates: const MarkdownBuilderDelegates(),
+                    urlPolicy: const MarkdownUrlPolicy.strict(),
+                  ),
+                  MarkdownInlineText(
+                    nodes: <MarkdownInlineNode>[astSup],
+                    baseStyle: const TextStyle(fontSize: 16.0),
+                    theme: const MarkdownThemeData.light(),
+                    delegates: const MarkdownBuilderDelegates(),
+                    urlPolicy: const MarkdownUrlPolicy.strict(),
+                  ),
+                  MarkdownInlineText(
+                    nodes: <MarkdownInlineNode>[astAbbr],
+                    baseStyle: const TextStyle(fontSize: 16.0),
+                    theme: const MarkdownThemeData.light(),
+                    delegates: const MarkdownBuilderDelegates(),
+                    urlPolicy: const MarkdownUrlPolicy.strict(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('ast-sub'), findsOneWidget);
+        expect(find.text('ast-sup'), findsOneWidget);
+        expect(find.text('ast-abbr'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownInlineText).at(0),
+            matching: find.byType(Transform),
+          ),
+          findsNWidgets(32),
+        );
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownInlineText).at(1),
+            matching: find.byType(Transform),
+          ),
+          findsNWidgets(32),
+        );
+        expect(
+          find.descendant(
+            of: find.byType(MarkdownInlineText).at(2),
+            matching: find.byType(Tooltip),
+          ),
+          findsNWidgets(32),
+        );
+      },
+    );
+
+    testWidgets(
+      'renders crossing malformed <sub> and <abbr> tags safely without range or assertion errors',
+      (WidgetTester tester) async {
+        const String doc =
+            '<sub><abbr title="t">a</sub>b</abbr> <abbr title="u">c</abbr>';
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                doc,
+                options: MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('a'), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (Widget w) => w is RichText && w.text.toPlainText().contains('b'),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('c'), findsOneWidget);
+
+        final List<Tooltip> tooltips = tester
+            .widgetList<Tooltip>(find.byType(Tooltip))
+            .toList();
+        expect(tooltips.any((Tooltip t) => t.message == 't'), isFalse);
+        expect(tooltips.any((Tooltip t) => t.message == 'u'), isTrue);
+      },
+    );
   });
 }
 
