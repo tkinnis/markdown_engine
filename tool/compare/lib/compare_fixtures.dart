@@ -455,6 +455,45 @@ Pairing `StreamingMarkdownController` with sliver-based widgets yields smooth 60
   );
 }
 
+/// Builds a 30-chunk mixed-content streaming fixture with a settled rich prefix
+/// (heading, display TeX math, Mermaid diagram, and GitHub alert) followed by
+/// streaming trailing prose, list, and summary chunks.
+StreamingPayloadFixture buildMixedStreamingFixture() {
+  const List<String> chunks = <String>[
+    '# Hybrid Mixed-Content ',
+    'Stream\n\n\$\$\n\\int_{0}^{\\infty} e^{-x^2}\\,dx = ',
+    '\\frac{\\sqrt{\\pi}}{2}\n\$\$\n\n',
+    '```mermaid\nflowchart LR\n  S["Settled Sliver"] --> ',
+    'T["Tail Canvas"]\n```\n\n',
+    '> [!TIP]\n> Settled math, Mermaid, and alert blocks remain frozen ',
+    'while trailing prose streams incrementally.\n\n',
+    'Trailing ',
+    'prose ',
+    'tokens ',
+    'stream ',
+    'into ',
+    'the ',
+    'dedicated ',
+    'tail ',
+    'canvas ',
+    'without ',
+    'rebuilding ',
+    'settled ',
+    'widgets.\n\n',
+    '- Preserves ',
+    'frozen **TexMath** ',
+    'and *VectorGraphic* ',
+    'slots\n',
+    '- Keeps `blockId` ',
+    'anchors ',
+    'and selection ',
+    'stable\n\n',
+    'Final summary ',
+    'line.\n',
+  ];
+  return StreamingPayloadFixture(fullSource: chunks.join(), chunks: chunks);
+}
+
 /// Builds a ~400-block rich Markdown document for headless widget benchmarks.
 String buildWidget400BlockDocument() {
   const int sections = 67;

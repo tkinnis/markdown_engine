@@ -7,8 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart' show CodeBlockNode;
 import 'package:pele_dart/pele_dart.dart' as pele;
 import 'package:vector_graphics/vector_graphics_compat.dart';
-import 'package:vector_graphics_compiler/vector_graphics_compiler.dart' as vg;
 
+import 'built_in_mermaid_worker.dart';
 import 'inline_renderer.dart' show MarkdownInteractiveAction;
 import 'theme.dart';
 
@@ -165,92 +165,7 @@ DerivedMermaidTheme deriveMermaidTheme(MarkdownThemeData theme) {
   );
 }
 
-final RegExp _ariaLabelRegex = RegExp(r'\baria-label="([^"]+)"');
-
-String? _extractAriaLabel(String svg) {
-  final RegExpMatch? match = _ariaLabelRegex.firstMatch(svg);
-  if (match == null) {
-    return null;
-  }
-  final String? raw = match.group(1)?.trim();
-  if (raw == null || raw.isEmpty) {
-    return null;
-  }
-  return raw
-      .replaceAll('&quot;', '"')
-      .replaceAll('&apos;', '\'')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&amp;', '&');
-}
-
-typedef _MermaidIsolateRequest = ({String code, pele.PelePalette palette});
-
-typedef _MermaidIsolateReply = ({
-  Uint8List? compiledBytes,
-  double width,
-  double height,
-  String? semanticsLabel,
-  String? errorCode,
-  String? errorMessage,
-});
-
-_MermaidIsolateReply _renderMermaidWorker(_MermaidIsolateRequest request) {
-  try {
-    final pele.RenderResult rendered = pele.render(
-      request.code,
-      pele.RenderOptions(
-        outputMode: pele.SvgOutputMode.flattened,
-        palette: request.palette,
-      ),
-    );
-    final Uint8List compiled = vg.encodeSvg(
-      xml: rendered.svg,
-      debugName: 'mermaid',
-      theme: const vg.SvgTheme(),
-      enableClippingOptimizer: false,
-      enableMaskingOptimizer: false,
-      enableOverdrawOptimizer: false,
-    );
-    final double safeWidth = (rendered.width.isFinite && rendered.width > 0.0)
-        ? rendered.width
-        : 320.0;
-    final double safeHeight =
-        (rendered.height.isFinite && rendered.height > 0.0)
-        ? rendered.height
-        : 180.0;
-    final String label =
-        _extractAriaLabel(rendered.svg) ?? '${rendered.type} diagram';
-    return (
-      compiledBytes: compiled,
-      width: safeWidth,
-      height: safeHeight,
-      semanticsLabel: label,
-      errorCode: null,
-      errorMessage: null,
-    );
-  } on pele.PeleError catch (error) {
-    return (
-      compiledBytes: null,
-      width: 0.0,
-      height: 0.0,
-      semanticsLabel: null,
-      errorCode: error.code,
-      errorMessage: error.message,
-    );
-  } on Object catch (error) {
-    return (
-      compiledBytes: null,
-      width: 0.0,
-      height: 0.0,
-      semanticsLabel: null,
-      errorCode: 'engineFailed',
-      errorMessage: 'Failed to render Mermaid diagram: $error',
-    );
-  }
-}
-
-BuiltInMermaidResult _decodeIsolateReply(_MermaidIsolateReply reply) {
+BuiltInMermaidResult _decodeWorkerReply(MermaidWorkerReply reply) {
   final Uint8List? bytes = reply.compiledBytes;
   if (bytes != null) {
     return BuiltInMermaidSuccess(
@@ -333,10 +248,11 @@ final class BuiltInMermaidCache {
   /// Default maximum estimated retained byte budget in the LRU cache (16 MiB).
   static const int defaultMaxBytes = 16 * 1024 * 1024;
 
-  /// Test hook forcing background `compute` compilation even under
+  /// Test hook forcing background worker / `compute` compilation even under
   /// `TestWidgetsFlutterBinding` when testing async transitions via `runAsync`.
   bool debugForceAsyncInTests = false;
 
+  final PersistentMermaidWorker _worker = PersistentMermaidWorker();
   final LinkedHashMap<_MermaidCacheKey, _MermaidCacheEntry> _cache =
       LinkedHashMap<_MermaidCacheKey, _MermaidCacheEntry>();
   final Map<_MermaidCacheKey, Future<BuiltInMermaidResult>> _inFlight =
@@ -348,7 +264,38 @@ final class BuiltInMermaidCache {
   int _renderCount = 0;
   int _hitCount = 0;
   int _epoch = 0;
-  bool _warmed = false;
+  bool _usePersistentMermaidIsolate = true;
+  bool _warmedSync = false;
+  bool _warmedOneShot = false;
+
+  /// Test-only accessor for the underlying [PersistentMermaidWorker].
+  @visibleForTesting
+  PersistentMermaidWorker get debugWorker => _worker;
+
+  /// Whether cold Mermaid diagram compilations reuse a persistent pre-warmed
+  /// background worker isolate instead of spawning one-shot `compute()`
+  /// isolates per diagram.
+  ///
+  /// Defaults to `true`. Setting this to `false` immediately shuts down any
+  /// active persistent worker and routes subsequent cold compiles through
+  /// one-shot `compute()`.
+  bool get usePersistentMermaidIsolate => _usePersistentMermaidIsolate;
+
+  set usePersistentMermaidIsolate(bool value) {
+    if (_usePersistentMermaidIsolate == value) {
+      return;
+    }
+    _usePersistentMermaidIsolate = value;
+    if (!value && _worker.isActive) {
+      _epoch++;
+      _inFlight.clear();
+      unawaited(_worker.shutdown());
+    }
+  }
+
+  /// Whether the persistent background Mermaid worker isolate is currently
+  /// active or starting up.
+  bool get isMermaidWorkerActive => _worker.isActive;
 
   /// Active maximum entry capacity before LRU eviction.
   int get maxEntries => _maxEntries;
@@ -402,21 +349,33 @@ final class BuiltInMermaidCache {
     _evictOverBudget();
   }
 
-  /// Primes `pele_dart`'s diagram registry so the first Mermaid diagram avoids
-  /// lazy initialization overhead.
+  /// Primes `pele_dart`'s diagram registry and `vector_graphics_compiler` so
+  /// the first Mermaid diagram avoids lazy initialization overhead.
+  ///
+  /// When [usePersistentMermaidIsolate] is `true` (and outside default widget
+  /// tests unless [debugForceAsyncInTests] is enabled), this lazily spawns and
+  /// pre-warms the persistent background worker isolate.
   Future<void> warmUp() async {
-    if (_warmed) {
-      return;
-    }
-    _warmed = true;
     if (_isRunningInWidgetTest && !debugForceAsyncInTests) {
+      if (_warmedSync) {
+        return;
+      }
+      _warmedSync = true;
       pele.supports('flowchart LR\n  A --> B');
       return;
     }
-    await _runInRealAsyncZone<Future<_MermaidIsolateReply>>(
-      () => compute<_MermaidIsolateRequest, _MermaidIsolateReply>(
-        _renderMermaidWorker,
-        (code: 'flowchart LR\n  A --> B', palette: pele.PelePalette.light),
+    if (_usePersistentMermaidIsolate) {
+      await _runInRealAsyncZone<Future<void>>(() => _worker.warmUp());
+      return;
+    }
+    if (_warmedOneShot) {
+      return;
+    }
+    _warmedOneShot = true;
+    await _runInRealAsyncZone<Future<MermaidWorkerReply>>(
+      () => compileMermaidCompute(
+        'flowchart LR\n  A --> B',
+        pele.PelePalette.light,
       ),
     );
   }
@@ -429,10 +388,15 @@ final class BuiltInMermaidCache {
     _hitCount = 0;
   }
 
-  /// Releases pending compilation state cleanly without leaving open ports.
+  /// Releases pending compilation state and shuts down any active persistent
+  /// Mermaid worker isolate cleanly without leaving open ports or altering
+  /// [usePersistentMermaidIsolate].
   Future<void> dispose() async {
     _epoch++;
     _inFlight.clear();
+    _warmedSync = false;
+    _warmedOneShot = false;
+    await _worker.shutdown();
   }
 
   static int _estimateEntryBytes(
@@ -503,15 +467,16 @@ final class BuiltInMermaidCache {
     final String trimmed = code.trim();
     final _MermaidCacheKey key = (theme.paletteKey, trimmed);
     _renderCount++;
-    final BuiltInMermaidResult result = _decodeIsolateReply(
-      _renderMermaidWorker((code: trimmed, palette: theme.palette)),
+    final BuiltInMermaidResult result = _decodeWorkerReply(
+      compileMermaidSync(trimmed, theme.palette),
     );
     _put(key, result);
     return result;
   }
 
-  /// Compiles [code] in a background isolate (`compute`) in normal runtime, or
-  /// synchronously under `TestWidgetsFlutterBinding` unless
+  /// Compiles [code] in the persistent background worker isolate (or one-shot
+  /// `compute()` when [usePersistentMermaidIsolate] is `false`) in normal
+  /// runtime, or synchronously under `TestWidgetsFlutterBinding` unless
   /// [debugForceAsyncInTests] is enabled.
   Future<BuiltInMermaidResult> render(String code, DerivedMermaidTheme theme) {
     final BuiltInMermaidResult? cached = peek(code, theme);
@@ -531,31 +496,35 @@ final class BuiltInMermaidCache {
 
     final int requestEpoch = _epoch;
     _renderCount++;
-    final Future<BuiltInMermaidResult> future =
-        _runInRealAsyncZone<Future<_MermaidIsolateReply>>(
-          () => compute<_MermaidIsolateRequest, _MermaidIsolateReply>(
-            _renderMermaidWorker,
-            (code: trimmed, palette: theme.palette),
-          ),
-        ).then(
-          (_MermaidIsolateReply reply) {
-            final BuiltInMermaidResult result = _decodeIsolateReply(reply);
-            if (requestEpoch == _epoch) {
-              _inFlight.remove(key);
-              _put(key, result);
-            }
-            return result;
-          },
-          onError: (Object error, StackTrace _) {
-            if (requestEpoch == _epoch) {
-              _inFlight.remove(key);
-            }
-            return BuiltInMermaidFailure(
-              code: 'engineFailed',
-              message: 'Failed to render Mermaid diagram: $error',
-            );
-          },
+    final Future<MermaidWorkerReply> replyFuture = _usePersistentMermaidIsolate
+        ? _runInRealAsyncZone<Future<MermaidWorkerReply>>(
+            () => _worker.compile(trimmed, theme.palette),
+          )
+        : _runInRealAsyncZone<Future<MermaidWorkerReply>>(
+            () => compileMermaidCompute(trimmed, theme.palette),
+          );
+
+    final Future<BuiltInMermaidResult> future = replyFuture.then(
+      (MermaidWorkerReply reply) {
+        final BuiltInMermaidResult result = _decodeWorkerReply(reply);
+        if (requestEpoch == _epoch) {
+          _inFlight.remove(key);
+          if (reply.cacheable) {
+            _put(key, result);
+          }
+        }
+        return result;
+      },
+      onError: (Object error, StackTrace _) {
+        if (requestEpoch == _epoch) {
+          _inFlight.remove(key);
+        }
+        return BuiltInMermaidFailure(
+          code: 'engineFailed',
+          message: 'Failed to render Mermaid diagram: $error',
         );
+      },
+    );
     _inFlight[key] = future;
     return future;
   }

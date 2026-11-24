@@ -19,6 +19,8 @@ void main() {
   final StreamingPayloadFixture stream30Fixture = buildStreamingFixture(
     chunkCount: 30,
   );
+  final StreamingPayloadFixture mixedStream30Fixture =
+      buildMixedStreamingFixture();
   final String doc400 = buildWidget400BlockDocument();
 
   group('Parser Throughput (JIT VM)', () {
@@ -842,6 +844,226 @@ void main() {
         '(${(fmpMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
       );
     });
+
+    testWidgets(
+      '4. Live mixed-content 30-chunk streaming (settled math, Mermaid & alert + prose tail)',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final List<String> chunks = mixedStream30Fixture.chunks;
+        expect(chunks.length, 30);
+
+        const MarkdownEngine engine = MarkdownEngine(
+          defaultOptions: MarkdownOptions.extended(),
+        );
+        const MarkdownThemeData engineLight = MarkdownThemeData.light();
+        final fmd.MarkdownThemeData fmdLight = fmd.MarkdownThemeData(
+          textStyle: const TextStyle(fontSize: 16.0, color: Color(0xFF0F172A)),
+          surfaceColor: const Color(0xFFF1F5F9),
+        );
+        final fmp.MarkdownStyleSheet fmpLight = _buildFmpStyleSheet(
+          Brightness.light,
+        );
+
+        // 4a. MarkdownView.streaming (hybrid settled sliver + trailing canvas)
+        final StreamingMarkdownController engineStream =
+            StreamingMarkdownController(
+              engine: engine,
+              options: const MarkdownOptions.extended(),
+            );
+        await tester.pumpWidget(
+          _benchShell(
+            child: MarkdownView.streaming(
+              controller: engineStream,
+              theme: engineLight,
+            ),
+          ),
+        );
+
+        // Verified warmup session: confirm settled math/Mermaid/alert stay
+        // frozen in SliverMarkdownDocument while trailing prose streams on
+        // MarkdownStreamingCanvasLeaf.
+        MarkdownBuiltInRenderers.clearCaches();
+        engineStream.reset();
+        await tester.pump();
+        final Finder mathFinder = find.byWidgetPredicate(
+          (Widget w) => w.runtimeType.toString() == 'TexMath',
+        );
+        final Finder mermaidFinder = find.byWidgetPredicate(
+          (Widget w) => w.runtimeType.toString() == 'VectorGraphic',
+        );
+        final Finder canvasFinder = find.byWidgetPredicate(
+          (Widget w) =>
+              w.runtimeType.toString() == 'MarkdownStreamingCanvasLeaf',
+        );
+        RenderObject? settledMathRender;
+        RenderObject? settledMermaidRender;
+        for (int i = 0; i < chunks.length; i++) {
+          engineStream.append(chunks[i]);
+          await tester.pump();
+          if (i == 7) {
+            expect(engineStream.settledPrefixBlockCount, 4);
+            expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+            expect(canvasFinder, findsOneWidget);
+            expect(mathFinder, findsOneWidget);
+            expect(mermaidFinder, findsOneWidget);
+            settledMathRender = tester.renderObject(mathFinder);
+            settledMermaidRender = tester.renderObject(mermaidFinder);
+          } else if (i == chunks.length - 1) {
+            expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+            expect(canvasFinder, findsOneWidget);
+            expect(
+              identical(tester.renderObject(mathFinder), settledMathRender),
+              isTrue,
+            );
+            expect(
+              identical(
+                tester.renderObject(mermaidFinder),
+                settledMermaidRender,
+              ),
+              isTrue,
+            );
+          }
+        }
+        engineStream.finish();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        Future<void> runEngineMixedSession() async {
+          engineStream.reset();
+          await tester.pump();
+          for (final String chunk in chunks) {
+            engineStream.append(chunk);
+            await tester.pump();
+          }
+          engineStream.finish();
+          await tester.pump();
+        }
+
+        final List<double> engineSessionMs = <double>[];
+        int sessionMathLayouts = 0;
+        int sessionMermaidRenders = 0;
+        for (int i = 0; i < 3; i++) {
+          MarkdownBuiltInRenderers.clearCaches();
+          final Stopwatch sw = Stopwatch()..start();
+          await runEngineMixedSession();
+          sw.stop();
+          engineSessionMs.add(sw.elapsedMicroseconds / 1000.0);
+          sessionMathLayouts = MarkdownBuiltInRenderers.mathLayoutCount;
+          sessionMermaidRenders = MarkdownBuiltInRenderers.mermaidRenderCount;
+        }
+        expect(sessionMathLayouts, greaterThanOrEqualTo(1));
+        expect(sessionMermaidRenders, greaterThanOrEqualTo(1));
+        engineSessionMs.sort();
+        final double engineMedianSessionMs = engineSessionMs[1];
+        await tester.pumpWidget(const SizedBox.shrink());
+        engineStream.dispose();
+
+        // 4b. flutter_md StreamingMarkdownParser + MarkdownWidget (raw blocks)
+        final fmd.StreamingMarkdownParser fmdParser =
+            fmd.StreamingMarkdownParser();
+        final ValueNotifier<fmd.Markdown> fmdDocNotifier =
+            ValueNotifier<fmd.Markdown>(const fmd.Markdown.empty());
+        await tester.pumpWidget(
+          _benchShell(
+            child: ValueListenableBuilder<fmd.Markdown>(
+              valueListenable: fmdDocNotifier,
+              builder: (BuildContext context, fmd.Markdown doc, _) =>
+                  SingleChildScrollView(
+                    child: fmd.MarkdownWidget(markdown: doc, theme: fmdLight),
+                  ),
+            ),
+          ),
+        );
+
+        Future<void> runFmdMixedSession() async {
+          fmdParser.reset();
+          fmdDocNotifier.value = const fmd.Markdown.empty();
+          await tester.pump();
+          for (final String chunk in chunks) {
+            fmdDocNotifier.value = fmdParser.add(chunk);
+            await tester.pump();
+          }
+        }
+
+        await runFmdMixedSession();
+        final List<double> fmdSessionMs = <double>[];
+        for (int i = 0; i < 3; i++) {
+          final Stopwatch sw = Stopwatch()..start();
+          await runFmdMixedSession();
+          sw.stop();
+          fmdSessionMs.add(sw.elapsedMicroseconds / 1000.0);
+        }
+        fmdSessionMs.sort();
+        final double fmdMedianSessionMs = fmdSessionMs[1];
+        await tester.pumpWidget(const SizedBox.shrink());
+        fmdDocNotifier.dispose();
+
+        // 4c. flutter_markdown_plus full re-parse + full rebuild per chunk
+        final ValueNotifier<String> fmpSourceNotifier = ValueNotifier<String>(
+          '',
+        );
+        await tester.pumpWidget(
+          _benchShell(
+            child: ValueListenableBuilder<String>(
+              valueListenable: fmpSourceNotifier,
+              builder: (BuildContext context, String data, _) =>
+                  fmp.Markdown(data: data, styleSheet: fmpLight),
+            ),
+          ),
+        );
+
+        Future<void> runFmpMixedSession() async {
+          final StringBuffer acc = StringBuffer();
+          fmpSourceNotifier.value = '';
+          await tester.pump();
+          for (final String chunk in chunks) {
+            acc.write(chunk);
+            fmpSourceNotifier.value = acc.toString();
+            await tester.pump();
+          }
+        }
+
+        await runFmpMixedSession();
+        final List<double> fmpSessionMs = <double>[];
+        for (int i = 0; i < 3; i++) {
+          final Stopwatch sw = Stopwatch()..start();
+          await runFmpMixedSession();
+          sw.stop();
+          fmpSessionMs.add(sw.elapsedMicroseconds / 1000.0);
+        }
+        fmpSessionMs.sort();
+        final double fmpMedianSessionMs = fmpSessionMs[1];
+        await tester.pumpWidget(const SizedBox.shrink());
+        fmpSourceNotifier.dispose();
+
+        stdout.writeln('');
+        stdout.writeln(
+          '=== Widget Benchmark 4: Live Mixed-Content 30-Chunk Streaming '
+          '(settled math + Mermaid + alert + prose tail) ===',
+        );
+        stdout.writeln(
+          '  MarkdownView.streaming (hybrid settled sliver + canvas tail): '
+          '${engineMedianSessionMs.toStringAsFixed(2)} ms total '
+          '(${(engineMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk, '
+          'mathLayouts=$sessionMathLayouts, mermaidRenders=$sessionMermaidRenders)',
+        );
+        stdout.writeln(
+          '  flutter_md StreamingMarkdownParser + MarkdownWidget (raw blocks): '
+          '${fmdMedianSessionMs.toStringAsFixed(2)} ms total '
+          '(${(fmdMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
+        );
+        stdout.writeln(
+          '  flutter_markdown_plus Markdown (raw blocks, full re-parse/rebuild): '
+          '${fmpMedianSessionMs.toStringAsFixed(2)} ms total '
+          '(${(fmpMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
+        );
+      },
+    );
   });
 }
 

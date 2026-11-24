@@ -1,11 +1,15 @@
 import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
 import 'package:markdown_engine_flutter/src/isolate_parse_io.dart';
+import 'package:markdown_engine_flutter/src/streaming_canvas.dart';
+import 'package:tex_math_flutter/tex_math_flutter.dart' show TexMath;
+import 'package:vector_graphics/vector_graphics.dart' show VectorGraphic;
 
 void main() {
   group('Zero-reparse theme toggle', () {
@@ -810,6 +814,1076 @@ $tail
         );
         await tester.pump();
         expect(find.text('Deferred Build Read'), findsOneWidget);
+      },
+    );
+  });
+
+  group('Hybrid two-sliver streaming tail canvas', () {
+    testWidgets(
+      'mixed settled MathBlockNode, CodeBlockNode(mermaid), and AlertNode freeze in settled SliverMarkdownDocument while trailing prose streams on MarkdownStreamingCanvasLeaf',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        addTearDown(stream.dispose);
+
+        final SemanticsHandle semantics = tester.ensureSemantics();
+        try {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: SizedBox(
+                  width: 600.0,
+                  height: 700.0,
+                  child: MarkdownView.streaming(
+                    controller: stream,
+                    padding: const EdgeInsets.all(16.0),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          stream.append(
+            r'$$\int_0^1 x^2\,dx = \frac{1}{3}$$'
+            '\n\n'
+            '```mermaid\n'
+            'flowchart LR\n'
+            '  A[Alpha] --> B[Beta]\n'
+            '```\n\n'
+            '> [!NOTE]\n'
+            '> Settled alert body.\n\n'
+            'Trailing canvas prose ',
+          );
+          await tester.pumpAndSettle();
+
+          expect(stream.settledPrefixBlockCount, 3);
+          expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+          expect(find.byType(MarkdownStreamingSliverAdapter), findsOneWidget);
+          expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+          expect(find.byType(TexMath), findsOneWidget);
+          expect(find.byType(VectorGraphic), findsOneWidget);
+          expect(find.text('Note'), findsOneWidget);
+          expect(find.text('Settled alert body.'), findsOneWidget);
+          expect(
+            find.bySemanticsLabel(RegExp('Trailing canvas prose')),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+
+          // Capture settled widget and RenderObject instances across rich blocks.
+          final Widget settledMathWidget = tester.widget(find.byType(TexMath));
+          final RenderObject settledMathRender = tester.renderObject(
+            find.byType(TexMath),
+          );
+          final Widget settledMermaidWidget = tester.widget(
+            find.byType(VectorGraphic),
+          );
+          final RenderObject settledMermaidRender = tester.renderObject(
+            find.byType(VectorGraphic),
+          );
+          final Widget settledAlertWidget = tester.widget(
+            find.text('Settled alert body.'),
+          );
+          final RenderObject settledAlertRender = tester.renderObject(
+            find.text('Settled alert body.'),
+          );
+
+          // Append tail prose tokens; settled rich prefix must remain untouched.
+          for (final String token in <String>[
+            'with ',
+            'multiple ',
+            'incremental ',
+            'tokens.',
+          ]) {
+            stream.append(token);
+            await tester.pump();
+
+            expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+            expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+            expect(
+              identical(tester.widget(find.byType(TexMath)), settledMathWidget),
+              isTrue,
+            );
+            expect(
+              identical(
+                tester.renderObject(find.byType(TexMath)),
+                settledMathRender,
+              ),
+              isTrue,
+            );
+            expect(
+              identical(
+                tester.widget(find.byType(VectorGraphic)),
+                settledMermaidWidget,
+              ),
+              isTrue,
+            );
+            expect(
+              identical(
+                tester.renderObject(find.byType(VectorGraphic)),
+                settledMermaidRender,
+              ),
+              isTrue,
+            );
+            expect(
+              identical(
+                tester.widget(find.text('Settled alert body.')),
+                settledAlertWidget,
+              ),
+              isTrue,
+            );
+            expect(
+              identical(
+                tester.renderObject(find.text('Settled alert body.')),
+                settledAlertRender,
+              ),
+              isTrue,
+            );
+          }
+
+          expect(
+            find.bySemanticsLabel(
+              RegExp('Trailing canvas prose with multiple incremental tokens.'),
+            ),
+            findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+        } finally {
+          semantics.dispose();
+        }
+      },
+    );
+
+    testWidgets(
+      'per-block delegate compatibility keeps prose tail on MarkdownStreamingCanvasLeaf even when custom math/diagram/code delegates exist, falling back only when trailing block invokes them',
+      (WidgetTester tester) async {
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        addTearDown(stream.dispose);
+
+        int mathBuilds = 0;
+        int diagramBuilds = 0;
+        int codeBuilds = 0;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: stream,
+                  delegates: MarkdownBuilderDelegates(
+                    mathBlockBuilder: (BuildContext _, MathBlockNode node) {
+                      mathBuilds++;
+                      return Text('CUSTOM_MATH:${node.latex.trim()}');
+                    },
+                    diagramBuilder: (BuildContext _, CodeBlockNode node) {
+                      if (node.language != 'mermaid') {
+                        return null;
+                      }
+                      diagramBuilds++;
+                      return Text('CUSTOM_DIAGRAM:${node.literal.trim()}');
+                    },
+                    codeBlockBuilder: (BuildContext _, CodeBlockNode node) {
+                      codeBuilds++;
+                      return Text('CUSTOM_CODE:${node.literal.trim()}');
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        stream.append(
+          r'$$\alpha + \beta$$'
+          '\n\n'
+          '```mermaid\nflowchart TD\n  X --> Y\n```\n\n'
+          'Trailing plain ',
+        );
+        await tester.pump();
+
+        expect(stream.settledPrefixBlockCount, 2);
+        expect(mathBuilds, 1);
+        expect(diagramBuilds, 1);
+        expect(codeBuilds, 0);
+        expect(find.text(r'CUSTOM_MATH:\alpha + \beta'), findsOneWidget);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+
+        // Appending more plain prose keeps tail on canvas without rebuilding custom delegates.
+        stream.append('prose words.');
+        await tester.pump();
+        expect(mathBuilds, 1);
+        expect(diagramBuilds, 1);
+        expect(codeBuilds, 0);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+
+        // Trailing code block invokes codeBlockBuilder -> tail switches to widget tail.
+        stream.append('\n\n```dart\nfinal int v = 42;');
+        await tester.pump();
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsNWidgets(2));
+        expect(find.text('CUSTOM_CODE:final int v = 42;'), findsOneWidget);
+        expect(mathBuilds, 1);
+        expect(diagramBuilds, 1);
+
+        // Once the code block settles behind subsequent prose, tail returns to canvas.
+        stream.append('\n```\n\nBack to prose ');
+        await tester.pump();
+        expect(stream.settledPrefixBlockCount, 4);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        expect(mathBuilds, 1);
+        expect(diagramBuilds, 1);
+        expect(codeBuilds, 2);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'full multi-phase transition (full canvas -> widget tail -> hybrid settled widgets + canvas tail -> finish -> reset) maintains split padding and zero assertions',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        addTearDown(stream.dispose);
+
+        const EdgeInsets outerPadding = EdgeInsets.fromLTRB(
+          12.0,
+          16.0,
+          14.0,
+          20.0,
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: stream,
+                  padding: outerPadding,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // Phase 1: Pure prose (>= 2 blocks) -> full-document streaming canvas.
+        stream.append('Introductory paragraph.\n\nActive prose ');
+        await tester.pump();
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        expect(find.byType(SliverMarkdownDocument), findsNothing);
+        expect(tester.takeException(), isNull);
+
+        // Phase 2: Trailing block becomes live display math -> hybrid widget tail.
+        stream.append('\n\n\$\$\n\\sum_{i=1}^n i');
+        await tester.pump();
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsNWidgets(2));
+        expect(tester.takeException(), isNull);
+
+        // Phase 3: Close display math and stream subsequent prose -> hybrid canvas tail.
+        stream.append('\n\$\$\n\nResumed prose ');
+        await tester.pump();
+        expect(stream.settledPrefixBlockCount, 3);
+        expect(find.byType(TexMath), findsOneWidget);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+
+        // Check split outer padding & trailingBlockSpacing between the two slivers.
+        final SliverMarkdownDocument settledSliver = tester
+            .widget<SliverMarkdownDocument>(
+              find.byType(SliverMarkdownDocument),
+            );
+        expect(
+          settledSliver.padding,
+          const EdgeInsets.fromLTRB(12.0, 16.0, 14.0, 0.0),
+        );
+        expect(settledSliver.trailingBlockSpacing, isTrue);
+
+        final Rect settledMathRect = tester.getRect(find.byType(TexMath));
+        final Rect tailCanvasRect = tester.getRect(
+          find.byType(MarkdownStreamingCanvasLeaf),
+        );
+        expect(
+          tailCanvasRect.top,
+          greaterThanOrEqualTo(settledMathRect.bottom),
+        );
+        expect(tester.takeException(), isNull);
+
+        // Phase 4: Finish stream -> switches cleanly to unified SliverMarkdownDocument.
+        stream.finish();
+        await tester.pump();
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.byType(TexMath), findsOneWidget);
+        expect(find.text('Resumed prose'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+
+        // Phase 5: Reset stream cleanly -> empty without errors, then restart pure prose.
+        stream.reset();
+        await tester.pump();
+        expect(find.byType(TexMath), findsNothing);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsNothing);
+        expect(tester.takeException(), isNull);
+
+        stream.append('Restarted first.\n\nRestarted second ');
+        await tester.pump();
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        expect(find.byType(SliverMarkdownDocument), findsNothing);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'cross-sliver SelectionArea drag selection and SelectAll copy work across settled rich blocks and hybrid canvas tail',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        String? copiedClipboard;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                copiedClipboard = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        final FocusNode focusNode = FocusNode();
+        addTearDown(stream.dispose);
+        addTearDown(focusNode.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: stream,
+                  focusNode: focusNode,
+                  padding: const EdgeInsets.all(16.0),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        stream.append(
+          '> [!NOTE]\n'
+          '> Alert settled text.\n\n'
+          r'$$E = mc^2$$'
+          '\n\n'
+          'Tail canvas sentence alpha beta ',
+        );
+        await tester.pump();
+
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        expect(find.byType(TexMath), findsOneWidget);
+
+        // Drag mouse selection from settled alert text down across trailing canvas leaf.
+        final Offset alertLeft =
+            tester.getRect(find.text('Alert settled text.')).centerLeft +
+            const Offset(2.0, 0.0);
+        final Rect tailRect = tester.getRect(
+          find.byType(MarkdownStreamingCanvasLeaf),
+        );
+        final Offset tailEnd = Offset(tailRect.right - 8.0, tailRect.center.dy);
+
+        final TestGesture drag = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(drag.removePointer);
+        await drag.down(alertLeft);
+        await tester.pump();
+        await drag.moveTo(tailEnd);
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+
+        expect(copiedClipboard, isNotNull);
+        expect(copiedClipboard, contains('Alert settled text.'));
+        expect(copiedClipboard, contains('Tail canvas sentence alpha beta'));
+
+        // Now invoke SelectAll, stream another token while SelectAll is active, and copy.
+        copiedClipboard = null;
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+
+        stream.append('gamma.');
+        await tester.pump();
+
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+
+        expect(copiedClipboard, stream.document.toPlainText());
+        expect(copiedClipboard, contains('Alert settled text.'));
+        expect(
+          copiedClipboard,
+          contains('Tail canvas sentence alpha beta gamma.'),
+        );
+      },
+    );
+
+    testWidgets(
+      'showFrontmatter: false handles leading FrontmatterNode cleanly without off-by-1 split or empty settled sliver',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        addTearDown(stream.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: stream,
+                  showFrontmatter: false,
+                  padding: const EdgeInsets.fromLTRB(16.0, 24.0, 16.0, 16.0),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // Case A1: Frontmatter is the only settled block and trailing block is canvas-eligible.
+        stream.append(
+          '---\n'
+          'title: Secret Frontmatter\n'
+          '---\n\n'
+          'First visible paragraph ',
+        );
+        await tester.pump();
+
+        expect(stream.settledPrefixBlockCount, 1);
+        expect(find.textContaining('Secret Frontmatter'), findsNothing);
+        // Must NOT mount an empty SliverMarkdownDocument stealing top padding.
+        expect(find.byType(SliverMarkdownDocument), findsNothing);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        final double heightWithTopPadding = tester
+            .getRect(find.byType(MarkdownStreamingCanvasLeaf))
+            .height;
+        expect(tester.takeException(), isNull);
+
+        // Case B: Leading frontmatter + settled paragraph + settled MathBlockNode + streaming prose tail.
+        stream.append('\n\n\$\$x^2 + y^2 = z^2\$\$\n\nTrailing hybrid prose ');
+        await tester.pump();
+
+        expect(stream.settledPrefixBlockCount, 3);
+        expect(find.textContaining('Secret Frontmatter'), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.text('First visible paragraph'), findsOneWidget);
+        expect(find.byType(TexMath), findsOneWidget);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        expect(find.text('Trailing hybrid prose '), findsNothing);
+        expect(tester.takeException(), isNull);
+
+        // Case B2: Leading frontmatter (filtered) + single settled MathBlockNode + prose tail (settledCount == 2).
+        final StreamingMarkdownController frontmatterPlusMathStream =
+            StreamingMarkdownController(
+              options: const MarkdownOptions.extended(),
+            );
+        addTearDown(frontmatterPlusMathStream.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: frontmatterPlusMathStream,
+                  showFrontmatter: false,
+                  padding: const EdgeInsets.fromLTRB(16.0, 24.0, 16.0, 16.0),
+                ),
+              ),
+            ),
+          ),
+        );
+        frontmatterPlusMathStream.append(
+          '---\n'
+          'title: Also Hidden\n'
+          '---\n\n'
+          '\$\$a^2 + b^2 = c^2\$\$\n\n'
+          'Only trailing prose ',
+        );
+        await tester.pump();
+
+        expect(frontmatterPlusMathStream.settledPrefixBlockCount, 2);
+        expect(find.textContaining('Also Hidden'), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.byType(TexMath), findsOneWidget);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        expect(find.text('Only trailing prose '), findsNothing);
+        expect(tester.takeException(), isNull);
+
+        // Also verify frontmatter-only settled + rich unsupported tail avoids empty top sliver.
+        final StreamingMarkdownController richTailStream =
+            StreamingMarkdownController(
+              options: const MarkdownOptions.extended(),
+            );
+        addTearDown(richTailStream.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: richTailStream,
+                  showFrontmatter: false,
+                  padding: const EdgeInsets.fromLTRB(16.0, 24.0, 16.0, 16.0),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        richTailStream.append(
+          '---\n'
+          'title: Hidden Only\n'
+          '---\n\n'
+          '> [!NOTE]\n'
+          '> Trailing alert body.',
+        );
+        await tester.pump();
+
+        expect(richTailStream.settledPrefixBlockCount, 1);
+        expect(find.textContaining('Hidden Only'), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.text('Trailing alert body.'), findsOneWidget);
+        expect(
+          tester
+              .widget<SliverMarkdownDocument>(
+                find.byType(SliverMarkdownDocument),
+              )
+              .padding,
+          const EdgeInsets.fromLTRB(16.0, 24.0, 16.0, 16.0),
+        );
+        expect(tester.takeException(), isNull);
+
+        // Compare top-24 vs top-0 padding on the same hidden-frontmatter stream.
+        final StreamingMarkdownController zeroTopStream =
+            StreamingMarkdownController(
+              options: const MarkdownOptions.extended(),
+            );
+        addTearDown(zeroTopStream.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: zeroTopStream,
+                  showFrontmatter: false,
+                  padding: const EdgeInsets.fromLTRB(16.0, 0.0, 16.0, 16.0),
+                ),
+              ),
+            ),
+          ),
+        );
+        zeroTopStream.append(
+          '---\n'
+          'title: Secret Frontmatter\n'
+          '---\n\n'
+          'First visible paragraph ',
+        );
+        await tester.pump();
+        final double heightWithoutTopPadding = tester
+            .getRect(find.byType(MarkdownStreamingCanvasLeaf))
+            .height;
+        expect(heightWithTopPadding - heightWithoutTopPadding, 24.0);
+      },
+    );
+
+    testWidgets(
+      'MarkdownController preserves prefix memoization and block/anchor registrations across hybrid widget-tail transitions',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        final MarkdownController viewController = MarkdownController();
+        addTearDown(stream.dispose);
+        addTearDown(viewController.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 320.0,
+                child: MarkdownView.streaming(
+                  controller: stream,
+                  markdownController: viewController,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        stream.append(
+          '# Intro {#intro}\n\n'
+          '```mermaid\n'
+          'flowchart LR\n'
+          '  A[One] --> B[Two]\n'
+          '```\n\n'
+          'Active tail ',
+        );
+        await tester.pump();
+
+        expect(stream.settledPrefixBlockCount, 2);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsNWidgets(2));
+        expect(find.byType(VectorGraphic), findsOneWidget);
+
+        final Widget settledHeadingWidget = tester.widget(find.text('Intro'));
+        final RenderObject settledMermaidRender = tester.renderObject(
+          find.byType(VectorGraphic),
+        );
+
+        // Append tail content including multiple filler paragraphs and a tail heading anchor.
+        final StringBuffer tailAppend = StringBuffer('more tokens.\n\n');
+        for (int i = 0; i < 12; i++) {
+          tailAppend.writeln('Filler tail paragraph $i for scrollability.\n');
+        }
+        tailAppend.writeln('## Tail Section {#tail-sec}\n\nTail bottom line.');
+        stream.append(tailAppend.toString());
+        await tester.pump();
+
+        expect(
+          identical(tester.widget(find.text('Intro')), settledHeadingWidget),
+          isTrue,
+        );
+        expect(
+          identical(
+            tester.renderObject(find.byType(VectorGraphic)),
+            settledMermaidRender,
+          ),
+          isTrue,
+        );
+
+        stream.finish();
+        await tester.pump();
+
+        final Future<bool> tailAnchorFuture = viewController.scrollToAnchor(
+          'tail-sec',
+          duration: Duration.zero,
+        );
+        await tester.pumpAndSettle();
+        expect(await tailAnchorFuture, isTrue);
+        expect(find.text('Tail Section'), findsOneWidget);
+
+        final Future<bool> introAnchorFuture = viewController.scrollToAnchor(
+          'intro',
+          duration: Duration.zero,
+        );
+        await tester.pumpAndSettle();
+        expect(await introAnchorFuture, isTrue);
+        expect(find.text('Intro'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'mid-stream reference/footnote definitions shrinking settledPrefixBlockCount and replaceText() on settled blocks refresh _StreamingBlockSlot without stale text',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final StreamingMarkdownController stream = StreamingMarkdownController(
+          options: const MarkdownOptions.extended(),
+        );
+        addTearDown(stream.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 600.0,
+                child: MarkdownView.streaming(
+                  controller: stream,
+                  delegates: MarkdownBuilderDelegates(
+                    onTapLink: (String _, String? _) {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // Phase 1: settled paragraph with unresolved [docs] & [^1] + settled math + canvas tail.
+        stream.append(
+          'See [docs] and note[^1].\n\n'
+          r'$$\alpha = 1$$'
+          '\n\n'
+          'Active tail ',
+        );
+        await tester.pump();
+
+        expect(stream.settledPrefixBlockCount, 2);
+        expect(find.byType(SliverMarkdownDocument), findsOneWidget);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsOneWidget);
+        expect(find.text('See [docs] and note[^1].'), findsOneWidget);
+        final TexMath mathBefore = tester.widget<TexMath>(find.byType(TexMath));
+
+        // replaceText() keeping settledPrefixBlockCount == 2 (hybridCanvasTail) must refresh both slots.
+        stream.replaceText(
+          'See [docs] and updated note[^1].\n\n'
+          r'$$\beta = 2$$'
+          '\n\n'
+          'Active tail ',
+        );
+        await tester.pump();
+
+        expect(stream.settledPrefixBlockCount, 2);
+        expect(find.text('See [docs] and updated note[^1].'), findsOneWidget);
+        expect(find.text('See [docs] and note[^1].'), findsNothing);
+        final TexMath mathAfterCanvasReplace = tester.widget<TexMath>(
+          find.byType(TexMath),
+        );
+        expect(
+          identical(mathAfterCanvasReplace.displayList, mathBefore.displayList),
+          isFalse,
+        );
+
+        // Transition to hybridWidgetTail via inline math in active tail, then replaceText() settled blocks again.
+        stream.append(r'with $z$.');
+        await tester.pump();
+        expect(stream.settledPrefixBlockCount, 2);
+        expect(find.byType(MarkdownStreamingCanvasLeaf), findsNothing);
+        expect(find.byType(SliverMarkdownDocument), findsNWidgets(2));
+
+        stream.replaceText(
+          'See [docs] now[^1].\n\n'
+          r'$$\gamma = 3$$'
+          '\n\n'
+          r'Active tail with $z$.',
+        );
+        await tester.pump();
+
+        expect(stream.settledPrefixBlockCount, 2);
+        expect(find.text('See [docs] now[^1].'), findsOneWidget);
+        final TexMath mathAfterWidgetReplace = tester
+            .widgetList<TexMath>(find.byType(TexMath))
+            .first;
+        expect(
+          identical(
+            mathAfterWidgetReplace.displayList,
+            mathAfterCanvasReplace.displayList,
+          ),
+          isFalse,
+        );
+
+        // Mid-stream reference + footnote definitions arrive -> settledPrefixBlockCount drops to 0!
+        // Stream stays active and block-0 must immediately resolve its link & footnote marker.
+        stream.append(
+          '\n\n[docs]: https://example.com/docs\n[^1]: Resolved footnote body.',
+        );
+        await tester.pump();
+
+        expect(stream.isFinished, isFalse);
+        expect(stream.settledPrefixBlockCount, 0);
+        expect(find.text('See [docs] now[^1].'), findsNothing);
+        expect(find.textContaining('See docs now'), findsOneWidget);
+        expect(find.textContaining('Resolved footnote body.'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'swapping StreamingMarkdownController or toggling showFrontmatter clears stale SelectAll state cleanly',
+      (WidgetTester tester) async {
+        String? copiedClipboard;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                copiedClipboard = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        final StreamingMarkdownController firstStream =
+            StreamingMarkdownController(
+              options: const MarkdownOptions.extended(),
+            );
+        final StreamingMarkdownController secondStream =
+            StreamingMarkdownController(
+              options: const MarkdownOptions.extended(),
+            );
+        final FocusNode focusNode = FocusNode();
+        addTearDown(firstStream.dispose);
+        addTearDown(secondStream.dispose);
+        addTearDown(focusNode.dispose);
+
+        firstStream.append(
+          '---\ntitle: Front\n---\n\nFirst stream body.\n\nSecond paragraph.',
+        );
+        secondStream.append('Second stream replacement.');
+
+        StreamingMarkdownController activeStream = firstStream;
+        bool showFrontmatter = true;
+        late StateSetter rebuild;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuild = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: 600.0,
+                    height: 400.0,
+                    child: MarkdownView.streaming(
+                      controller: activeStream,
+                      focusNode: focusNode,
+                      showFrontmatter: showFrontmatter,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        // Trigger SelectAll on firstStream with showFrontmatter: true.
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+        expect(copiedClipboard, contains('First stream body.'));
+
+        // Toggle showFrontmatter -> stale SelectAll state must clear cleanly without crash.
+        rebuild(() => showFrontmatter = false);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        // Re-select all, then swap to secondStream -> stale SelectAll cleared cleanly.
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        rebuild(() => activeStream = secondStream);
+        await tester.pump();
+
+        copiedClipboard = null;
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+        expect(
+          copiedClipboard == null ||
+              !copiedClipboard!.contains('First stream body.'),
+          isTrue,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'document switching with nested SingleChildScrollView and Text.rich WidgetSpan avoids ConcurrentModificationError with and without active selection',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        String? copiedClipboard;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                copiedClipboard = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        const String docA =
+            '# Preset A\n\n'
+            'Inline math \$x^2 + y^2\$ in rich text.\n\n'
+            '```mermaid\n'
+            'flowchart LR\n'
+            '  A[Alpha] --> B[Bravo] --> C[Charlie] --> D[Delta] --> E[Echo]\n'
+            '```\n\n'
+            '| Col 1 | Col 2 | Col 3 |\n'
+            '| :--- | :--- | :--- |\n'
+            '| Wide cell \$a^2\$ | Second cell alpha | Third cell beta |\n\n'
+            '> [!NOTE]\n'
+            '> Alert inside Preset A.';
+
+        const String docB =
+            '# Preset B\n\n'
+            'Switched paragraph \$z^3\$ without crash.\n\n'
+            '```dart\nfinal int cleanSwitch = 1;\n```';
+
+        final FocusNode focusNode = FocusNode();
+        addTearDown(focusNode.dispose);
+        String currentDoc = docA;
+        late StateSetter rebuild;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuild = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: 280.0,
+                    height: 500.0,
+                    child: MarkdownView(
+                      currentDoc,
+                      options: const MarkdownOptions.extended(),
+                      focusNode: focusNode,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        expect(find.byType(SingleChildScrollView), findsWidgets);
+        expect(find.text('Preset A'), findsOneWidget);
+
+        // 1. Switch without any active selection.
+        rebuild(() => currentDoc = docB);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(find.text('Preset B'), findsOneWidget);
+
+        // Switch back to docA with nested table WidgetSpans.
+        rebuild(() => currentDoc = docA);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        // 2. Activate SelectAll across nested SingleChildScrollView + Text.rich, then switch.
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        rebuild(() => currentDoc = docB);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(find.text('Preset B'), findsOneWidget);
+
+        copiedClipboard = null;
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+        expect(
+          copiedClipboard == null || !copiedClipboard!.contains('Preset A'),
+          isTrue,
+        );
+
+        // 3. Mouse drag selection over docA paragraph with WidgetSpan, then switch to docB.
+        rebuild(() => currentDoc = docA);
+        await tester.pump();
+        final Offset start =
+            tester.getRect(find.text('Preset A')).centerLeft +
+            const Offset(2.0, 0.0);
+        final Offset end =
+            tester.getRect(find.text('Preset A')).centerRight -
+            const Offset(2.0, 0.0);
+        final TestGesture drag = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(drag.removePointer);
+        await drag.down(start);
+        await tester.pump();
+        await drag.moveTo(end);
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+
+        rebuild(() => currentDoc = docB);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
       },
     );
   });

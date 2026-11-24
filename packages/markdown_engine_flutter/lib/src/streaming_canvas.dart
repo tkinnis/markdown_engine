@@ -4,6 +4,7 @@ import 'dart:ui' as ui show Picture, PictureRecorder, TextBox;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/services.dart'
     show
         Clipboard,
@@ -31,6 +32,8 @@ final class MarkdownStreamingCanvasPayload {
     required this.padding,
     required this.showFrontmatter,
     required this.revision,
+    this.startBlockIndex = 0,
+    this.includeTopPadding = true,
   });
 
   /// Latest parsed Markdown document.
@@ -48,6 +51,15 @@ final class MarkdownStreamingCanvasPayload {
 
   /// Monotonic payload revision for fast equality short-circuiting.
   final int revision;
+
+  /// Inclusive starting block index inside `document.blocks` for tail-only
+  /// hybrid streaming.
+  final int startBlockIndex;
+
+  /// Whether [padding]'s top inset is applied above the first rendered block.
+  ///
+  /// Set to `false` when mounted below a settled prefix sliver.
+  final bool includeTopPadding;
 
   @override
   bool operator ==(Object other) =>
@@ -73,12 +85,13 @@ bool isCanvasSupportedBlock(
   MarkdownBlockNode block,
   MarkdownBuilderDelegates delegates, {
   bool showFrontmatter = true,
+  bool allowHeadings = true,
 }) {
   switch (block) {
     case FrontmatterNode():
       return !showFrontmatter;
     case HeadingNode():
-      return canBuildFastSimpleInlines(block.children);
+      return allowHeadings && canBuildFastSimpleInlines(block.children);
     case ParagraphNode():
       return canBuildFastSimpleInlines(block.children);
     case ThematicBreakNode():
@@ -89,6 +102,7 @@ bool isCanvasSupportedBlock(
           block.children[i],
           delegates,
           showFrontmatter: showFrontmatter,
+          allowHeadings: allowHeadings,
         )) {
           return false;
         }
@@ -100,6 +114,7 @@ bool isCanvasSupportedBlock(
           block.items[i],
           delegates,
           showFrontmatter: showFrontmatter,
+          allowHeadings: allowHeadings,
         )) {
           return false;
         }
@@ -111,12 +126,17 @@ bool isCanvasSupportedBlock(
           block.children[i],
           delegates,
           showFrontmatter: showFrontmatter,
+          allowHeadings: allowHeadings,
         )) {
           return false;
         }
       }
       return true;
     case CodeBlockNode():
+      if (delegates.diagramBuilder != null ||
+          delegates.codeBlockBuilder != null) {
+        return false;
+      }
       if (delegates.enableBuiltInMermaid &&
           block.language?.toLowerCase() == 'mermaid') {
         return false;
@@ -719,10 +739,15 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     final MarkdownStreamingCanvasPayload payload = _listenable.value;
     final MarkdownThemeData theme = payload.themeOverride ?? _ambientTheme;
     final MarkdownRenderEnvironment env = _environment;
-    final EdgeInsets pad = payload.padding.resolve(env.textDirection);
+    final EdgeInsets rawPad = payload.padding.resolve(env.textDirection);
+    final EdgeInsets pad = payload.includeTopPadding
+        ? rawPad
+        : EdgeInsets.fromLTRB(rawPad.left, 0.0, rawPad.right, rawPad.bottom);
     final double availWidth = maxWidth.isFinite ? maxWidth : 800.0;
     final double contentWidth = math.max(0.0, availWidth - pad.horizontal);
     final List<MarkdownBlockNode> rawBlocks = payload.document.blocks;
+    final int count = rawBlocks.length;
+    final int startIdx = payload.startBlockIndex.clamp(0, count);
 
     final bool configInvalid =
         _laidOutContentWidth != contentWidth ||
@@ -739,7 +764,7 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     _laidOutTheme = theme;
     _laidOutEnv = env;
 
-    if (rawBlocks.isEmpty) {
+    if (startIdx >= count) {
       final bool hadContent =
           _entries.isNotEmpty || _totalSelectableLength != 0;
       _entries.clear();
@@ -765,12 +790,11 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
       _invalidateViewportPicture();
     }
 
-    final int count = rawBlocks.length;
     int firstDirty = 0;
-    int firstDirtyRawIdx = 0;
+    int firstDirtyRawIdx = startIdx;
     if (!configInvalid) {
       int visibleIdx = 0;
-      for (int i = 0; i < count; i++) {
+      for (int i = startIdx; i < count; i++) {
         final MarkdownBlockNode b = rawBlocks[i];
         if (!payload.showFrontmatter && b is FrontmatterNode) {
           firstDirtyRawIdx = i + 1;
@@ -2657,6 +2681,8 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
     status: SelectionStatus.none,
     hasContent: false,
   );
+  bool _geometryNotifyScheduled = false;
+  bool _disposed = false;
 
   bool get hasSelection => _start != null && _end != null;
   bool get hasHandleLayers =>
@@ -2689,8 +2715,30 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
 
   @override
   void dispose() {
+    _disposed = true;
     clearHandleLayers();
     super.dispose();
+  }
+
+  void _notifyGeometryChanged() {
+    if (_disposed) {
+      return;
+    }
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      if (_geometryNotifyScheduled) {
+        return;
+      }
+      _geometryNotifyScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((Duration _) {
+        _geometryNotifyScheduled = false;
+        if (!_disposed && _box.attached) {
+          notifyListeners();
+        }
+      });
+      return;
+    }
+    notifyListeners();
   }
 
   void didUpdateContent() {
@@ -2702,7 +2750,7 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
       );
       if (_geometry != next) {
         _geometry = next;
-        notifyListeners();
+        _notifyGeometryChanged();
       }
       return;
     }
@@ -2724,7 +2772,7 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
       if (hadHandles != hasHandleLayers) {
         _box.markNeedsCompositingBitsUpdate();
       }
-      notifyListeners();
+      _notifyGeometryChanged();
     }
   }
 
@@ -2828,7 +2876,7 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
   SelectionGeometry _computeGeometry() {
     final int len = _box._totalSelectableLength;
     final bool hasContent = len > 0;
-    if (!hasSelection) {
+    if (!hasContent || !hasSelection) {
       return SelectionGeometry(
         status: SelectionStatus.none,
         hasContent: hasContent,
@@ -2836,12 +2884,12 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
     }
     final int start = _start!.clamp(0, len);
     final int end = _end!.clamp(0, len);
-    if (!_box.hasSize || !hasContent) {
+    if (!_box.hasSize) {
       return SelectionGeometry(
         status: start == end
             ? SelectionStatus.collapsed
             : SelectionStatus.uncollapsed,
-        hasContent: hasContent,
+        hasContent: true,
       );
     }
 

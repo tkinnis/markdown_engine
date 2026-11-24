@@ -85,8 +85,31 @@ abstract final class MarkdownBuiltInRenderers {
     BuiltInMermaidCache.instance.clear();
   }
 
-  /// Releases pending background rendering state cleanly.
+  /// Releases pending background rendering state and shuts down any active
+  /// persistent Mermaid worker isolate without altering cache size budgets or
+  /// [usePersistentMermaidIsolate].
   static Future<void> dispose() => BuiltInMermaidCache.instance.dispose();
+
+  /// Whether cold Mermaid diagram compilations reuse a single persistent
+  /// pre-warmed background worker isolate (`true`, default) instead of spawning
+  /// one-shot `compute()` isolates per diagram (`false`).
+  ///
+  /// Setting this to `false` immediately shuts down any active persistent
+  /// worker so no background isolate stays alive, and routes subsequent cold
+  /// Mermaid compilations through one-shot `compute()`.
+  static bool get usePersistentMermaidIsolate =>
+      BuiltInMermaidCache.instance.usePersistentMermaidIsolate;
+
+  /// Configures whether cold Mermaid diagram compilations reuse a persistent
+  /// background worker isolate or fall back to one-shot `compute()` isolates.
+  static set usePersistentMermaidIsolate(bool value) {
+    BuiltInMermaidCache.instance.usePersistentMermaidIsolate = value;
+  }
+
+  /// Whether the persistent background Mermaid worker isolate is currently
+  /// active or starting up.
+  static bool get isMermaidWorkerActive =>
+      BuiltInMermaidCache.instance.isMermaidWorkerActive;
 
   /// Number of synchronous TeX math layout evaluations executed on cache misses.
   static int get mathLayoutCount => BuiltInMathCache.instance.layoutCount;
@@ -124,12 +147,14 @@ abstract final class MarkdownBuiltInRenderers {
   /// Configured maximum retained byte budget for the built-in Mermaid LRU cache.
   static int get mermaidMaxBytes => BuiltInMermaidCache.instance.maxBytes;
 
-  /// Test-only hook forcing Mermaid rendering to use background `compute`
-  /// isolates even under `TestWidgetsFlutterBinding`.
+  /// Test-only hook forcing Mermaid rendering to use background worker or
+  /// `compute` isolates even under `TestWidgetsFlutterBinding`.
   @visibleForTesting
   static bool get debugForceAsyncMermaidInTests =>
       BuiltInMermaidCache.instance.debugForceAsyncInTests;
 
+  /// Sets whether Mermaid rendering uses real background isolates during
+  /// `TestWidgetsFlutterBinding` tests.
   @visibleForTesting
   static set debugForceAsyncMermaidInTests(bool value) {
     BuiltInMermaidCache.instance.debugForceAsyncInTests = value;

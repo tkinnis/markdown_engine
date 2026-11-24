@@ -168,6 +168,7 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   bool? _cachedTrailingBlockSpacing;
   bool? _cachedKeepAlives;
   bool? _cachedRepaintBoundaries;
+  bool? _cachedIsStreamActive;
 
   MarkdownBlockRenderContext? _blockCacheContext;
   final List<MarkdownBlockNode?> _cachedBlockNodes = <MarkdownBlockNode?>[];
@@ -290,13 +291,18 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
       resolvedBodyStyle: env.resolveTextStyle(resolvedTheme.bodyTextStyle()),
     );
 
+    final bool isStreamActive =
+        streamScope?.isStreamActiveProvider() ??
+        (widget.streamingNormalizedSource != null);
+
     final Widget? cached = _cachedSliver;
     if (cached != null &&
         _cachedRenderContext == renderContext &&
         _cachedPadding == widget.padding &&
         _cachedTrailingBlockSpacing == widget.trailingBlockSpacing &&
         _cachedKeepAlives == widget.addAutomaticKeepAlives &&
-        _cachedRepaintBoundaries == widget.addRepaintBoundaries) {
+        _cachedRepaintBoundaries == widget.addRepaintBoundaries &&
+        _cachedIsStreamActive == isStreamActive) {
       return cached;
     }
 
@@ -306,9 +312,6 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
       _blockCacheContext = renderContext;
     }
 
-    final bool isStreamActive =
-        streamScope?.isStreamActiveProvider() ??
-        (widget.streamingNormalizedSource != null);
     final ValueListenable<MarkdownBlockNode> Function(MarkdownBlockNode block)?
     slotListenableFor = streamScope?.slotListenableFor;
     final double blockSpacing = resolvedTheme.blockSpacing;
@@ -335,6 +338,10 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
                 _cachedBlockNodes[index]?.blockId == block.blockId &&
                 existingTop != null &&
                 _cachedHasBottomSpacing[index] == hasBottomSpacing) {
+              if (!identical(_cachedBlockNodes[index], block)) {
+                slotListenableFor(block);
+                _cachedBlockNodes[index] = block;
+              }
               return existingTop;
             }
             final Widget slotWidget = _StreamingBlockSlot(
@@ -441,6 +448,7 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
     _cachedTrailingBlockSpacing = trailingSpacing;
     _cachedKeepAlives = widget.addAutomaticKeepAlives;
     _cachedRepaintBoundaries = widget.addRepaintBoundaries;
+    _cachedIsStreamActive = isStreamActive;
     return built;
   }
 }

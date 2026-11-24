@@ -1,3 +1,5 @@
+import 'dart:async' show scheduleMicrotask;
+
 import 'package:flutter/foundation.dart'
     show ValueListenable, precisionErrorTolerance;
 // Keeps MaterialLocalizations/SelectionArea compatibility with Flutter 3.32-3.50+ callers.
@@ -5,6 +7,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/material.dart'
     show MaterialLocalizations, SelectionArea;
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 
@@ -178,6 +181,13 @@ final class MarkdownView extends StatefulWidget {
   State<MarkdownView> createState() => _MarkdownViewState();
 }
 
+enum _StreamRenderMode {
+  widgetFull,
+  canvasFull,
+  hybridCanvasTail,
+  hybridWidgetTail,
+}
+
 final class _MarkdownViewPayload {
   const _MarkdownViewPayload({
     required this.document,
@@ -193,6 +203,12 @@ final class _MarkdownViewPayload {
     required this.addRepaintBoundaries,
     required this.useStreamingCanvas,
     this.canvasListenable,
+    this.startBlockIndex = 0,
+    this.endBlockIndex,
+    this.splitTopPadding = false,
+    this.splitBottomPadding = false,
+    this.trailingBlockSpacing = false,
+    this.isEmpty = false,
     required this.revision,
   });
 
@@ -209,6 +225,12 @@ final class _MarkdownViewPayload {
   final bool addRepaintBoundaries;
   final bool useStreamingCanvas;
   final ValueListenable<MarkdownStreamingCanvasPayload>? canvasListenable;
+  final int startBlockIndex;
+  final int? endBlockIndex;
+  final bool splitTopPadding;
+  final bool splitBottomPadding;
+  final bool trailingBlockSpacing;
+  final bool isEmpty;
   final int revision;
 
   @override
@@ -226,11 +248,14 @@ final class _MarkdownViewState extends State<MarkdownView> {
   bool _remoteImagesApprovedLocally = false;
   bool _lastStreamFinished = false;
   int _payloadRevision = 0;
+  int _tailPayloadRevision = 0;
   late final ValueNotifier<_MarkdownViewPayload> _payloadNotifier;
+  ValueNotifier<_MarkdownViewPayload>? _tailPayloadNotifier;
   final Map<String, ValueNotifier<MarkdownBlockNode>> _slotNotifiers =
       <String, ValueNotifier<MarkdownBlockNode>>{};
   List<MarkdownBlockNode> _lastStreamBlocks = const <MarkdownBlockNode>[];
   int _lastSettledScanStart = 0;
+  int _lastSettledCount = 0;
   bool _hadNonScrollingFallback = false;
   bool _hasMountedContent = false;
   bool? _lastPayloadStreamActive;
@@ -240,9 +265,12 @@ final class _MarkdownViewState extends State<MarkdownView> {
   MarkdownController? _lastPayloadController;
   bool? _lastPayloadShowFrontmatter;
   bool? _lastPayloadRemoteImagesApproved;
-  bool? _lastPayloadUseCanvas;
+  _StreamRenderMode? _lastStreamMode;
+  bool _lastTailWasEmpty = true;
   ValueNotifier<MarkdownStreamingCanvasPayload>? _canvasNotifier;
+  ValueNotifier<MarkdownStreamingCanvasPayload>? _tailCanvasNotifier;
   int _canvasRevision = 0;
+  int _tailCanvasRevision = 0;
   bool _lastUsedStreamingCanvas = false;
   int _settledCanvasCheckedCount = 0;
   bool _settledCanvasSupported = true;
@@ -299,14 +327,36 @@ final class _MarkdownViewState extends State<MarkdownView> {
     );
   }
 
-  MarkdownStreamingCanvasPayload _buildCanvasPayload() =>
-      MarkdownStreamingCanvasPayload(
-        document: _document,
-        themeOverride: widget.theme,
-        padding: widget.padding,
-        showFrontmatter: widget.showFrontmatter,
-        revision: ++_canvasRevision,
-      );
+  void _syncSlotNotifiersInRange(
+    List<MarkdownBlockNode> blocks,
+    int start,
+    int end,
+  ) {
+    final int clampedStart = start.clamp(0, blocks.length);
+    final int clampedEnd = end.clamp(clampedStart, blocks.length);
+    for (int i = clampedEnd - 1; i >= clampedStart; i--) {
+      final MarkdownBlockNode block = blocks[i];
+      final ValueNotifier<MarkdownBlockNode>? slot =
+          _slotNotifiers[block.blockId];
+      if (slot != null && !identical(slot.value, block)) {
+        slot.value = block;
+      }
+    }
+  }
+
+  MarkdownStreamingCanvasPayload _buildCanvasPayload({
+    int startBlockIndex = 0,
+    bool includeTopPadding = true,
+    required int revision,
+  }) => MarkdownStreamingCanvasPayload(
+    document: _document,
+    themeOverride: widget.theme,
+    padding: widget.padding,
+    showFrontmatter: widget.showFrontmatter,
+    revision: revision,
+    startBlockIndex: startBlockIndex,
+    includeTopPadding: includeTopPadding,
+  );
 
   bool _computeUseStreamingCanvas(
     StreamingMarkdownController streamCtrl,
@@ -324,18 +374,24 @@ final class _MarkdownViewState extends State<MarkdownView> {
       _settledCanvasSupported = true;
     }
     if (blocks.isEmpty) {
+      _settledCanvasCheckedCount = 0;
+      _settledCanvasSupported = true;
       return _lastUsedStreamingCanvas;
     }
     if (blocks.length == 1) {
-      return false;
-    }
-    if (!_settledCanvasSupported) {
       return false;
     }
     final int settledEnd = streamCtrl.settledPrefixBlockCount.clamp(
       0,
       blocks.length,
     );
+    if (settledEnd == 0 || settledEnd < _settledCanvasCheckedCount) {
+      _settledCanvasCheckedCount = 0;
+      _settledCanvasSupported = true;
+    }
+    if (!_settledCanvasSupported) {
+      return false;
+    }
     while (_settledCanvasCheckedCount < settledEnd) {
       if (!isCanvasSupportedBlock(
         blocks[_settledCanvasCheckedCount],
@@ -348,7 +404,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
       _settledCanvasCheckedCount++;
     }
     final bool canTrustPrevStreamBlocks =
-        !resetCanvasCache && _lastPayloadUseCanvas == true;
+        !resetCanvasCache && _lastStreamMode == _StreamRenderMode.canvasFull;
     for (int i = settledEnd; i < blocks.length; i++) {
       final MarkdownBlockNode block = blocks[i];
       if (canTrustPrevStreamBlocks &&
@@ -367,9 +423,119 @@ final class _MarkdownViewState extends State<MarkdownView> {
     return true;
   }
 
+  static bool _hasVisibleBlocksInRange(
+    List<MarkdownBlockNode> blocks,
+    int start,
+    int end,
+    bool showFrontmatter,
+  ) {
+    final int clampedStart = start.clamp(0, blocks.length);
+    final int clampedEnd = end.clamp(clampedStart, blocks.length);
+    if (clampedStart >= clampedEnd) {
+      return false;
+    }
+    if (showFrontmatter) {
+      return true;
+    }
+    for (int i = clampedStart; i < clampedEnd; i++) {
+      if (blocks[i] is! FrontmatterNode) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _isTailCanvasSupported(
+    List<MarkdownBlockNode> blocks,
+    int settledCount, {
+    required bool trustPrevTail,
+  }) {
+    final bool allowHeadings = widget.controller == null;
+    for (int i = settledCount; i < blocks.length; i++) {
+      final MarkdownBlockNode block = blocks[i];
+      if (trustPrevTail &&
+          i < _lastStreamBlocks.length &&
+          identical(block, _lastStreamBlocks[i])) {
+        continue;
+      }
+      if (!isCanvasSupportedBlock(
+        block,
+        widget.delegates,
+        showFrontmatter: widget.showFrontmatter,
+        allowHeadings: allowHeadings,
+      )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  ({_StreamRenderMode mode, int settledCount}) _resolveStreamMode(
+    StreamingMarkdownController streamCtrl,
+    List<MarkdownBlockNode> blocks, {
+    required bool isActiveStream,
+    required bool nonCanvasConfigChanged,
+  }) {
+    final bool useFullCanvas = _computeUseStreamingCanvas(
+      streamCtrl,
+      blocks,
+      resetCanvasCache: nonCanvasConfigChanged,
+    );
+    _lastUsedStreamingCanvas = useFullCanvas;
+    final int settledCount = streamCtrl.settledPrefixBlockCount.clamp(
+      0,
+      blocks.length,
+    );
+    if (useFullCanvas) {
+      return (mode: _StreamRenderMode.canvasFull, settledCount: settledCount);
+    }
+    if (widget.scrollable &&
+        !_hadNonScrollingFallback &&
+        isActiveStream &&
+        settledCount > 0 &&
+        settledCount < blocks.length &&
+        _hasVisibleBlocksInRange(
+          blocks,
+          0,
+          settledCount,
+          widget.showFrontmatter,
+        ) &&
+        _hasVisibleBlocksInRange(
+          blocks,
+          settledCount,
+          blocks.length,
+          widget.showFrontmatter,
+        )) {
+      final bool tailCanvasOk =
+          widget.controller == null &&
+          _isTailCanvasSupported(
+            blocks,
+            settledCount,
+            trustPrevTail:
+                !nonCanvasConfigChanged &&
+                _lastStreamMode == _StreamRenderMode.hybridCanvasTail &&
+                settledCount >= _lastSettledCount,
+          );
+      return (
+        mode: tailCanvasOk
+            ? _StreamRenderMode.hybridCanvasTail
+            : _StreamRenderMode.hybridWidgetTail,
+        settledCount: settledCount,
+      );
+    }
+    return (mode: _StreamRenderMode.widgetFull, settledCount: settledCount);
+  }
+
   _MarkdownViewPayload _buildPayload({
     required int revision,
     required bool useStreamingCanvas,
+    ValueListenable<MarkdownStreamingCanvasPayload>? canvasListenable,
+    int startBlockIndex = 0,
+    int? endBlockIndex,
+    bool splitTopPadding = false,
+    bool splitBottomPadding = false,
+    bool trailingBlockSpacing = false,
+    bool isEmpty = false,
   }) {
     final StreamingMarkdownController? streamCtrl = widget.streamingController;
     final bool isStreamingMode = streamCtrl != null;
@@ -387,23 +553,46 @@ final class _MarkdownViewState extends State<MarkdownView> {
       addAutomaticKeepAlives: !isStreamingMode,
       addRepaintBoundaries: isStreamingMode,
       useStreamingCanvas: useStreamingCanvas,
-      canvasListenable: useStreamingCanvas ? _canvasNotifier : null,
+      canvasListenable: useStreamingCanvas
+          ? (canvasListenable ?? _canvasNotifier)
+          : null,
+      startBlockIndex: startBlockIndex,
+      endBlockIndex: endBlockIndex,
+      splitTopPadding: splitTopPadding,
+      splitBottomPadding: splitBottomPadding,
+      trailingBlockSpacing: trailingBlockSpacing,
+      isEmpty: isEmpty,
       revision: revision,
     );
+  }
+
+  _MarkdownViewPayload _buildEmptyTailPayload() => _buildPayload(
+    revision: ++_tailPayloadRevision,
+    useStreamingCanvas: false,
+    isEmpty: true,
+  );
+
+  void _setTailPayload(_MarkdownViewPayload payload) {
+    final ValueNotifier<_MarkdownViewPayload>? existing = _tailPayloadNotifier;
+    if (existing == null) {
+      _tailPayloadNotifier = ValueNotifier<_MarkdownViewPayload>(payload);
+    } else {
+      existing.value = payload;
+    }
+    _lastTailWasEmpty = payload.isEmpty;
   }
 
   void _recordStreamPayloadMeta(
     StreamingMarkdownController streamCtrl,
     bool isActiveStream,
     bool approved, {
-    required bool useStreamingCanvas,
+    required _StreamRenderMode mode,
+    required int settledCount,
   }) {
     final List<MarkdownBlockNode> blocks = _document.blocks;
     _lastStreamBlocks = blocks;
-    _lastSettledScanStart = streamCtrl.settledPrefixBlockCount.clamp(
-      0,
-      blocks.length,
-    );
+    _lastSettledScanStart = settledCount;
+    _lastSettledCount = settledCount;
     _lastPayloadTheme = widget.theme;
     _lastPayloadDelegates = widget.delegates;
     _lastPayloadController = widget.controller;
@@ -412,14 +601,15 @@ final class _MarkdownViewState extends State<MarkdownView> {
     _lastPayloadPadding = widget.padding;
     _lastPayloadStreamActive = isActiveStream;
     _lastPayloadDocOptions = _document.options;
-    _lastPayloadUseCanvas = useStreamingCanvas;
+    _lastStreamMode = mode;
   }
 
   void _pushPayload({bool forceSliver = false}) {
     final StreamingMarkdownController? streamCtrl = widget.streamingController;
     if (streamCtrl == null) {
       _lastUsedStreamingCanvas = false;
-      _lastPayloadUseCanvas = false;
+      _lastStreamMode = _StreamRenderMode.widgetFull;
+      _lastSettledCount = 0;
       _payloadNotifier.value = _buildPayload(
         revision: ++_payloadRevision,
         useStreamingCanvas: false,
@@ -444,16 +634,20 @@ final class _MarkdownViewState extends State<MarkdownView> {
         _lastPayloadRemoteImagesApproved != approved ||
         _lastPayloadDocOptions != _document.options;
 
-    final bool useCanvas = _computeUseStreamingCanvas(
-      streamCtrl,
-      blocks,
-      resetCanvasCache: nonCanvasConfigChanged,
-    );
-    _lastUsedStreamingCanvas = useCanvas;
+    final ({_StreamRenderMode mode, int settledCount}) resolved =
+        _resolveStreamMode(
+          streamCtrl,
+          blocks,
+          isActiveStream: isActiveStream,
+          nonCanvasConfigChanged: nonCanvasConfigChanged,
+        );
+    final _StreamRenderMode mode = resolved.mode;
+    final int settledCount = resolved.settledCount;
 
-    if (useCanvas) {
-      final MarkdownStreamingCanvasPayload canvasPayload =
-          _buildCanvasPayload();
+    if (mode == _StreamRenderMode.canvasFull) {
+      final MarkdownStreamingCanvasPayload canvasPayload = _buildCanvasPayload(
+        revision: ++_canvasRevision,
+      );
       final ValueNotifier<MarkdownStreamingCanvasPayload>? existingCanvas =
           _canvasNotifier;
       if (existingCanvas == null) {
@@ -464,40 +658,211 @@ final class _MarkdownViewState extends State<MarkdownView> {
         existingCanvas.value = canvasPayload;
       }
       final bool modeTransition =
-          nonCanvasConfigChanged || _lastPayloadUseCanvas != true;
+          nonCanvasConfigChanged ||
+          _lastStreamMode != _StreamRenderMode.canvasFull;
       if (modeTransition) {
         _recordStreamPayloadMeta(
           streamCtrl,
           isActiveStream,
           approved,
-          useStreamingCanvas: true,
+          mode: _StreamRenderMode.canvasFull,
+          settledCount: settledCount,
         );
         _payloadNotifier.value = _buildPayload(
           revision: ++_payloadRevision,
           useStreamingCanvas: true,
+          canvasListenable: _canvasNotifier,
         );
+        if (!_lastTailWasEmpty) {
+          _setTailPayload(_buildEmptyTailPayload());
+        }
       } else {
         _lastStreamBlocks = blocks;
-        _lastSettledScanStart = streamCtrl.settledPrefixBlockCount.clamp(
-          0,
-          blocks.length,
-        );
+        _lastSettledScanStart = settledCount;
+        _lastSettledCount = settledCount;
       }
       return;
     }
 
     final bool configChanged =
         nonCanvasConfigChanged ||
-        _lastPayloadUseCanvas != false ||
         _lastPayloadTheme != widget.theme ||
         _lastPayloadPadding != widget.padding ||
         _lastPayloadStreamActive != isActiveStream;
 
     final int newLen = blocks.length;
     final int prevLen = _lastStreamBlocks.length;
-    bool structuralChange = configChanged || newLen != prevLen;
+
+    if (mode == _StreamRenderMode.hybridCanvasTail ||
+        mode == _StreamRenderMode.hybridWidgetTail) {
+      final bool wasHybrid =
+          _lastStreamMode == _StreamRenderMode.hybridCanvasTail ||
+          _lastStreamMode == _StreamRenderMode.hybridWidgetTail;
+      bool prefixChanged =
+          configChanged ||
+          !wasHybrid ||
+          settledCount != _lastSettledCount ||
+          prevLen < settledCount;
+      if (!prefixChanged) {
+        for (int i = 0; i < settledCount; i++) {
+          if (!identical(blocks[i], _lastStreamBlocks[i])) {
+            prefixChanged = true;
+            break;
+          }
+        }
+      }
+
+      if (mode == _StreamRenderMode.hybridCanvasTail) {
+        final MarkdownStreamingCanvasPayload tailCanvasPayload =
+            _buildCanvasPayload(
+              startBlockIndex: settledCount,
+              includeTopPadding: false,
+              revision: ++_tailCanvasRevision,
+            );
+        final ValueNotifier<MarkdownStreamingCanvasPayload>?
+        existingTailCanvas = _tailCanvasNotifier;
+        if (existingTailCanvas == null) {
+          _tailCanvasNotifier = ValueNotifier<MarkdownStreamingCanvasPayload>(
+            tailCanvasPayload,
+          );
+        } else {
+          existingTailCanvas.value = tailCanvasPayload;
+        }
+
+        if (prefixChanged) {
+          _syncSlotNotifiersInRange(blocks, 0, settledCount);
+          _payloadNotifier.value = _buildPayload(
+            revision: ++_payloadRevision,
+            useStreamingCanvas: false,
+            startBlockIndex: 0,
+            endBlockIndex: settledCount,
+            splitTopPadding: true,
+            trailingBlockSpacing: true,
+          );
+        }
+        final bool tailHostChanged =
+            nonCanvasConfigChanged ||
+            _lastStreamMode != _StreamRenderMode.hybridCanvasTail ||
+            _lastTailWasEmpty;
+        if (tailHostChanged) {
+          _setTailPayload(
+            _buildPayload(
+              revision: ++_tailPayloadRevision,
+              useStreamingCanvas: true,
+              canvasListenable: _tailCanvasNotifier,
+              startBlockIndex: settledCount,
+              splitBottomPadding: true,
+            ),
+          );
+        }
+        if (prefixChanged || tailHostChanged || configChanged) {
+          _recordStreamPayloadMeta(
+            streamCtrl,
+            isActiveStream,
+            approved,
+            mode: _StreamRenderMode.hybridCanvasTail,
+            settledCount: settledCount,
+          );
+        } else {
+          _lastStreamBlocks = blocks;
+          _lastSettledScanStart = settledCount;
+          _lastSettledCount = settledCount;
+        }
+        return;
+      }
+
+      // Hybrid widget tail (`hybridWidgetTail`): update slot notifiers for active
+      // tail blocks, and also refresh settled prefix slots whenever the prefix
+      // changed or settledCount shrank.
+      final int updateScanStart =
+          (prefixChanged || settledCount < _lastSettledScanStart)
+          ? 0
+          : _lastSettledScanStart.clamp(0, newLen);
+      _syncSlotNotifiersInRange(blocks, updateScanStart, newLen);
+
+      bool tailStructuralChange =
+          configChanged ||
+          _lastStreamMode != _StreamRenderMode.hybridWidgetTail ||
+          _lastTailWasEmpty ||
+          settledCount != _lastSettledCount ||
+          newLen != prevLen;
+      if (!tailStructuralChange && newLen > settledCount) {
+        for (int i = newLen - 1; i >= settledCount; i--) {
+          if (blocks[i].blockId != _lastStreamBlocks[i].blockId) {
+            tailStructuralChange = true;
+            break;
+          }
+        }
+      }
+
+      if (prefixChanged) {
+        _payloadNotifier.value = _buildPayload(
+          revision: ++_payloadRevision,
+          useStreamingCanvas: false,
+          startBlockIndex: 0,
+          endBlockIndex: settledCount,
+          splitTopPadding: true,
+          trailingBlockSpacing: true,
+        );
+      }
+      if (tailStructuralChange) {
+        _setTailPayload(
+          _buildPayload(
+            revision: ++_tailPayloadRevision,
+            useStreamingCanvas: false,
+            startBlockIndex: settledCount,
+            splitBottomPadding: true,
+          ),
+        );
+      }
+      if (prefixChanged || tailStructuralChange) {
+        _recordStreamPayloadMeta(
+          streamCtrl,
+          isActiveStream,
+          approved,
+          mode: _StreamRenderMode.hybridWidgetTail,
+          settledCount: settledCount,
+        );
+      } else {
+        _lastStreamBlocks = blocks;
+        _lastSettledScanStart = settledCount;
+        _lastSettledCount = settledCount;
+      }
+      return;
+    }
+
+    // Single-sliver widget mode (`widgetFull`).
+    final int updateScanStart = _lastSettledScanStart.clamp(0, newLen);
+    bool prefixIdentityChanged = false;
+    bool prefixBlockIdChanged = false;
+    if (updateScanStart > 0 &&
+        _lastStreamMode == _StreamRenderMode.widgetFull) {
+      if (settledCount < _lastSettledScanStart ||
+          prevLen < _lastSettledScanStart) {
+        prefixIdentityChanged = true;
+      }
+      if (prevLen < updateScanStart) {
+        prefixBlockIdChanged = true;
+      } else {
+        for (int i = updateScanStart - 1; i >= 0; i--) {
+          if (!identical(blocks[i], _lastStreamBlocks[i])) {
+            prefixIdentityChanged = true;
+            if (blocks[i].blockId != _lastStreamBlocks[i].blockId) {
+              prefixBlockIdChanged = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    bool structuralChange =
+        configChanged ||
+        _lastStreamMode != _StreamRenderMode.widgetFull ||
+        newLen != prevLen ||
+        prefixBlockIdChanged;
     if (!structuralChange && newLen > 0) {
-      final int scanFrom = _lastSettledScanStart.clamp(0, newLen - 1);
+      final int scanFrom = updateScanStart.clamp(0, newLen - 1);
       for (int i = newLen - 1; i >= scanFrom; i--) {
         if (blocks[i].blockId != _lastStreamBlocks[i].blockId) {
           structuralChange = true;
@@ -506,40 +871,34 @@ final class _MarkdownViewState extends State<MarkdownView> {
       }
     }
 
-    final int updateScanStart = _lastSettledScanStart.clamp(0, newLen);
-    for (int i = newLen - 1; i >= updateScanStart; i--) {
-      final MarkdownBlockNode block = blocks[i];
-      final ValueNotifier<MarkdownBlockNode>? slot =
-          _slotNotifiers[block.blockId];
-      if (slot != null && !identical(slot.value, block)) {
-        slot.value = block;
-      }
-    }
-    if (updateScanStart > 0 && !isActiveStream) {
-      for (int i = updateScanStart - 1; i >= 0; i--) {
-        final MarkdownBlockNode block = blocks[i];
-        final ValueNotifier<MarkdownBlockNode>? slot =
-            _slotNotifiers[block.blockId];
-        if (slot != null && !identical(slot.value, block)) {
-          slot.value = block;
-        }
-      }
-    }
+    final int syncStart =
+        (!isActiveStream ||
+            configChanged ||
+            _lastStreamMode != _StreamRenderMode.widgetFull ||
+            prefixIdentityChanged)
+        ? 0
+        : updateScanStart;
+    _syncSlotNotifiersInRange(blocks, syncStart, newLen);
 
     _lastStreamBlocks = blocks;
-    _lastSettledScanStart = streamCtrl.settledPrefixBlockCount.clamp(0, newLen);
+    _lastSettledScanStart = settledCount;
+    _lastSettledCount = settledCount;
 
     if (structuralChange) {
       _recordStreamPayloadMeta(
         streamCtrl,
         isActiveStream,
         approved,
-        useStreamingCanvas: false,
+        mode: _StreamRenderMode.widgetFull,
+        settledCount: settledCount,
       );
       _payloadNotifier.value = _buildPayload(
         revision: ++_payloadRevision,
         useStreamingCanvas: false,
       );
+      if (!_lastTailWasEmpty) {
+        _setTailPayload(_buildEmptyTailPayload());
+      }
     }
   }
 
@@ -581,33 +940,111 @@ final class _MarkdownViewState extends State<MarkdownView> {
     _initializeDocument();
     final StreamingMarkdownController? streamCtrl = widget.streamingController;
     _lastStreamFinished = streamCtrl?.isFinished ?? false;
-    final bool useCanvas =
-        streamCtrl != null &&
-        _computeUseStreamingCanvas(
+    if (streamCtrl == null) {
+      _lastUsedStreamingCanvas = false;
+      _lastStreamMode = _StreamRenderMode.widgetFull;
+      _payloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+        _buildPayload(revision: ++_payloadRevision, useStreamingCanvas: false),
+      );
+      _attachStreamListeners();
+      return;
+    }
+
+    final bool isActiveStream = !streamCtrl.isFinished;
+    final ({_StreamRenderMode mode, int settledCount}) resolved =
+        _resolveStreamMode(
           streamCtrl,
           _document.blocks,
-          resetCanvasCache: true,
+          isActiveStream: isActiveStream,
+          nonCanvasConfigChanged: true,
         );
-    _lastUsedStreamingCanvas = useCanvas;
-    if (useCanvas) {
-      _canvasNotifier = ValueNotifier<MarkdownStreamingCanvasPayload>(
-        _buildCanvasPayload(),
-      );
+    final _StreamRenderMode mode = resolved.mode;
+    final int settledCount = resolved.settledCount;
+
+    switch (mode) {
+      case _StreamRenderMode.canvasFull:
+        _canvasNotifier = ValueNotifier<MarkdownStreamingCanvasPayload>(
+          _buildCanvasPayload(revision: ++_canvasRevision),
+        );
+        _payloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildPayload(
+            revision: ++_payloadRevision,
+            useStreamingCanvas: true,
+            canvasListenable: _canvasNotifier,
+          ),
+        );
+        _tailPayloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildEmptyTailPayload(),
+        );
+        _lastTailWasEmpty = true;
+      case _StreamRenderMode.hybridCanvasTail:
+        _tailCanvasNotifier = ValueNotifier<MarkdownStreamingCanvasPayload>(
+          _buildCanvasPayload(
+            startBlockIndex: settledCount,
+            includeTopPadding: false,
+            revision: ++_tailCanvasRevision,
+          ),
+        );
+        _payloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildPayload(
+            revision: ++_payloadRevision,
+            useStreamingCanvas: false,
+            startBlockIndex: 0,
+            endBlockIndex: settledCount,
+            splitTopPadding: true,
+            trailingBlockSpacing: true,
+          ),
+        );
+        _tailPayloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildPayload(
+            revision: ++_tailPayloadRevision,
+            useStreamingCanvas: true,
+            canvasListenable: _tailCanvasNotifier,
+            startBlockIndex: settledCount,
+            splitBottomPadding: true,
+          ),
+        );
+        _lastTailWasEmpty = false;
+      case _StreamRenderMode.hybridWidgetTail:
+        _payloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildPayload(
+            revision: ++_payloadRevision,
+            useStreamingCanvas: false,
+            startBlockIndex: 0,
+            endBlockIndex: settledCount,
+            splitTopPadding: true,
+            trailingBlockSpacing: true,
+          ),
+        );
+        _tailPayloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildPayload(
+            revision: ++_tailPayloadRevision,
+            useStreamingCanvas: false,
+            startBlockIndex: settledCount,
+            splitBottomPadding: true,
+          ),
+        );
+        _lastTailWasEmpty = false;
+      case _StreamRenderMode.widgetFull:
+        _payloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildPayload(
+            revision: ++_payloadRevision,
+            useStreamingCanvas: false,
+          ),
+        );
+        _tailPayloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+          _buildEmptyTailPayload(),
+        );
+        _lastTailWasEmpty = true;
     }
-    _payloadNotifier = ValueNotifier<_MarkdownViewPayload>(
-      _buildPayload(
-        revision: ++_payloadRevision,
-        useStreamingCanvas: useCanvas,
-      ),
+
+    _recordStreamPayloadMeta(
+      streamCtrl,
+      isActiveStream,
+      _effectiveRemoteImagesApproved,
+      mode: mode,
+      settledCount: settledCount,
     );
-    if (streamCtrl != null) {
-      _recordStreamPayloadMeta(
-        streamCtrl,
-        !streamCtrl.isFinished,
-        _effectiveRemoteImagesApproved,
-        useStreamingCanvas: useCanvas,
-      );
-    }
     _attachStreamListeners();
   }
 
@@ -672,8 +1109,17 @@ final class _MarkdownViewState extends State<MarkdownView> {
           modeChanged) {
         _hasMountedContent = false;
         _lastUsedStreamingCanvas = false;
+        _lastStreamMode = null;
+        _lastSettledCount = 0;
         _settledCanvasCheckedCount = 0;
         _settledCanvasSupported = true;
+        if (widget.streamingController != null &&
+            _tailPayloadNotifier == null) {
+          _tailPayloadNotifier = ValueNotifier<_MarkdownViewPayload>(
+            _buildEmptyTailPayload(),
+          );
+          _lastTailWasEmpty = true;
+        }
       }
       _attachStreamListeners();
     }
@@ -697,7 +1143,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
           incrementParseCount: true,
           showFrontmatter: widget.showFrontmatter,
         );
-        _selectionDelegate?.clearSelectAllState();
+        _selectionDelegate?.resetSelectionState();
       } else if (modeChanged ||
           oldWidget.data != widget.data ||
           oldWidget.options != widget.options ||
@@ -708,13 +1154,16 @@ final class _MarkdownViewState extends State<MarkdownView> {
           incrementParseCount: true,
           showFrontmatter: widget.showFrontmatter,
         );
-        _selectionDelegate?.clearSelectAllState();
+        _selectionDelegate?.resetSelectionState();
       } else if (!identical(oldWidget.controller, widget.controller) ||
           oldWidget.showFrontmatter != widget.showFrontmatter) {
         widget.controller?.updateDocument(
           _document,
           showFrontmatter: widget.showFrontmatter,
         );
+        if (oldWidget.showFrontmatter != widget.showFrontmatter) {
+          _selectionDelegate?.resetSelectionState();
+        }
       }
       _pushPayload();
       return;
@@ -731,8 +1180,8 @@ final class _MarkdownViewState extends State<MarkdownView> {
           _document,
           showFrontmatter: widget.showFrontmatter,
         );
-        if (docChanged) {
-          _selectionDelegate?.clearSelectAllState();
+        if (docChanged || oldWidget.showFrontmatter != widget.showFrontmatter) {
+          _selectionDelegate?.resetSelectionState();
         }
       }
       _pushPayload();
@@ -752,8 +1201,14 @@ final class _MarkdownViewState extends State<MarkdownView> {
           _document,
           showFrontmatter: widget.showFrontmatter,
         );
-        if (modeChanged || latest.blocks.isEmpty) {
-          _selectionDelegate?.clearSelectAllState();
+        if (modeChanged ||
+            !identical(
+              oldWidget.streamingController,
+              widget.streamingController,
+            ) ||
+            oldWidget.showFrontmatter != widget.showFrontmatter ||
+            latest.blocks.isEmpty) {
+          _selectionDelegate?.resetSelectionState();
         }
       }
     }
@@ -767,6 +1222,10 @@ final class _MarkdownViewState extends State<MarkdownView> {
     _disposeSlotNotifiers();
     _canvasNotifier?.dispose();
     _canvasNotifier = null;
+    _tailCanvasNotifier?.dispose();
+    _tailCanvasNotifier = null;
+    _tailPayloadNotifier?.dispose();
+    _tailPayloadNotifier = null;
     _payloadNotifier.dispose();
     _selectionDelegate?.dispose();
     _selectionDelegate = null;
@@ -865,7 +1324,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
     _document = latest;
     _lastStreamFinished = finished;
     if (wasReset) {
-      _selectionDelegate?.clearSelectAllState();
+      _selectionDelegate?.resetSelectionState();
       _remoteImagesApprovedLocally = false;
     }
     widget.controller?.updateDocument(
@@ -900,6 +1359,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
   }
 
   Widget _buildScrollableShell() {
+    final bool hasStreamingCtrl = widget.streamingController != null;
     return CustomScrollView(
       controller: _effectiveScrollController,
       physics: widget.physics,
@@ -909,6 +1369,11 @@ final class _MarkdownViewState extends State<MarkdownView> {
       cacheExtent: widget.cacheExtent,
       slivers: <Widget>[
         _SliverPayloadHost(payloadListenable: _payloadNotifier),
+        if (hasStreamingCtrl && _tailPayloadNotifier != null)
+          _SliverPayloadHost(
+            payloadListenable: _tailPayloadNotifier!,
+            isTail: true,
+          ),
       ],
     );
   }
@@ -1037,6 +1502,8 @@ final class _MarkdownSelectionContainerDelegate
   static const double _kVerticalThreshold = 3.0;
 
   bool _isSelectAllActive = false;
+  bool _disposed = false;
+  int _selectionResetEpoch = 0;
   final Set<Selectable> _selectAllDispatched = <Selectable>{};
   final Map<Selectable, Rect> _cachedOrderRects =
       Map<Selectable, Rect>.identity();
@@ -1098,6 +1565,47 @@ final class _MarkdownSelectionContainerDelegate
     _selectAllDispatched.clear();
   }
 
+  void resetSelectionState() {
+    final bool hadActiveSelection =
+        _isSelectAllActive ||
+        currentSelectionStartIndex != -1 ||
+        currentSelectionEndIndex != -1 ||
+        selectables.any((Selectable s) => s.value.hasSelection);
+    clearSelectAllState();
+    clearInternalSelectionState();
+    currentSelectionStartIndex = -1;
+    currentSelectionEndIndex = -1;
+    if (!hadActiveSelection) {
+      return;
+    }
+    final int epoch = ++_selectionResetEpoch;
+    SchedulerBinding.instance.addPostFrameCallback((Duration _) {
+      if (_disposed || epoch != _selectionResetEpoch || _isSelectAllActive) {
+        return;
+      }
+      // Defer past every descendant SelectionContainer's post-frame
+      // _updateSelectables() callback so nested delegates never hit
+      // ConcurrentModificationError during handleClearSelection.
+      scheduleMicrotask(() {
+        if (_disposed ||
+            epoch != _selectionResetEpoch ||
+            _isSelectAllActive ||
+            selectables.isEmpty) {
+          return;
+        }
+        clearInternalSelectionState();
+        currentSelectionStartIndex = -1;
+        currentSelectionEndIndex = -1;
+        for (final Selectable s in selectables.toList(growable: false)) {
+          if (selectables.contains(s)) {
+            dispatchSelectionEventToChild(s, const ClearSelectionEvent());
+          }
+        }
+        layoutDidChange();
+      });
+    });
+  }
+
   @override
   void remove(Selectable selectable) {
     _selectAllDispatched.remove(selectable);
@@ -1108,8 +1616,13 @@ final class _MarkdownSelectionContainerDelegate
   @override
   void didChangeSelectables() {
     _cachedOrderRects.clear();
+    if (_isSelectAllActive) {
+      clearInternalSelectionState();
+    }
     super.didChangeSelectables();
     if (_isSelectAllActive) {
+      final Set<Selectable> active = selectables.toSet();
+      _selectAllDispatched.removeWhere((Selectable s) => !active.contains(s));
       for (final Selectable selectable in selectables) {
         if (_selectAllDispatched.add(selectable)) {
           dispatchSelectionEventToChild(
@@ -1122,11 +1635,16 @@ final class _MarkdownSelectionContainerDelegate
       currentSelectionEndIndex = selectables.isEmpty
           ? -1
           : selectables.length - 1;
+      didReceiveSelectionBoundaryEvents();
+      layoutDidChange();
     }
   }
 
   @override
   SelectionResult dispatchSelectionEvent(SelectionEvent event) {
+    if (event is! ClearSelectionEvent) {
+      _selectionResetEpoch++;
+    }
     _cachedOrderRects.clear();
     try {
       return super.dispatchSelectionEvent(event);
@@ -1195,6 +1713,7 @@ final class _MarkdownSelectionContainerDelegate
 
   @override
   void dispose() {
+    _disposed = true;
     _selectAllDispatched.clear();
     _cachedOrderRects.clear();
     super.dispose();
@@ -1202,9 +1721,13 @@ final class _MarkdownSelectionContainerDelegate
 }
 
 final class _SliverPayloadHost extends StatefulWidget {
-  const _SliverPayloadHost({required this.payloadListenable});
+  const _SliverPayloadHost({
+    required this.payloadListenable,
+    this.isTail = false,
+  });
 
   final ValueListenable<_MarkdownViewPayload> payloadListenable;
+  final bool isTail;
 
   @override
   State<_SliverPayloadHost> createState() => _SliverPayloadHostState();
@@ -1251,9 +1774,19 @@ final class _SliverPayloadHostState extends State<_SliverPayloadHost> {
   @override
   Widget build(BuildContext context) {
     final _MarkdownViewPayload p = widget.payloadListenable.value;
+    if (p.isEmpty) {
+      return const SliverToBoxAdapter(
+        key: ValueKey<String>('markdown-empty-tail-sliver'),
+        child: SizedBox.shrink(),
+      );
+    }
     if (p.useStreamingCanvas && p.canvasListenable != null) {
       return MarkdownStreamingSliverAdapter(
-        key: const ValueKey<String>('markdown-streaming-canvas-sliver'),
+        key: ValueKey<String>(
+          widget.isTail
+              ? 'markdown-streaming-tail-canvas-sliver'
+              : 'markdown-streaming-canvas-sliver',
+        ),
         child: MarkdownStreamingCanvasLeaf(
           listenable: p.canvasListenable!,
           ambientTheme: _ambientTheme,
@@ -1261,18 +1794,49 @@ final class _SliverPayloadHostState extends State<_SliverPayloadHost> {
         ),
       );
     }
+    EdgeInsetsGeometry? effectivePadding;
+    if (p.padding != EdgeInsets.zero) {
+      if (p.splitTopPadding || p.splitBottomPadding) {
+        final EdgeInsets resolved = p.padding.resolve(
+          _environment.textDirection,
+        );
+        final EdgeInsets sliced = p.splitTopPadding
+            ? EdgeInsets.fromLTRB(
+                resolved.left,
+                resolved.top,
+                resolved.right,
+                0.0,
+              )
+            : EdgeInsets.fromLTRB(
+                resolved.left,
+                0.0,
+                resolved.right,
+                resolved.bottom,
+              );
+        effectivePadding = sliced == EdgeInsets.zero ? null : sliced;
+      } else {
+        effectivePadding = p.padding;
+      }
+    }
     return SliverMarkdownDocument(
-      key: const ValueKey<String>('markdown-settled-sliver'),
+      key: ValueKey<String>(
+        widget.isTail
+            ? 'markdown-tail-widget-sliver'
+            : 'markdown-settled-sliver',
+      ),
       document: p.document,
       theme: p.theme,
       delegates: p.delegates,
       controller: p.controller,
       showFrontmatter: p.showFrontmatter,
-      padding: p.padding == EdgeInsets.zero ? null : p.padding,
+      padding: effectivePadding,
       addAutomaticKeepAlives: p.addAutomaticKeepAlives,
       addRepaintBoundaries: p.addRepaintBoundaries,
       remoteImagesApproved: p.remoteImagesApproved,
       onRequestLoadRemoteImages: p.onRequestLoadRemoteImages,
+      startBlockIndex: p.startBlockIndex,
+      endBlockIndex: p.endBlockIndex,
+      trailingBlockSpacing: p.trailingBlockSpacing,
     );
   }
 }

@@ -4,6 +4,9 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
+import 'package:markdown_engine_flutter/src/built_in_mermaid.dart';
+import 'package:markdown_engine_flutter/src/built_in_mermaid_worker.dart';
+import 'package:pele_dart/pele_dart.dart' show PelePalette;
 import 'package:tex_math_flutter/tex_math_flutter.dart'
     show
         TexMath,
@@ -1045,6 +1048,303 @@ End of document.
         expect(MarkdownBuiltInRenderers.mermaidCacheBytes, 0);
       },
     );
+  });
+
+  group('Persistent Mermaid worker isolate', () {
+    void enableAsyncWorkerWithCleanup() {
+      MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true;
+      MarkdownBuiltInRenderers.debugForceAsyncMermaidInTests = true;
+      addTearDown(() async {
+        MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true;
+        MarkdownBuiltInRenderers.debugForceAsyncMermaidInTests = false;
+        await MarkdownBuiltInRenderers.dispose();
+      });
+    }
+
+    testWidgets(
+      'defaults to persistent worker, reuses single active isolate for concurrent distinct + duplicate-key diagrams, and dispose() shuts down cleanly',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+
+        expect(MarkdownBuiltInRenderers.usePersistentMermaidIsolate, isTrue);
+        expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+        final DerivedMermaidTheme darkTheme = deriveMermaidTheme(
+          const MarkdownThemeData.dark(),
+        );
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          final int? initialIsolateId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(initialIsolateId, isNotNull);
+
+          // Repeat warmUp reuses the exact same isolate.
+          await MarkdownBuiltInRenderers.warmUp();
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            initialIsolateId,
+          );
+
+          final Future<BuiltInMermaidResult> f1 = BuiltInMermaidCache.instance
+              .render('flowchart LR\n  A1 --> B1', lightTheme);
+          final Future<BuiltInMermaidResult> f1Dup = BuiltInMermaidCache
+              .instance
+              .render('  flowchart LR\n  A1 --> B1  ', lightTheme);
+          final Future<BuiltInMermaidResult> f2 = BuiltInMermaidCache.instance
+              .render('sequenceDiagram\n  Alice->>Bob: Ping', darkTheme);
+          final Future<BuiltInMermaidResult> f3 = BuiltInMermaidCache.instance
+              .render('flowchart TD\n  Start --> Finish', lightTheme);
+          final Future<BuiltInMermaidResult> fBad = BuiltInMermaidCache.instance
+              .render('not_a_diagram_type\n  X --> Y', lightTheme);
+
+          // Identical key must deduplicate in-flight futures.
+          expect(identical(f1, f1Dup), isTrue);
+          expect(MarkdownBuiltInRenderers.mermaidRenderCount, 4);
+
+          final List<BuiltInMermaidResult> results =
+              await Future.wait<BuiltInMermaidResult>(
+                <Future<BuiltInMermaidResult>>[f1, f1Dup, f2, f3, fBad],
+              );
+
+          expect(results[0], isA<BuiltInMermaidSuccess>());
+          expect(results[1], same(results[0]));
+          expect(results[2], isA<BuiltInMermaidSuccess>());
+          expect(results[3], isA<BuiltInMermaidSuccess>());
+          expect(results[4], isA<BuiltInMermaidFailure>());
+
+          final BuiltInMermaidSuccess ok0 = results[0] as BuiltInMermaidSuccess;
+          expect(ok0.compiledBytes, isNotEmpty);
+          expect(ok0.logicalSize.width, greaterThan(0.0));
+          expect(ok0.logicalSize.height, greaterThan(0.0));
+
+          expect(MarkdownBuiltInRenderers.mermaidCacheLength, 4);
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            initialIsolateId,
+          );
+        });
+
+        // resetCacheDefaults() must not alter usePersistentMermaidIsolate, and
+        // dispose() must shut down the worker without mutating the setting.
+        MarkdownBuiltInRenderers.resetCacheDefaults();
+        expect(MarkdownBuiltInRenderers.usePersistentMermaidIsolate, isTrue);
+
+        await MarkdownBuiltInRenderers.dispose();
+        expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+        expect(MarkdownBuiltInRenderers.usePersistentMermaidIsolate, isTrue);
+      },
+    );
+
+    testWidgets(
+      'setting usePersistentMermaidIsolate = false immediately shuts down active worker and uses one-shot compute()',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+
+          MarkdownBuiltInRenderers.usePersistentMermaidIsolate = false;
+          expect(MarkdownBuiltInRenderers.usePersistentMermaidIsolate, isFalse);
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+          // warmUp() and subsequent cold renders stay off persistent worker.
+          await MarkdownBuiltInRenderers.warmUp();
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+          final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+            const MarkdownThemeData.light(),
+          );
+          final BuiltInMermaidResult r1 = await BuiltInMermaidCache.instance
+              .render('flowchart LR\n  OneShotA --> OneShotB', lightTheme);
+          expect(r1, isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+        });
+
+        // Widget path also renders via one-shot compute() with worker inactive.
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                '```mermaid\nflowchart LR\n  WidgetCompute1 --> WidgetCompute2\n```',
+              ),
+            ),
+          ),
+        );
+        expect(find.text('Mermaid diagram preview'), findsOneWidget);
+
+        await tester.runAsync(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 160));
+        });
+        await tester.pumpAndSettle();
+
+        expect(find.byType(VectorGraphic), findsOneWidget);
+        expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+        // Re-enabling persistent isolate spawns a fresh worker on next render.
+        await tester.runAsync(() async {
+          MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true;
+          final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+            const MarkdownThemeData.light(),
+          );
+          final BuiltInMermaidResult r2 = await BuiltInMermaidCache.instance
+              .render('flowchart LR\n  ReenabledA --> ReenabledB', lightTheme);
+          expect(r2, isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+        });
+      },
+    );
+
+    testWidgets(
+      'rapid render() -> dispose() -> render() epoch transitions complete without hangs or leaked ports',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+
+        await tester.runAsync(() async {
+          const String code = 'flowchart LR\n  EpochA --> EpochB';
+          final Future<BuiltInMermaidResult> staleFirst = BuiltInMermaidCache
+              .instance
+              .render(code, lightTheme);
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+
+          await MarkdownBuiltInRenderers.dispose();
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+          final Future<BuiltInMermaidResult> freshSecond = BuiltInMermaidCache
+              .instance
+              .render(code, lightTheme);
+          final List<BuiltInMermaidResult> pair =
+              await Future.wait<BuiltInMermaidResult>(
+                <Future<BuiltInMermaidResult>>[staleFirst, freshSecond],
+              );
+
+          expect(pair[0], isA<BuiltInMermaidFailure>());
+          expect(pair[1], isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+
+          // Second rapid epoch transition with distinct diagrams.
+          final Future<BuiltInMermaidResult> staleThird = BuiltInMermaidCache
+              .instance
+              .render('flowchart LR\n  EpochC --> EpochD', lightTheme);
+          await MarkdownBuiltInRenderers.dispose();
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+          final Future<BuiltInMermaidResult> freshFourth = BuiltInMermaidCache
+              .instance
+              .render('flowchart LR\n  EpochE --> EpochF', lightTheme);
+          final List<BuiltInMermaidResult> pair2 =
+              await Future.wait<BuiltInMermaidResult>(
+                <Future<BuiltInMermaidResult>>[staleThird, freshFourth],
+              );
+          expect(pair2[0], isA<BuiltInMermaidFailure>());
+          expect(pair2[1], isA<BuiltInMermaidSuccess>());
+        });
+
+        await MarkdownBuiltInRenderers.dispose();
+        expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+      },
+    );
+
+    testWidgets(
+      'unexpected worker exit (onExit) and uncaught error (onError) complete pending requests cleanly and recover on next render',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          final int? id1 =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(id1, isNotNull);
+
+          // Kill the isolate directly while a compile is pending to exercise onExit.
+          final Future<BuiltInMermaidResult> killedRender = BuiltInMermaidCache
+              .instance
+              .render('flowchart LR\n  RecoverA --> RecoverB', lightTheme);
+          BuiltInMermaidCache.instance.debugWorker
+              .debugKillIsolateWithoutReset();
+
+          final BuiltInMermaidResult killedResult = await killedRender;
+          expect(killedResult, isA<BuiltInMermaidFailure>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+          // Next render (for the exact same diagram!) must not hit a cached
+          // failure and must recover on a newly spawned worker isolate.
+          final BuiltInMermaidResult recovered = await BuiltInMermaidCache
+              .instance
+              .render('flowchart LR\n  RecoverA --> RecoverB', lightTheme);
+          expect(recovered, isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          final int? id2 =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(id2, isNotNull);
+          expect(id2, isNot(equals(id1)));
+
+          // Inject an uncaught worker error to exercise onError recovery.
+          BuiltInMermaidCache.instance.debugWorker.debugTriggerUncaughtError();
+          for (
+            int i = 0;
+            i < 40 && MarkdownBuiltInRenderers.isMermaidWorkerActive;
+            i++
+          ) {
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+          }
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+
+          final BuiltInMermaidResult afterError = await BuiltInMermaidCache
+              .instance
+              .render('flowchart LR\n  RecoverC --> RecoverD', lightTheme);
+          expect(afterError, isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          final int? id3 =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(id3, isNotNull);
+          expect(id3, isNot(equals(id2)));
+        });
+      },
+    );
+
+    test('encodePelePalette and decodePelePalette round-trip theme tokens', () {
+      for (final MarkdownThemeData theme in <MarkdownThemeData>[
+        const MarkdownThemeData.light(),
+        const MarkdownThemeData.dark(),
+      ]) {
+        final PelePalette original = deriveMermaidTheme(theme).palette;
+        final PelePalette restored = decodePelePalette(
+          encodePelePalette(original),
+        );
+        expect(restored.bg, original.bg);
+        expect(restored.fg, original.fg);
+        expect(restored.fgOnLight, original.fgOnLight);
+        expect(restored.fgOnDark, original.fgOnDark);
+        expect(restored.muted, original.muted);
+        expect(restored.line, original.line);
+        expect(restored.surface, original.surface);
+        expect(restored.surfaceAlt, original.surfaceAlt);
+        expect(restored.border, original.border);
+        expect(restored.accent, original.accent);
+        expect(restored.code, original.code);
+        expect(restored.critical, original.critical);
+        expect(restored.radius, original.radius);
+        expect(restored.strokeWidth, original.strokeWidth);
+        expect(restored.thickStrokeWidth, original.thickStrokeWidth);
+        expect(restored.hairlineStrokeWidth, original.hairlineStrokeWidth);
+        expect(restored.fontFamily, original.fontFamily);
+        expect(restored.monoFontFamily, original.monoFontFamily);
+        expect(restored.colors, orderedEquals(original.colors));
+      }
+    });
   });
 }
 
