@@ -1,9 +1,13 @@
+import 'package:flutter/services.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
 
 /// Built-in sample documents available in the Studio preset selector.
 enum StudioPresetId {
   /// Comprehensive CommonMark, GFM, math, diagram, and link showcase.
   showcase,
+
+  /// Full Markdown syntax guide, all 33 Mermaid diagram families, and comprehensive LaTeX math gallery.
+  comprehensiveGuide,
 
   /// Full AST block & inline visual parity showcase exercising every node type.
   kitchenSink,
@@ -26,7 +30,8 @@ final class StudioPreset {
     required this.label,
     required this.description,
     required this.options,
-    required this.sourceBuilder,
+    this.sourceBuilder = _emptySource,
+    this.assetPath,
   });
 
   /// Stable identifier for this preset.
@@ -41,12 +46,29 @@ final class StudioPreset {
   /// Parser options active when this preset is selected.
   final MarkdownOptions options;
 
-  /// Lazy source factory returning the Markdown content for this preset.
+  /// Lazy source factory returning the Markdown content for synchronous presets.
   final String Function() sourceBuilder;
 
-  /// Lazily materialized Markdown source text for this preset.
+  /// Optional bundled Flutter asset path for asynchronously loaded presets.
+  final String? assetPath;
+
+  /// Lazily materialized synchronous Markdown source text for this preset.
   String get source => sourceBuilder();
+
+  /// Asynchronously loads the Markdown source text for this preset.
+  ///
+  /// Reads the bundled Flutter asset at [assetPath] via [rootBundle] when
+  /// non-null; otherwise resolves immediately using [sourceBuilder].
+  Future<String> loadSource() {
+    final String? path = assetPath;
+    if (path != null) {
+      return rootBundle.loadString(path);
+    }
+    return Future<String>.value(sourceBuilder());
+  }
 }
+
+String _emptySource() => '';
 
 const MarkdownOptions _showcaseOptions = MarkdownOptions.extended();
 
@@ -68,6 +90,13 @@ final List<StudioPreset> studioPresets = <StudioPreset>[
     description: 'Tables, task lists, footnotes, OpenType TeX math, and vector Mermaid diagrams.',
     options: _showcaseOptions,
     sourceBuilder: _showcaseSource,
+  ),
+  StudioPreset(
+    id: StudioPresetId.comprehensiveGuide,
+    label: 'Comprehensive Markdown Guide',
+    description: 'Full Markdown syntax guide, all 33 Mermaid diagram families, and comprehensive LaTeX math gallery.',
+    options: _showcaseOptions,
+    assetPath: 'assets/comprehensive_markdown_guide.md',
   ),
   StudioPreset(
     id: StudioPresetId.kitchenSink,

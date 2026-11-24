@@ -4,7 +4,7 @@ macOS Flutter inspection and streaming workbench for **`markdown_engine`** and *
 
 ## Features
 
-* **Preset Sample Selector**: Switch instantaneously between `CommonMark & GFM Showcase`, `Alerts, Frontmatter & HTML`, `Security & Sanitization`, and `500-Section Virtualization Stress`.
+* **Preset Sample Selector**: Switch between `CommonMark & GFM Showcase`, `Comprehensive Markdown Guide` (full Markdown syntax guide, all 33 Mermaid diagram families, and comprehensive LaTeX math gallery loaded from `assets/comprehensive_markdown_guide.md`), `Kitchen Sink (Visual Parity)`, `Alerts, Frontmatter & HTML`, `Security & Sanitization`, and `500-Section Virtualization Stress`.
 * **Zero-Reparse Light / Dark Theme Switching**: Toggle between Light and Dark `MarkdownThemeData` palettes from the top toolbar while monitoring live `controller.parseCount` telemetry to confirm zero redundant parses on theme changes.
 * **Live Editor & LLM Streaming Simulator**: Edit Markdown source live on the left pane or flip into **Streaming Mode** for interactive Play, Pause, Step, Finish, and Reset playback with adjustable chunk intervals, live `settledBlockCount`, total/active block counts, and per-chunk parse duration in microseconds.
 * **Virtualized Preview, Outline Jump & Custom Hooks**: Render documents lazily with `MarkdownView` and `MarkdownView.streaming`, jump directly to headings via the live `controller.outline` sidebar (`controller.scrollToAnchor`), inspect custom `mathInlineBuilder`, `mathBlockBuilder`, and `diagramBuilder` demo cards, and verify `MarkdownUrlPolicy` filtering via live link-audit badges, status banners, and snackbars.

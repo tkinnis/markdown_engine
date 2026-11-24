@@ -157,6 +157,8 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
   MarkdownUrlPolicy? _activeDelegateUrlPolicy;
 
   Timer? _streamTimer;
+  int _presetLoadGeneration = 0;
+  bool _isProgrammaticEditorUpdate = false;
 
   @override
   void initState() {
@@ -167,7 +169,10 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     _isStreamingMode = widget.initialStreamingMode;
     final StudioPreset initialPreset = studioPresetById(_selectedPresetId);
     _activeOptions = initialPreset.options;
-    final String initialText = widget.initialSource ?? initialPreset.source;
+    final bool loadsInitialAsset =
+        widget.initialSource == null && initialPreset.assetPath != null;
+    final String initialText =
+        widget.initialSource ?? (loadsInitialAsset ? '' : initialPreset.source);
     _editorController = TextEditingController(text: initialText)
       ..addListener(_handleEditorChanged);
     _editorTextNotifier = ValueNotifier<String>(initialText);
@@ -197,6 +202,21 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
       }
     }
 
+    if (loadsInitialAsset) {
+      unawaited(
+        _loadAssetPreset(
+          initialPreset,
+          generation: ++_presetLoadGeneration,
+          isInitialLoad: true,
+        ),
+      );
+    }
+    if (!loadsInitialAsset || _isStreamingMode) {
+      _scheduleInitialNavigation();
+    }
+  }
+
+  void _scheduleInitialNavigation() {
     if (widget.initialAnchor != null && widget.initialAnchor!.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((Duration _) {
         if (mounted) {
@@ -253,10 +273,25 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     super.dispose();
   }
 
+  void _setEditorText(String text) {
+    _isProgrammaticEditorUpdate = true;
+    try {
+      _editorTextNotifier.value = text;
+      if (_editorController.text != text) {
+        _editorController.text = text;
+      }
+    } finally {
+      _isProgrammaticEditorUpdate = false;
+    }
+  }
+
   void _handleEditorChanged() {
     final String nextText = _editorController.text;
     if (_editorTextNotifier.value == nextText) {
       return;
+    }
+    if (!_isProgrammaticEditorUpdate) {
+      _presetLoadGeneration++;
     }
     _editorTextNotifier.value = nextText;
     if (_remoteImagesApproved) {
@@ -271,6 +306,7 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
       return;
     }
     final StudioPreset preset = studioPresetById(nextId);
+    final int generation = ++_presetLoadGeneration;
     _stopStreamTimer();
     setState(() {
       _selectedPresetId = nextId;
@@ -278,10 +314,48 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
       _isStreamingMode = false;
       _remoteImagesApproved = false;
     });
-    _editorController.text = preset.source;
-    _editorTextNotifier.value = preset.source;
-    _showStatus('Loaded preset: ${preset.label}');
+    if (preset.assetPath == null) {
+      _setEditorText(preset.source);
+      _showStatus('Loaded preset: ${preset.label}');
+      _resetPreviewScroll();
+      return;
+    }
+    _setEditorText('');
+    _showStatus('Loading preset: ${preset.label}...');
     _resetPreviewScroll();
+    unawaited(
+      _loadAssetPreset(preset, generation: generation, isInitialLoad: false),
+    );
+  }
+
+  Future<void> _loadAssetPreset(
+    StudioPreset preset, {
+    required int generation,
+    required bool isInitialLoad,
+  }) async {
+    try {
+      final String loaded = await preset.loadSource();
+      if (!mounted || generation != _presetLoadGeneration) {
+        return;
+      }
+      _setEditorText(loaded);
+      _showStatus('Loaded preset: ${preset.label}');
+      if (isInitialLoad) {
+        if (!_isStreamingMode) {
+          _scheduleInitialNavigation();
+        }
+      } else if (!_isStreamingMode) {
+        _resetPreviewScroll();
+      }
+    } catch (error) {
+      if (!mounted || generation != _presetLoadGeneration) {
+        return;
+      }
+      _showStatus(
+        'Failed to load preset "${preset.label}": $error',
+        isError: true,
+      );
+    }
   }
 
   void _toggleTheme() {

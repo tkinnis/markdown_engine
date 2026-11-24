@@ -1,6 +1,11 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:markdown_engine/markdown_engine.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
 import 'package:markdown_engine_studio/main.dart';
 import 'package:markdown_engine_studio/studio_presets.dart';
@@ -9,6 +14,24 @@ void _setDesktopViewport(WidgetTester tester) {
   tester.view.physicalSize = const Size(1440.0, 900.0);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
+}
+
+Future<void> _pumpUntilFound(
+  WidgetTester tester,
+  Finder finder, {
+  int maxAttempts = 100,
+}) async {
+  for (int i = 0; i < maxAttempts; i++) {
+    await tester.pump();
+    if (finder.evaluate().isNotEmpty) {
+      await tester.pumpAndSettle();
+      return;
+    }
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+  }
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -699,6 +722,347 @@ void main() {
       await tester.tap(find.text('Kitchen Sink (Visual Parity)').last);
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'MarkdownStudioApp launches with Comprehensive Markdown Guide preset and CLI arg without exceptions',
+    (WidgetTester tester) async {
+      _setDesktopViewport(tester);
+      await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+      addTearDown(() async {
+        rootBundle.evict('assets/comprehensive_markdown_guide.md');
+        MarkdownBuiltInRenderers.clearCaches();
+        await MarkdownBuiltInRenderers.dispose();
+      });
+
+      final MarkdownStudioApp cliApp = MarkdownStudioApp.fromArgs(
+        const <String>['--preset=comprehensiveGuide'],
+      );
+      expect(cliApp.initialPreset, StudioPresetId.comprehensiveGuide);
+
+      await tester.pumpWidget(cliApp);
+      await _pumpUntilFound(
+        tester,
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+      );
+      expect(tester.takeException(), isNull);
+
+      expect(
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+        findsOneWidget,
+      );
+
+      final TextField editor = tester.widget<TextField>(
+        find.byKey(const Key('studio-source-editor')),
+      );
+      final String loadedSource = editor.controller!.text;
+      expect(loadedSource, contains('title: Markdown Syntax Guide'));
+      expect(loadedSource, contains('# Mermaid Diagram Examples'));
+      expect(loadedSource, contains('# LaTeX Math Examples'));
+
+      final MarkdownDocument parsed = const MarkdownEngine(
+        defaultOptions: MarkdownOptions.extended(),
+      ).parse(loadedSource);
+      expect(parsed.blocks.whereType<FrontmatterNode>(), isNotEmpty);
+      expect(parsed.blocks.whereType<HeadingNode>(), isNotEmpty);
+      expect(parsed.blocks.whereType<MathBlockNode>(), isNotEmpty);
+      expect(
+        parsed.blocks.whereType<CodeBlockNode>().where(
+          (CodeBlockNode b) => b.language == 'mermaid',
+        ),
+        isNotEmpty,
+      );
+
+      // Frontmatter metadata and top heading render cleanly.
+      expect(find.text('User Manual'), findsWidgets);
+      expect(find.text('Markdown Syntax Guide'), findsWidgets);
+
+      final Finder previewScrollable = find
+          .descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+
+      // Scroll to LaTeX math and Mermaid sections inside the guide.
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.text('Display / Block Math'),
+        ),
+        300.0,
+        scrollable: previewScrollable,
+      );
+      await tester.pumpAndSettle();
+      final Finder texMathFinder = find.descendant(
+        of: find.byType(MarkdownView),
+        matching: find.byWidgetPredicate(
+          (Widget w) => '${w.runtimeType}' == 'TexMath',
+        ),
+      );
+      expect(texMathFinder, findsWidgets);
+      expect(tester.takeException(), isNull);
+
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.text('Sequence Diagrams'),
+        ),
+        300.0,
+        scrollable: previewScrollable,
+      );
+      await tester.pumpAndSettle();
+      final Finder mermaidGraphicFinder = find.descendant(
+        of: find.byType(MarkdownView),
+        matching: find.byWidgetPredicate(
+          (Widget w) => '${w.runtimeType}' == 'VectorGraphic',
+        ),
+      );
+      expect(mermaidGraphicFinder, findsWidgets);
+      expect(tester.takeException(), isNull);
+
+      // Jump via outline to the LaTeX Math Examples section and verify zero exceptions.
+      final Finder outlineLatexItem = find.descendant(
+        of: find.byKey(const Key('studio-outline-list')),
+        matching: find.text('LaTeX Math Examples'),
+      );
+      await tester.scrollUntilVisible(
+        outlineLatexItem,
+        200.0,
+        scrollable: find.descendant(
+          of: find.byKey(const Key('studio-outline-list')),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.tap(outlineLatexItem);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // Scroll to wide overflow & intentional malformed TeX error widgets at the end.
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.textContaining('Intentional Malformed TeX'),
+        ),
+        350.0,
+        scrollable: previewScrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Selecting Comprehensive Markdown Guide from dropdown renders and handles async preset switch & edit races cleanly',
+    (WidgetTester tester) async {
+      _setDesktopViewport(tester);
+      await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+      final ByteData? realGuideBytes = await tester.runAsync(
+        () => rootBundle.load('assets/comprehensive_markdown_guide.md'),
+      );
+      expect(realGuideBytes, isNotNull);
+
+      await tester.pumpWidget(const MarkdownStudioApp());
+      await tester.pumpAndSettle();
+
+      // 1. Select Comprehensive Markdown Guide via toolbar dropdown (real asset load).
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Markdown Guide').last);
+      await _pumpUntilFound(
+        tester,
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+        findsOneWidget,
+      );
+      expect(find.text('Markdown Syntax Guide'), findsWidgets);
+
+      // Switch away to Showcase and back to Comprehensive Guide (cached in rootBundle).
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CommonMark & GFM Showcase').last);
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Loaded preset: CommonMark & GFM Showcase'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Markdown Guide').last);
+      await _pumpUntilFound(
+        tester,
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+        findsOneWidget,
+      );
+      expect(find.text('Markdown Syntax Guide'), findsWidgets);
+
+      // 2. Deterministic race tests with mocked delayed asset loads.
+      final List<Completer<ByteData?>> pendingLoads = <Completer<ByteData?>>[];
+      bool failNextAssetLoad = false;
+      final TestDefaultBinaryMessenger messenger =
+          tester.binding.defaultBinaryMessenger;
+      messenger.setMockMessageHandler('flutter/assets', (
+        ByteData? message,
+      ) async {
+        final String key = message == null
+            ? ''
+            : utf8.decode(
+                message.buffer.asUint8List(
+                  message.offsetInBytes,
+                  message.lengthInBytes,
+                ),
+              );
+        if (key == 'assets/comprehensive_markdown_guide.md') {
+          if (failNextAssetLoad) {
+            failNextAssetLoad = false;
+            return null;
+          }
+          final Completer<ByteData?> completer = Completer<ByteData?>();
+          pendingLoads.add(completer);
+          return completer.future;
+        }
+        return null;
+      });
+      addTearDown(() {
+        messenger.setMockMessageHandler('flutter/assets', null);
+        rootBundle.evict('assets/comprehensive_markdown_guide.md');
+        MarkdownBuiltInRenderers.clearCaches();
+        return MarkdownBuiltInRenderers.dispose();
+      });
+
+      // Switch away to Showcase first.
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CommonMark & GFM Showcase').last);
+      await tester.pumpAndSettle();
+
+      // Race A: Switch to Comprehensive Guide, then immediately switch away to Kitchen Sink.
+      rootBundle.evict('assets/comprehensive_markdown_guide.md');
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Markdown Guide').last);
+      await tester.pump();
+      expect(pendingLoads, hasLength(1));
+
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Kitchen Sink (Visual Parity)').last);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Kitchen Sink Visual Parity'), findsWidgets);
+
+      // Complete stale Comprehensive Guide load -> must NOT overwrite Kitchen Sink.
+      pendingLoads[0].complete(realGuideBytes);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 80)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Kitchen Sink Visual Parity'), findsWidgets);
+      expect(
+        find.text('Loaded preset: Kitchen Sink (Visual Parity)'),
+        findsOneWidget,
+      );
+
+      // Race B: Switch to Comprehensive Guide -> away -> back again; resolve stale first, then latest.
+      rootBundle.evict('assets/comprehensive_markdown_guide.md');
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Markdown Guide').last);
+      await tester.pump();
+      expect(pendingLoads, hasLength(2));
+
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CommonMark & GFM Showcase').last);
+      await tester.pumpAndSettle();
+
+      rootBundle.evict('assets/comprehensive_markdown_guide.md');
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Markdown Guide').last);
+      await tester.pump();
+      expect(pendingLoads, hasLength(3));
+
+      // Resolving stale load #2 with distinct content must NOT overwrite current empty loading state.
+      pendingLoads[1].complete(
+        ByteData.sublistView(utf8.encode('# Stale Guide Content')),
+      );
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+      expect(find.text('Stale Guide Content'), findsNothing);
+
+      // Resolving latest load #3 populates the real guide cleanly.
+      pendingLoads[2].complete(realGuideBytes);
+      await _pumpUntilFound(
+        tester,
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+      );
+      expect(find.text('Markdown Syntax Guide'), findsWidgets);
+      expect(
+        find.text('Loaded preset: Comprehensive Markdown Guide'),
+        findsOneWidget,
+      );
+
+      // Race C: Manual user edit while async asset load is in flight must not be overwritten.
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CommonMark & GFM Showcase').last);
+      await tester.pumpAndSettle();
+
+      rootBundle.evict('assets/comprehensive_markdown_guide.md');
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Markdown Guide').last);
+      await tester.pump();
+      expect(pendingLoads, hasLength(4));
+
+      await tester.enterText(
+        find.byKey(const Key('studio-source-editor')),
+        '# Manual User Edit\n\nDo not overwrite me.',
+      );
+      await tester.pump();
+      pendingLoads[3].complete(realGuideBytes);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 80)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Manual User Edit'), findsWidgets);
+      expect(find.text('Markdown Syntax Guide'), findsNothing);
+
+      // Error handling: failed asset load surfaces error status cleanly without throwing.
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CommonMark & GFM Showcase').last);
+      await tester.pumpAndSettle();
+
+      rootBundle.evict('assets/comprehensive_markdown_guide.md');
+      failNextAssetLoad = true;
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Comprehensive Markdown Guide').last);
+      await _pumpUntilFound(
+        tester,
+        find.textContaining(
+          'Failed to load preset "Comprehensive Markdown Guide"',
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        find.textContaining(
+          'Failed to load preset "Comprehensive Markdown Guide"',
+        ),
+        findsOneWidget,
+      );
     },
   );
 }
