@@ -90,26 +90,59 @@ abstract final class MarkdownBuiltInRenderers {
   /// [usePersistentMermaidIsolate].
   static Future<void> dispose() => BuiltInMermaidCache.instance.dispose();
 
-  /// Whether cold Mermaid diagram compilations reuse a single persistent
-  /// pre-warmed background worker isolate (`true`, default) instead of spawning
-  /// one-shot `compute()` isolates per diagram (`false`).
+  /// Whether cold Mermaid diagram compilations reuse a persistent pre-warmed
+  /// primary background worker isolate plus bounded lazy auxiliary burst
+  /// isolates (`true`, default) instead of spawning one-shot `compute()`
+  /// isolates per diagram (`false`).
   ///
-  /// Setting this to `false` immediately shuts down any active persistent
-  /// worker so no background isolate stays alive, and routes subsequent cold
-  /// Mermaid compilations through one-shot `compute()`.
+  /// When enabled, `1` persistent primary isolate handles sequential work and
+  /// up to [maxMermaidConcurrentWorkers] total isolates (`1` primary plus
+  /// bounded lazy auxiliary burst isolates that tear down automatically when
+  /// idle) serve concurrent bursts. Setting this to `false` immediately shuts
+  /// down the primary and any active burst workers so no background isolate
+  /// stays alive, and routes subsequent cold Mermaid compilations through
+  /// one-shot `compute()`.
   static bool get usePersistentMermaidIsolate =>
       BuiltInMermaidCache.instance.usePersistentMermaidIsolate;
 
-  /// Configures whether cold Mermaid diagram compilations reuse a persistent
-  /// background worker isolate or fall back to one-shot `compute()` isolates.
+  /// Configures whether cold Mermaid diagram compilations reuse the persistent
+  /// primary background worker isolate and bounded auxiliary burst pool or fall
+  /// back to one-shot `compute()` isolates.
   static set usePersistentMermaidIsolate(bool value) {
     BuiltInMermaidCache.instance.usePersistentMermaidIsolate = value;
   }
 
-  /// Whether the persistent background Mermaid worker isolate is currently
-  /// active or starting up.
+  /// Whether the persistent primary or any auxiliary burst Mermaid worker
+  /// isolate is currently active or starting up.
   static bool get isMermaidWorkerActive =>
       BuiltInMermaidCache.instance.isMermaidWorkerActive;
+
+  /// Default maximum concurrent Mermaid background worker isolates (`1`
+  /// persistent primary isolate plus up to `3` lazy auxiliary burst isolates
+  /// on IO platforms, and `1` on web).
+  static int get defaultMaxMermaidConcurrentWorkers =>
+      BuiltInMermaidCache.defaultMaxMermaidConcurrentWorkers;
+
+  /// Maximum total worker isolates permitted across the persistent primary
+  /// Mermaid worker and any lazily spawned auxiliary burst workers.
+  ///
+  /// Setting this to `1` disables auxiliary burst workers while preserving the
+  /// persistent primary worker isolate. Throws [RangeError] if set below `1`.
+  static int get maxMermaidConcurrentWorkers =>
+      BuiltInMermaidCache.maxMermaidConcurrentWorkers;
+
+  /// Configures [maxMermaidConcurrentWorkers], shutting down idle excess burst
+  /// workers immediately and retiring busy excess burst workers after their
+  /// active job completes.
+  static set maxMermaidConcurrentWorkers(int value) {
+    BuiltInMermaidCache.maxMermaidConcurrentWorkers = value;
+  }
+
+  /// Current number of active or starting Mermaid background worker isolates
+  /// across the persistent primary worker and any active auxiliary burst
+  /// workers.
+  static int get activeMermaidWorkerCount =>
+      BuiltInMermaidCache.activeMermaidWorkerCount;
 
   /// Number of synchronous TeX math layout evaluations executed on cache misses.
   static int get mathLayoutCount => BuiltInMathCache.instance.layoutCount;

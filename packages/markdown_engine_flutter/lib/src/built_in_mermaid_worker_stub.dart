@@ -186,10 +186,36 @@ Future<MermaidWorkerReply> compileMermaidCompute(
 }
 
 /// Web-safe stub for [PersistentMermaidWorker] on platforms without
-/// `dart:isolate`, delegating Mermaid compilation through `compute`.
+/// `dart:io` isolate pools, delegating Mermaid compilation through `compute`.
 final class PersistentMermaidWorker {
+  /// Default maximum concurrent Mermaid worker isolates (`1` on stub
+  /// platforms).
+  static const int defaultMaxConcurrentWorkers = 1;
+
+  int _maxConcurrentWorkers = defaultMaxConcurrentWorkers;
+
   /// Always `false` on platforms without persistent background isolates.
   bool get isActive => false;
+
+  /// Always `0` on platforms without persistent background isolates.
+  int get activeWorkerCount => 0;
+
+  /// Maximum total worker isolates permitted across the primary isolate and
+  /// auxiliary burst isolates.
+  ///
+  /// Throws [RangeError] if set to a value less than `1`.
+  int get maxConcurrentWorkers => _maxConcurrentWorkers;
+
+  set maxConcurrentWorkers(int value) {
+    if (value < 1) {
+      throw RangeError.value(
+        value,
+        'maxConcurrentWorkers',
+        'Must be at least 1.',
+      );
+    }
+    _maxConcurrentWorkers = value;
+  }
 
   /// Primes Mermaid diagram compilation via `compute`.
   Future<void> warmUp() async {
@@ -207,9 +233,19 @@ final class PersistentMermaidWorker {
   /// No-op on platforms without a persistent background isolate.
   Future<void> shutdown() async {}
 
-  /// Test-only isolate identity (always `null` on stub platforms).
+  /// Test-only primary isolate identity (always `null` on stub platforms).
   @visibleForTesting
   int? get debugIsolateIdentity => null;
+
+  /// Test-only active worker isolate identities (always empty on stub
+  /// platforms).
+  @visibleForTesting
+  List<int> get debugWorkerIsolateIdentities => const <int>[];
+
+  /// Test-only idle timeout for auxiliary burst workers (unused on stub
+  /// platforms).
+  @visibleForTesting
+  Duration debugBurstWorkerIdleTimeout = const Duration(seconds: 15);
 
   /// Test-only hook (no-op on platforms without `dart:isolate`).
   @visibleForTesting
@@ -218,4 +254,8 @@ final class PersistentMermaidWorker {
   /// Test-only hook (no-op on platforms without `dart:isolate`).
   @visibleForTesting
   void debugTriggerUncaughtError() {}
+
+  /// Test-only callback hook (unused on platforms without `dart:isolate`).
+  @visibleForTesting
+  Object? Function({required bool isPrimary})? debugSpawnErrorInjector;
 }

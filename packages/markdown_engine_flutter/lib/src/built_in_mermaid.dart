@@ -249,6 +249,32 @@ final class BuiltInMermaidCache {
   /// Default maximum estimated retained byte budget in the LRU cache (16 MiB).
   static const int defaultMaxBytes = 16 * 1024 * 1024;
 
+  /// Default maximum concurrent Mermaid background worker isolates (`1`
+  /// persistent primary isolate plus up to `3` lazy auxiliary burst
+  /// isolates, bounded by processor count on IO platforms and `1` on web).
+  static int get defaultMaxMermaidConcurrentWorkers =>
+      PersistentMermaidWorker.defaultMaxConcurrentWorkers;
+
+  /// Maximum total worker isolates permitted across the persistent primary
+  /// isolate and any lazily spawned auxiliary burst isolates.
+  ///
+  /// Setting this to `1` disables auxiliary burst workers while preserving the
+  /// single persistent primary worker isolate. Throws [RangeError] if set to a
+  /// value less than `1`.
+  static int get maxMermaidConcurrentWorkers =>
+      instance._worker.maxConcurrentWorkers;
+
+  /// Configures [maxMermaidConcurrentWorkers], throwing [RangeError] if
+  /// [value] is less than `1`.
+  static set maxMermaidConcurrentWorkers(int value) {
+    instance._worker.maxConcurrentWorkers = value;
+  }
+
+  /// Current number of active or starting Mermaid background worker isolates
+  /// across the persistent primary worker and any active auxiliary burst
+  /// workers.
+  static int get activeMermaidWorkerCount => instance._worker.activeWorkerCount;
+
   /// Test hook forcing background worker / `compute` compilation even under
   /// `TestWidgetsFlutterBinding` when testing async transitions via `runAsync`.
   bool debugForceAsyncInTests = false;
@@ -274,11 +300,14 @@ final class BuiltInMermaidCache {
   PersistentMermaidWorker get debugWorker => _worker;
 
   /// Whether cold Mermaid diagram compilations reuse a persistent pre-warmed
-  /// background worker isolate instead of spawning one-shot `compute()`
-  /// isolates per diagram.
+  /// primary background worker isolate plus bounded lazy auxiliary burst
+  /// isolates instead of spawning one-shot `compute()` isolates per diagram.
   ///
-  /// Defaults to `true`. Setting this to `false` immediately shuts down any
-  /// active persistent worker and routes subsequent cold compiles through
+  /// Defaults to `true`, keeping `1` persistent primary isolate alive for
+  /// sequential work and scaling up to [maxMermaidConcurrentWorkers] total
+  /// isolates via bounded lazy auxiliary burst workers during concurrent
+  /// bursts. Setting this to `false` immediately shuts down the primary and
+  /// any active burst workers and routes subsequent cold compiles through
   /// one-shot `compute()`.
   bool get usePersistentMermaidIsolate => _usePersistentMermaidIsolate;
 

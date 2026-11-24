@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:isolate' show IsolateSpawnException;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -1053,12 +1054,30 @@ End of document.
   group('Persistent Mermaid worker isolate', () {
     void enableAsyncWorkerWithCleanup() {
       MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true;
+      MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers =
+          MarkdownBuiltInRenderers.defaultMaxMermaidConcurrentWorkers;
+      BuiltInMermaidCache.instance.debugWorker.debugBurstWorkerIdleTimeout =
+          const Duration(seconds: 15);
+      BuiltInMermaidCache.instance.debugWorker.debugSpawnErrorInjector = null;
       MarkdownBuiltInRenderers.debugForceAsyncMermaidInTests = true;
       addTearDown(() async {
+        BuiltInMermaidCache.instance.debugWorker.debugSpawnErrorInjector = null;
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers =
+            MarkdownBuiltInRenderers.defaultMaxMermaidConcurrentWorkers;
+        BuiltInMermaidCache.instance.debugWorker.debugBurstWorkerIdleTimeout =
+            const Duration(seconds: 15);
         MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true;
         MarkdownBuiltInRenderers.debugForceAsyncMermaidInTests = false;
         await MarkdownBuiltInRenderers.dispose();
       });
+    }
+
+    List<String> buildBurstDiagrams(int count, {String prefix = 'Burst'}) {
+      return List<String>.generate(
+        count,
+        (int i) =>
+            'flowchart LR\n  ${prefix}A$i["Step $i"] --> ${prefix}B$i["Out $i"]',
+      );
     }
 
     testWidgets(
@@ -1345,6 +1364,657 @@ End of document.
         expect(restored.colors, orderedEquals(original.colors));
       }
     });
+
+    test('exposes defaultMaxMermaidConcurrentWorkers bounds and validates maxMermaidConcurrentWorkers', () {
+      addTearDown(() {
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers =
+            MarkdownBuiltInRenderers.defaultMaxMermaidConcurrentWorkers;
+      });
+
+      final int defaultCap =
+          MarkdownBuiltInRenderers.defaultMaxMermaidConcurrentWorkers;
+      expect(defaultCap, inInclusiveRange(1, 4));
+      expect(MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers, defaultCap);
+      expect(
+        BuiltInMermaidCache.defaultMaxMermaidConcurrentWorkers,
+        defaultCap,
+      );
+
+      expect(
+        () => MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 0,
+        throwsRangeError,
+      );
+      expect(
+        () => MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = -2,
+        throwsRangeError,
+      );
+      expect(
+        () => BuiltInMermaidCache.maxMermaidConcurrentWorkers = 0,
+        throwsRangeError,
+      );
+      expect(MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers, defaultCap);
+
+      MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 3;
+      expect(MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers, 3);
+      expect(BuiltInMermaidCache.maxMermaidConcurrentWorkers, 3);
+    });
+
+    testWidgets(
+      'sequential renders stay at activeMermaidWorkerCount == 1 and reuse primary isolate',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          final int? primaryId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(primaryId, isNotNull);
+
+          for (final String diagram in buildBurstDiagrams(
+            6,
+            prefix: 'SeqOnly',
+          )) {
+            final BuiltInMermaidResult result = await BuiltInMermaidCache
+                .instance
+                .render(diagram, lightTheme);
+            expect(result, isA<BuiltInMermaidSuccess>());
+            expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+            expect(
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+              primaryId,
+            );
+            expect(
+              BuiltInMermaidCache
+                  .instance
+                  .debugWorker
+                  .debugWorkerIsolateIdentities,
+              <int>[primaryId!],
+            );
+          }
+        });
+      },
+    );
+
+    testWidgets(
+      'concurrent Future.wait burst of 12 diagrams scales <= maxMermaidConcurrentWorkers and returns 12 valid renders',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+        final List<String> diagrams = buildBurstDiagrams(12, prefix: 'Pool12');
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          final int? primaryId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(primaryId, isNotNull);
+
+          final List<Future<BuiltInMermaidResult>> futures = diagrams
+              .map(
+                (String code) =>
+                    BuiltInMermaidCache.instance.render(code, lightTheme),
+              )
+              .toList(growable: false);
+
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 4);
+
+          final List<BuiltInMermaidResult> results =
+              await Future.wait<BuiltInMermaidResult>(futures);
+          expect(results, hasLength(12));
+          for (final BuiltInMermaidResult result in results) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+            final BuiltInMermaidSuccess ok = result as BuiltInMermaidSuccess;
+            expect(ok.compiledBytes, isNotEmpty);
+            expect(ok.logicalSize.width, greaterThan(0.0));
+            expect(ok.logicalSize.height, greaterThan(0.0));
+          }
+
+          expect(
+            MarkdownBuiltInRenderers.activeMermaidWorkerCount,
+            inInclusiveRange(2, 4),
+          );
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+          final List<int> identities = BuiltInMermaidCache
+              .instance
+              .debugWorker
+              .debugWorkerIsolateIdentities;
+          expect(identities, contains(primaryId));
+          expect(identities.toSet().length, identities.length);
+
+          // Cap=1 disables burst workers while keeping primary persistent.
+          await MarkdownBuiltInRenderers.dispose();
+          MarkdownBuiltInRenderers.clearCaches();
+          MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 1;
+          await MarkdownBuiltInRenderers.warmUp();
+          final int? cap1PrimaryId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(cap1PrimaryId, isNotNull);
+
+          final List<Future<BuiltInMermaidResult>> cap1Futures = diagrams
+              .map(
+                (String code) =>
+                    BuiltInMermaidCache.instance.render(code, lightTheme),
+              )
+              .toList(growable: false);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+
+          final List<BuiltInMermaidResult> cap1Results =
+              await Future.wait<BuiltInMermaidResult>(cap1Futures);
+          for (final BuiltInMermaidResult result in cap1Results) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            cap1PrimaryId,
+          );
+        });
+      },
+    );
+
+    testWidgets(
+      'burst workers tear down automatically after debugBurstWorkerIdleTimeout while primary keeps exact identity',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+        BuiltInMermaidCache.instance.debugWorker.debugBurstWorkerIdleTimeout =
+            const Duration(milliseconds: 50);
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+        final List<String> diagrams = buildBurstDiagrams(12, prefix: 'Idle');
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          final int? primaryId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(primaryId, isNotNull);
+
+          final List<Future<BuiltInMermaidResult>> futures = diagrams
+              .map(
+                (String code) =>
+                    BuiltInMermaidCache.instance.render(code, lightTheme),
+              )
+              .toList(growable: false);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 4);
+
+          final List<BuiltInMermaidResult> results =
+              await Future.wait<BuiltInMermaidResult>(futures);
+          for (final BuiltInMermaidResult result in results) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+
+          for (
+            int i = 0;
+            i < 60 && MarkdownBuiltInRenderers.activeMermaidWorkerCount > 1;
+            i++
+          ) {
+            await Future<void>.delayed(const Duration(milliseconds: 15));
+          }
+
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+          expect(
+            BuiltInMermaidCache
+                .instance
+                .debugWorker
+                .debugWorkerIsolateIdentities,
+            <int>[primaryId!],
+          );
+
+          final BuiltInMermaidResult afterIdle = await BuiltInMermaidCache
+              .instance
+              .render('flowchart LR\n  AfterIdleA --> AfterIdleB', lightTheme);
+          expect(afterIdle, isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+        });
+      },
+    );
+
+    testWidgets(
+      'dynamically shrinking maxMermaidConcurrentWorkers = 1 mid-flight completes in-flight jobs and tears down excess workers',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+        final List<String> diagrams = buildBurstDiagrams(12, prefix: 'Shrink');
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          final int? primaryId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(primaryId, isNotNull);
+
+          final List<Future<BuiltInMermaidResult>> futures = diagrams
+              .map(
+                (String code) =>
+                    BuiltInMermaidCache.instance.render(code, lightTheme),
+              )
+              .toList(growable: false);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 4);
+
+          // Shrink mid-flight while burst workers are starting/busy.
+          MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 1;
+
+          final List<BuiltInMermaidResult> results =
+              await Future.wait<BuiltInMermaidResult>(futures);
+          for (final BuiltInMermaidResult result in results) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+
+          // Also verify immediate teardown of idle excess burst workers.
+          MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+          MarkdownBuiltInRenderers.clearCaches();
+          final List<BuiltInMermaidResult> warmBurstResults =
+              await Future.wait<BuiltInMermaidResult>(
+                buildBurstDiagrams(12, prefix: 'IdleShrink').map(
+                  (String code) =>
+                      BuiltInMermaidCache.instance.render(code, lightTheme),
+                ),
+              );
+          for (final BuiltInMermaidResult result in warmBurstResults) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(
+            MarkdownBuiltInRenderers.activeMermaidWorkerCount,
+            greaterThan(1),
+          );
+
+          MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 1;
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+        });
+      },
+    );
+
+    testWidgets(
+      'usePersistentMermaidIsolate = false and dispose() tear down primary plus all burst workers',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          final List<BuiltInMermaidResult> burst1 =
+              await Future.wait<BuiltInMermaidResult>(
+                buildBurstDiagrams(12, prefix: 'ShutdownOptOut').map(
+                  (String code) =>
+                      BuiltInMermaidCache.instance.render(code, lightTheme),
+                ),
+              );
+          for (final BuiltInMermaidResult result in burst1) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(
+            MarkdownBuiltInRenderers.activeMermaidWorkerCount,
+            greaterThan(1),
+          );
+
+          MarkdownBuiltInRenderers.usePersistentMermaidIsolate = false;
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 0);
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+          expect(
+            BuiltInMermaidCache
+                .instance
+                .debugWorker
+                .debugWorkerIsolateIdentities,
+            isEmpty,
+          );
+
+          MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true;
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.warmUp();
+          final List<BuiltInMermaidResult> burst2 =
+              await Future.wait<BuiltInMermaidResult>(
+                buildBurstDiagrams(12, prefix: 'ShutdownDispose').map(
+                  (String code) =>
+                      BuiltInMermaidCache.instance.render(code, lightTheme),
+                ),
+              );
+          for (final BuiltInMermaidResult result in burst2) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(
+            MarkdownBuiltInRenderers.activeMermaidWorkerCount,
+            greaterThan(1),
+          );
+
+          await MarkdownBuiltInRenderers.dispose();
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 0);
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+          expect(
+            BuiltInMermaidCache
+                .instance
+                .debugWorker
+                .debugWorkerIsolateIdentities,
+            isEmpty,
+          );
+        });
+      },
+    );
+
+    testWidgets(
+      'killing or throwing on primary worker during concurrent burst fails only dead worker active job and recovers remaining work',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+        final List<String> killDiagrams = buildBurstDiagrams(
+          12,
+          prefix: 'KillBurst',
+        );
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          final int? id1 =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(id1, isNotNull);
+
+          final List<Future<BuiltInMermaidResult>> futures = killDiagrams
+              .map(
+                (String code) =>
+                    BuiltInMermaidCache.instance.render(code, lightTheme),
+              )
+              .toList(growable: false);
+          BuiltInMermaidCache.instance.debugWorker
+              .debugKillIsolateWithoutReset();
+
+          final List<BuiltInMermaidResult> results =
+              await Future.wait<BuiltInMermaidResult>(futures);
+          expect(results[0], isA<BuiltInMermaidFailure>());
+          for (int i = 1; i < results.length; i++) {
+            expect(results[i], isA<BuiltInMermaidSuccess>());
+          }
+
+          // Dead primary active failure must not be cached; retry succeeds on
+          // recovered pool with a new primary isolate identity.
+          final BuiltInMermaidResult retried = await BuiltInMermaidCache
+              .instance
+              .render(killDiagrams[0], lightTheme);
+          expect(retried, isA<BuiltInMermaidSuccess>());
+          final int? id2 =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(id2, isNotNull);
+          expect(id2, isNot(equals(id1)));
+
+          // Uncaught error injected into primary during a concurrent burst.
+          MarkdownBuiltInRenderers.clearCaches();
+          final List<String> errDiagrams = buildBurstDiagrams(
+            10,
+            prefix: 'ErrBurst',
+          );
+          final List<Future<BuiltInMermaidResult>> errFutures = errDiagrams
+              .map(
+                (String code) =>
+                    BuiltInMermaidCache.instance.render(code, lightTheme),
+              )
+              .toList(growable: false);
+          BuiltInMermaidCache.instance.debugWorker.debugTriggerUncaughtError();
+
+          final List<BuiltInMermaidResult> errResults =
+              await Future.wait<BuiltInMermaidResult>(errFutures);
+          for (int i = 0; i < errResults.length; i++) {
+            if (errResults[i] is BuiltInMermaidFailure) {
+              final BuiltInMermaidResult retryOk = await BuiltInMermaidCache
+                  .instance
+                  .render(errDiagrams[i], lightTheme);
+              expect(retryOk, isA<BuiltInMermaidSuccess>());
+            }
+          }
+
+          // Wait briefly if the fatal uncaught error exit arrives right after
+          // the batch completed, then confirm primary recovers with a fresh id.
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+          final BuiltInMermaidResult afterErr = await BuiltInMermaidCache
+              .instance
+              .render('flowchart LR\n  PostErrA --> PostErrB', lightTheme);
+          expect(afterErr, isA<BuiltInMermaidSuccess>());
+          final int? id3 =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(id3, isNotNull);
+          expect(id3, isNot(equals(id2)));
+        });
+      },
+    );
+
+    testWidgets(
+      'auxiliary burst IsolateSpawnException preserves surviving primary worker and drains burst without sync fallback',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          final int? primaryId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(primaryId, isNotNull);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+
+          int auxiliaryAttempts = 0;
+          BuiltInMermaidCache
+              .instance
+              .debugWorker
+              .debugSpawnErrorInjector = ({required bool isPrimary}) {
+            if (!isPrimary) {
+              auxiliaryAttempts++;
+              return IsolateSpawnException('Simulated auxiliary isolate limit');
+            }
+            return null;
+          };
+
+          final List<BuiltInMermaidResult> warmBurst =
+              await Future.wait<BuiltInMermaidResult>(
+                buildBurstDiagrams(8, prefix: 'AuxSpawnFail').map(
+                  (String code) =>
+                      BuiltInMermaidCache.instance.render(code, lightTheme),
+                ),
+              );
+          expect(auxiliaryAttempts, greaterThan(0));
+          for (final BuiltInMermaidResult result in warmBurst) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+            final BuiltInMermaidSuccess ok = result as BuiltInMermaidSuccess;
+            expect(ok.compiledBytes, isNotEmpty);
+            expect(ok.logicalSize.width, greaterThan(0.0));
+            expect(ok.logicalSize.height, greaterThan(0.0));
+          }
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+          expect(
+            BuiltInMermaidCache
+                .instance
+                .debugWorker
+                .debugWorkerIsolateIdentities,
+            <int>[primaryId!],
+          );
+
+          // Follow-up warmUp and render continue using the exact same primary
+          // isolate (proving _spawnUnsupported was not set).
+          await MarkdownBuiltInRenderers.warmUp();
+          final BuiltInMermaidResult followUp = await BuiltInMermaidCache
+              .instance
+              .render(
+                'flowchart LR\n  AfterAuxFailA --> AfterAuxFailB',
+                lightTheme,
+              );
+          expect(followUp, isA<BuiltInMermaidSuccess>());
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+
+          // Cold start (no prior warmUp) with auxiliary IsolateSpawnException
+          // while primary is still starting also drains cleanly on primary.
+          await MarkdownBuiltInRenderers.dispose();
+          MarkdownBuiltInRenderers.clearCaches();
+          auxiliaryAttempts = 0;
+          final List<BuiltInMermaidResult> coldBurst =
+              await Future.wait<BuiltInMermaidResult>(
+                buildBurstDiagrams(4, prefix: 'ColdAuxFail').map(
+                  (String code) =>
+                      BuiltInMermaidCache.instance.render(code, lightTheme),
+                ),
+              );
+          expect(auxiliaryAttempts, greaterThan(0));
+          for (final BuiltInMermaidResult result in coldBurst) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+
+          // Lifting the fault restores auxiliary burst scaling immediately.
+          BuiltInMermaidCache.instance.debugWorker.debugSpawnErrorInjector =
+              null;
+          MarkdownBuiltInRenderers.clearCaches();
+          final List<BuiltInMermaidResult> recoveredBurst =
+              await Future.wait<BuiltInMermaidResult>(
+                buildBurstDiagrams(8, prefix: 'RecoveredBurst').map(
+                  (String code) =>
+                      BuiltInMermaidCache.instance.render(code, lightTheme),
+                ),
+              );
+          for (final BuiltInMermaidResult result in recoveredBurst) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(
+            MarkdownBuiltInRenderers.activeMermaidWorkerCount,
+            greaterThan(1),
+          );
+        });
+      },
+    );
+
+    testWidgets(
+      'auxiliary non-IsolateSpawnException keeps surviving worker while 0-worker IsolateSpawnException falls back to sync',
+      (WidgetTester tester) async {
+        enableAsyncWorkerWithCleanup();
+        MarkdownBuiltInRenderers.maxMermaidConcurrentWorkers = 4;
+
+        final DerivedMermaidTheme lightTheme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+
+        await tester.runAsync(() async {
+          await MarkdownBuiltInRenderers.warmUp();
+          final int? primaryId =
+              BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity;
+          expect(primaryId, isNotNull);
+
+          int stateErrorAttempts = 0;
+          BuiltInMermaidCache.instance.debugWorker.debugSpawnErrorInjector =
+              ({required bool isPrimary}) {
+                if (!isPrimary) {
+                  stateErrorAttempts++;
+                  return StateError('Simulated auxiliary spawn failure');
+                }
+                return null;
+              };
+
+          final List<BuiltInMermaidResult> nonSpawnExcBurst =
+              await Future.wait<BuiltInMermaidResult>(
+                buildBurstDiagrams(6, prefix: 'AuxStateErr').map(
+                  (String code) =>
+                      BuiltInMermaidCache.instance.render(code, lightTheme),
+                ),
+              );
+          expect(stateErrorAttempts, greaterThan(0));
+          for (final BuiltInMermaidResult result in nonSpawnExcBurst) {
+            expect(result, isA<BuiltInMermaidSuccess>());
+          }
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+          expect(
+            BuiltInMermaidCache.instance.debugWorker.debugIsolateIdentity,
+            primaryId,
+          );
+
+          // Primary IsolateSpawnException with 0 active workers falls back to
+          // synchronous compilation without leaving orphaned worker slots.
+          await MarkdownBuiltInRenderers.dispose();
+          MarkdownBuiltInRenderers.clearCaches();
+          BuiltInMermaidCache.instance.debugWorker.debugSpawnErrorInjector = ({
+            required bool isPrimary,
+          }) => IsolateSpawnException('Simulated isolates unsupported');
+
+          await MarkdownBuiltInRenderers.warmUp();
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 0);
+
+          final BuiltInMermaidResult syncFallbackResult =
+              await BuiltInMermaidCache.instance.render(
+                'flowchart LR\n  SyncFallbackA --> SyncFallbackB',
+                lightTheme,
+              );
+          expect(syncFallbackResult, isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isFalse);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 0);
+
+          // After dispose() resets _spawnUnsupported and fault clears, the
+          // persistent worker spawns cleanly again.
+          BuiltInMermaidCache.instance.debugWorker.debugSpawnErrorInjector =
+              null;
+          await MarkdownBuiltInRenderers.dispose();
+          final BuiltInMermaidResult recovered = await BuiltInMermaidCache
+              .instance
+              .render(
+                'flowchart LR\n  RecoverSyncA --> RecoverSyncB',
+                lightTheme,
+              );
+          expect(recovered, isA<BuiltInMermaidSuccess>());
+          expect(MarkdownBuiltInRenderers.isMermaidWorkerActive, isTrue);
+          expect(MarkdownBuiltInRenderers.activeMermaidWorkerCount, 1);
+        });
+      },
+    );
   });
 }
 
