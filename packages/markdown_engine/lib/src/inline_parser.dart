@@ -109,6 +109,20 @@ final class ReusableBlockInlineResolver {
     _resolver.resetForParagraph();
     return _resolver._parseInlineString(input, span);
   }
+
+  /// Resolves inline nodes for a single table row reusing internal scratch
+  /// buffers.
+  List<TableCellNode> resolveTableRow(
+    List<String> rawCells,
+    List<TableAlignment> alignments,
+    SourceSpan span, {
+    bool reset = true,
+  }) {
+    if (reset) {
+      _resolver.resetForParagraph();
+    }
+    return _resolver._resolveTableRow(rawCells, alignments, span);
+  }
 }
 
 const int _maxAbbrPatternKeys = 512;
@@ -239,6 +253,7 @@ final class _InlineResolver {
   String idPrefix;
   final Uint8List structuralLut;
   _InlineScanner? _scanner;
+  List<int>? _scratchBtSpans;
 
   HeadingSlugGenerator? _seedSlugs;
   List<String> _seedHeadingTexts;
@@ -617,35 +632,44 @@ final class _InlineResolver {
   static final List<List<TableCellNode>> _emptyTableRows =
       <List<TableCellNode>>[];
 
-  TableNode _resolveTable(RawTable raw) {
-    final int colCount = raw.alignments.length;
-    final List<TableCellNode> headers;
+  List<TableCellNode> _resolveTableRow(
+    List<String> rawCells,
+    List<TableAlignment> alignments,
+    SourceSpan span,
+  ) {
+    final int colCount = alignments.length;
     if (colCount == 0) {
-      headers = emptyFrozenTableCellList;
-    } else if (colCount == 1) {
-      final String cellText = raw.headerCells.isNotEmpty
-          ? raw.headerCells[0]
-          : '';
-      headers = freezeSingleton<TableCellNode>(
+      return emptyFrozenTableCellList;
+    }
+    if (colCount == 1) {
+      final String cellText = rawCells.isNotEmpty ? rawCells[0] : '';
+      return freezeSingleton<TableCellNode>(
         createFrozenTableCellNode(
-          children: _parseInlineString(cellText, raw.span),
-          alignment: raw.alignments[0],
-          span: raw.span,
+          children: _parseInlineString(cellText, span),
+          alignment: alignments[0],
+          span: span,
         ),
       );
-    } else {
-      headers = freezeFreshList(<TableCellNode>[
-        for (int c = 0; c < colCount; c++)
-          createFrozenTableCellNode(
-            children: _parseInlineString(
-              c < raw.headerCells.length ? raw.headerCells[c] : '',
-              raw.span,
-            ),
-            alignment: raw.alignments[c],
-            span: raw.span,
-          ),
-      ]);
     }
+    return freezeFreshList(<TableCellNode>[
+      for (int c = 0; c < colCount; c++)
+        createFrozenTableCellNode(
+          children: _parseInlineString(
+            c < rawCells.length ? rawCells[c] : '',
+            span,
+          ),
+          alignment: alignments[c],
+          span: span,
+        ),
+    ]);
+  }
+
+  TableNode _resolveTable(RawTable raw) {
+    final List<TableCellNode> headers = _resolveTableRow(
+      raw.headerCells,
+      raw.alignments,
+      raw.span,
+    );
     final int rowCount = raw.rows.length;
     final List<List<TableCellNode>> rows;
     if (rowCount == 0) {
@@ -653,31 +677,7 @@ final class _InlineResolver {
     } else {
       final List<List<TableCellNode>> builtRows = <List<TableCellNode>>[
         for (int r = 0; r < rowCount; r++)
-          if (colCount == 0)
-            emptyFrozenTableCellList
-          else if (colCount == 1)
-            freezeSingleton<TableCellNode>(
-              createFrozenTableCellNode(
-                children: _parseInlineString(
-                  raw.rows[r].isNotEmpty ? raw.rows[r][0] : '',
-                  raw.span,
-                ),
-                alignment: raw.alignments[0],
-                span: raw.span,
-              ),
-            )
-          else
-            freezeFreshList(<TableCellNode>[
-              for (int c = 0; c < colCount; c++)
-                createFrozenTableCellNode(
-                  children: _parseInlineString(
-                    c < raw.rows[r].length ? raw.rows[r][c] : '',
-                    raw.span,
-                  ),
-                  alignment: raw.alignments[c],
-                  span: raw.span,
-                ),
-            ]),
+          _resolveTableRow(raw.rows[r], raw.alignments, raw.span),
       ];
       rows = freezeFreshList(builtRows);
     }
@@ -812,7 +812,10 @@ final class _InlineResolver {
                 btStart = i;
                 btEnd = close;
               } else {
-                btSpans ??= <int>[btStart, btEnd];
+                btSpans ??= (_scratchBtSpans ??= <int>[])
+                  ..clear()
+                  ..add(btStart)
+                  ..add(btEnd);
                 btSpans.add(i);
                 btSpans.add(close);
               }

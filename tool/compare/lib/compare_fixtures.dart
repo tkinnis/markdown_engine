@@ -156,6 +156,72 @@ final class LatencyStats {
   };
 }
 
+/// Summary statistics for repeated millisecond measurements.
+final class SampleSummary {
+  /// Creates a [SampleSummary].
+  const SampleSummary({
+    required this.count,
+    required this.median,
+    required this.p95,
+    required this.iqr,
+    required this.mean,
+    required this.min,
+    required this.max,
+  });
+
+  /// Number of timed samples.
+  final int count;
+
+  /// Median (p50) value.
+  final double median;
+
+  /// 95th percentile value.
+  final double p95;
+
+  /// Interquartile range (`p75 - p25`).
+  final double iqr;
+
+  /// Arithmetic mean value.
+  final double mean;
+
+  /// Minimum observed value.
+  final double min;
+
+  /// Maximum observed value.
+  final double max;
+}
+
+/// Specification for one participant in an interleaved latency benchmark.
+final class InterleavedBenchmarkSpec {
+  /// Creates an [InterleavedBenchmarkSpec].
+  const InterleavedBenchmarkSpec({
+    required this.label,
+    required this.payloadBytes,
+    required this.batchIterations,
+    required this.operation,
+    this.unitDivisor = 1,
+    this.throughputBytesPerUnit,
+  });
+
+  /// Descriptive label for the measured operation.
+  final String label;
+
+  /// UTF-8 byte size of the primary payload.
+  final int payloadBytes;
+
+  /// Iterations executed per timed sample window.
+  final int batchIterations;
+
+  /// Sub-units per iteration (e.g. chunk count for streaming averages).
+  final int unitDivisor;
+
+  /// Optional payload bytes per sub-unit for throughput computation.
+  final double? throughputBytesPerUnit;
+
+  /// Synchronous benchmark operation under test.
+  final void Function() operation;
+}
+
 /// Host hardware and Dart runtime metadata.
 final class HostEnvironmentInfo {
   /// Creates a [HostEnvironmentInfo].
@@ -494,6 +560,77 @@ StreamingPayloadFixture buildMixedStreamingFixture() {
   return StreamingPayloadFixture(fullSource: chunks.join(), chunks: chunks);
 }
 
+/// Builds 10 distinct Mermaid diagrams spanning multiple diagram families for
+/// cold worker isolate and `compute()` benchmarks.
+List<String> buildMermaid10DiagramCorpus() {
+  return const <String>[
+    '''flowchart LR
+  Input["Markdown"] --> Parser["AST"]
+  Parser --> Math["TexMath"]
+  Parser --> Vector["VectorGraphic"]''',
+    '''flowchart TD
+  Start([Request]) --> Auth{Authenticated?}
+  Auth -->|Yes| Render[Render Sliver]
+  Auth -->|No| Reject[403 Error]''',
+    '''sequenceDiagram
+  participant Client
+  participant Worker
+  participant Cache
+  Client->>Worker: compile(diagram)
+  Worker-->>Cache: TransferableTypedData
+  Cache-->>Client: CompiledBytes''',
+    '''stateDiagram-v2
+  [*] --> Idle
+  Idle --> Compiling: append(mermaid)
+  Compiling --> Cached: success
+  Compiling --> Fallback: error
+  Cached --> [*]''',
+    '''classDiagram
+  class MarkdownView {
+    +String data
+    +MarkdownThemeData theme
+  }
+  class MarkdownController {
+    +int parseCount
+  }
+  MarkdownView --> MarkdownController''',
+    '''erDiagram
+  DOCUMENT ||--o{ BLOCK : contains
+  BLOCK ||--o{ INLINE : contains
+  DOCUMENT {
+    string id
+    int lineCount
+  }''',
+    '''pie title Render Pipeline Stages
+  "Tokenize & Block" : 30
+  "Inline Resolve" : 25
+  "Text Layout" : 30
+  "Vector Paint" : 15''',
+    '''gantt
+  title Streaming Frame Budget
+  dateFormat X
+  axisFormat %Lms
+  section Main
+  Append & Diff : 0, 2
+  Canvas Paint : 2, 4
+  section Isolate
+  Mermaid Compile : 1, 5''',
+    '''mindmap
+  root((markdown_engine))
+    Parser
+      CommonMark 0.31.2
+      GFM 0.29
+    Renderers
+      OpenType Math
+      Vector Mermaid''',
+    '''xychart-beta
+  title "Chunk Throughput"
+  x-axis [10, 20, 30, 40, 50]
+  y-axis "Microseconds" 0 --> 20
+  bar [4, 5, 4, 6, 5]''',
+  ];
+}
+
 /// Builds a ~400-block rich Markdown document for headless widget benchmarks.
 String buildWidget400BlockDocument() {
   const int sections = 67;
@@ -704,18 +841,96 @@ LatencyStats measureLatency({
     perUnitUs.add(sw.elapsedMicroseconds / (batchIterations * unitDivisor));
   }
 
-  perUnitUs.sort();
-  final double meanUs =
-      perUnitUs.reduce((double a, double b) => a + b) / perUnitUs.length;
-  final double medianUs = _percentile(perUnitUs, 0.50);
-  final double p95Us = _percentile(perUnitUs, 0.95);
-  final double minUs = perUnitUs.first;
-  final double maxUs = perUnitUs.last;
+  return _computeLatencyStats(
+    label: label,
+    payloadBytes: payloadBytes,
+    samples: samples,
+    batchIterations: batchIterations,
+    unitDivisor: unitDivisor,
+    throughputBytesPerUnit: throughputBytesPerUnit,
+    perUnitUs: perUnitUs,
+  );
+}
 
+/// Returns round-robin indices `0 .. count - 1` rotated by [round].
+List<int> interleaveRoundIndices(int count, int round) {
+  if (count <= 0) {
+    return const <int>[];
+  }
+  final int start = round % count;
+  return List<int>.generate(count, (int k) => (start + k) % count);
+}
+
+/// Benchmarks [specs] using round-robin interleaved rotation across
+/// [warmupRounds] and [timedRounds] so scheduling jitter and thermal drift
+/// affect every participant uniformly.
+List<LatencyStats> measureInterleavedLatencies({
+  required List<InterleavedBenchmarkSpec> specs,
+  required int warmupRounds,
+  required int timedRounds,
+}) {
+  for (int round = 0; round < warmupRounds; round++) {
+    for (final int idx in interleaveRoundIndices(specs.length, round)) {
+      final InterleavedBenchmarkSpec spec = specs[idx];
+      for (int i = 0; i < spec.batchIterations; i++) {
+        spec.operation();
+      }
+    }
+  }
+
+  final Stopwatch sw = Stopwatch();
+  final List<List<double>> perUnitSamples = List<List<double>>.generate(
+    specs.length,
+    (_) => <double>[],
+  );
+
+  for (int round = 0; round < timedRounds; round++) {
+    for (final int idx in interleaveRoundIndices(
+      specs.length,
+      warmupRounds + round,
+    )) {
+      final InterleavedBenchmarkSpec spec = specs[idx];
+      sw
+        ..reset()
+        ..start();
+      for (int i = 0; i < spec.batchIterations; i++) {
+        spec.operation();
+      }
+      sw.stop();
+      perUnitSamples[idx].add(
+        sw.elapsedMicroseconds / (spec.batchIterations * spec.unitDivisor),
+      );
+    }
+  }
+
+  return List<LatencyStats>.generate(specs.length, (int idx) {
+    final InterleavedBenchmarkSpec spec = specs[idx];
+    return _computeLatencyStats(
+      label: spec.label,
+      payloadBytes: spec.payloadBytes,
+      samples: timedRounds,
+      batchIterations: spec.batchIterations,
+      unitDivisor: spec.unitDivisor,
+      throughputBytesPerUnit: spec.throughputBytesPerUnit,
+      perUnitUs: perUnitSamples[idx],
+    );
+  });
+}
+
+LatencyStats _computeLatencyStats({
+  required String label,
+  required int payloadBytes,
+  required int samples,
+  required int batchIterations,
+  required int unitDivisor,
+  required double? throughputBytesPerUnit,
+  required List<double> perUnitUs,
+}) {
+  final SampleSummary summary = summarizeSamples(perUnitUs);
   final double effectiveBytes =
       throughputBytesPerUnit ?? payloadBytes.toDouble();
-  final double throughputMbPerSec = medianUs > 0
-      ? (effectiveBytes / (1024.0 * 1024.0)) / (medianUs / 1000000.0)
+  final double throughputMbPerSec = summary.median > 0
+      ? (effectiveBytes / (1024.0 * 1024.0)) / (summary.median / 1000000.0)
       : 0.0;
 
   return LatencyStats(
@@ -724,14 +939,51 @@ LatencyStats measureLatency({
     samples: samples,
     batchIterations: batchIterations,
     unitDivisor: unitDivisor,
-    meanUs: _round2(meanUs),
-    medianUs: _round2(medianUs),
-    p95Us: _round2(p95Us),
-    minUs: _round2(minUs),
-    maxUs: _round2(maxUs),
+    meanUs: _round2(summary.mean),
+    medianUs: _round2(summary.median),
+    p95Us: _round2(summary.p95),
+    minUs: _round2(summary.min),
+    maxUs: _round2(summary.max),
     throughputMbPerSec: _round2(throughputMbPerSec),
   );
 }
+
+/// Computes `median` (`p50`), `p95`, `iqr`, `mean`, `min`, and `max` across
+/// [rawSamples].
+SampleSummary summarizeSamples(List<double> rawSamples) {
+  if (rawSamples.isEmpty) {
+    return const SampleSummary(
+      count: 0,
+      median: 0.0,
+      p95: 0.0,
+      iqr: 0.0,
+      mean: 0.0,
+      min: 0.0,
+      max: 0.0,
+    );
+  }
+  final List<double> sorted = List<double>.of(rawSamples)..sort();
+  final double mean =
+      sorted.reduce((double a, double b) => a + b) / sorted.length;
+  final double median = _percentile(sorted, 0.50);
+  final double p95 = _percentile(sorted, 0.95);
+  final double p25 = _percentile(sorted, 0.25);
+  final double p75 = _percentile(sorted, 0.75);
+  return SampleSummary(
+    count: sorted.length,
+    median: median,
+    p95: p95,
+    iqr: p75 - p25,
+    mean: mean,
+    min: sorted.first,
+    max: sorted.last,
+  );
+}
+
+/// Formats a millisecond [SampleSummary] with both `p50` and `p95`.
+String formatMsSummary(SampleSummary summary) =>
+    '${summary.median.toStringAsFixed(2)} ms '
+    '(p95=${summary.p95.toStringAsFixed(2)} ms)';
 
 /// Collects host hardware and Dart version details for benchmark reports.
 HostEnvironmentInfo collectHostEnvironmentInfo() {

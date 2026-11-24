@@ -727,11 +727,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         : nextRecognizers;
     _scheduleRetiredCleanup();
 
+    final TextSpan baseSpan = TextSpan(style: effectiveStyle, children: spans);
     final Widget built;
     if (!acc.hasWidgetSpan) {
-      final TextSpan rootSpan = env.applySpacingOverrides(
-        TextSpan(style: effectiveStyle, children: spans),
-      );
+      final TextSpan rootSpan = env.applySpacingOverrides(baseSpan);
       built = FastMarkdownText(
         span: rootSpan,
         plainText: rootSpan.toPlainText(includeSemanticsLabels: false),
@@ -745,12 +744,13 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         useLeafRenderBox: nextRecognizers.isEmpty,
       );
     } else {
-      built = Text.rich(
-        TextSpan(style: widget.baseStyle, children: spans),
+      built = MarkdownRichText.rich(
+        baseSpan,
         textAlign: widget.textAlign,
         textDirection: env.textDirection,
         textScaler: env.textScaler,
         locale: env.locale,
+        selectionColor: env.selectionColor,
       );
     }
     _cachedRichText = built;
@@ -1198,7 +1198,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
               color: theme.codeBackground,
               borderRadius: BorderRadius.circular(4.0),
             ),
-            child: Text(
+            child: MarkdownRichText(
               node.latex,
               style: style.copyWith(
                 fontFamily: theme.effectiveCodeFontFamily,
@@ -1262,7 +1262,9 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
                 bottom: BorderSide(color: theme.border, width: 2.0),
               ),
             ),
-            child: Text.rich(TextSpan(style: kbdStyle, children: kbdChildren)),
+            child: MarkdownRichText.rich(
+              TextSpan(style: kbdStyle, children: kbdChildren),
+            ),
           ),
         );
         return WidgetSpan(
@@ -1297,7 +1299,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           nextRecognizers: nextRecognizers,
           acc: acc,
         );
-        Widget labelWidget = Text.rich(
+        Widget labelWidget = MarkdownRichText.rich(
           TextSpan(style: abbrStyle, children: abbrChildren),
         );
         if (acc.env.hasOverlay) {
@@ -1393,7 +1395,9 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     final double dy = isSuperscript ? -baseSize * 0.3 : baseSize * 0.2;
     final Widget scriptWidget = Transform.translate(
       offset: Offset(0.0, dy),
-      child: Text.rich(TextSpan(style: scriptStyle, children: childSpans)),
+      child: MarkdownRichText.rich(
+        TextSpan(style: scriptStyle, children: childSpans),
+      ),
     );
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
@@ -1536,7 +1540,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         focusBorderColor: theme.accent,
         child: Transform.translate(
           offset: Offset(0.0, -baseSize * 0.28),
-          child: Text(
+          child: MarkdownRichText(
             '[${node.index}]',
             style: style.copyWith(
               color: theme.effectiveLinkColor,

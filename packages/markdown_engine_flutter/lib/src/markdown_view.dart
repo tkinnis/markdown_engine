@@ -1,7 +1,6 @@
 import 'dart:async' show scheduleMicrotask;
 
-import 'package:flutter/foundation.dart'
-    show ValueListenable, precisionErrorTolerance;
+import 'package:flutter/foundation.dart' show ValueListenable;
 // Keeps MaterialLocalizations/SelectionArea compatibility with Flutter 3.32-3.50+ callers.
 // ignore: deprecated_member_use
 import 'package:flutter/material.dart'
@@ -276,6 +275,8 @@ final class _MarkdownViewState extends State<MarkdownView> {
   bool _settledCanvasSupported = true;
   EdgeInsetsGeometry? _lastPayloadPadding;
   _MarkdownSelectionContainerDelegate? _selectionDelegate;
+  MarkdownBuilderDelegates? _cachedCanvasDelegatesRef;
+  bool _cachedCanUseStreamingCanvasDelegates = false;
 
   Widget? _cachedRootContent;
   bool? _cachedSelectable;
@@ -347,6 +348,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
   MarkdownStreamingCanvasPayload _buildCanvasPayload({
     int startBlockIndex = 0,
     bool includeTopPadding = true,
+    int settledPrefixCount = 0,
     required int revision,
   }) => MarkdownStreamingCanvasPayload(
     document: _document,
@@ -356,15 +358,26 @@ final class _MarkdownViewState extends State<MarkdownView> {
     revision: revision,
     startBlockIndex: startBlockIndex,
     includeTopPadding: includeTopPadding,
+    settledPrefixCount: settledPrefixCount,
   );
+
+  bool get _canUseStreamingCanvasDelegates {
+    final MarkdownBuilderDelegates delegates = widget.delegates;
+    if (!identical(_cachedCanvasDelegatesRef, delegates)) {
+      _cachedCanvasDelegatesRef = delegates;
+      _cachedCanUseStreamingCanvasDelegates = canUseStreamingCanvasDelegates(
+        delegates,
+      );
+    }
+    return _cachedCanUseStreamingCanvasDelegates;
+  }
 
   bool _computeUseStreamingCanvas(
     StreamingMarkdownController streamCtrl,
     List<MarkdownBlockNode> blocks, {
     required bool resetCanvasCache,
   }) {
-    if (widget.controller != null ||
-        !canUseStreamingCanvasDelegates(widget.delegates)) {
+    if (widget.controller != null || !_canUseStreamingCanvasDelegates) {
       _settledCanvasCheckedCount = 0;
       _settledCanvasSupported = true;
       return false;
@@ -647,6 +660,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
     if (mode == _StreamRenderMode.canvasFull) {
       final MarkdownStreamingCanvasPayload canvasPayload = _buildCanvasPayload(
         revision: ++_canvasRevision,
+        settledPrefixCount: settledCount,
       );
       final ValueNotifier<MarkdownStreamingCanvasPayload>? existingCanvas =
           _canvasNotifier;
@@ -717,6 +731,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
             _buildCanvasPayload(
               startBlockIndex: settledCount,
               includeTopPadding: false,
+              settledPrefixCount: 0,
               revision: ++_tailCanvasRevision,
             );
         final ValueNotifier<MarkdownStreamingCanvasPayload>?
@@ -964,7 +979,10 @@ final class _MarkdownViewState extends State<MarkdownView> {
     switch (mode) {
       case _StreamRenderMode.canvasFull:
         _canvasNotifier = ValueNotifier<MarkdownStreamingCanvasPayload>(
-          _buildCanvasPayload(revision: ++_canvasRevision),
+          _buildCanvasPayload(
+            revision: ++_canvasRevision,
+            settledPrefixCount: settledCount,
+          ),
         );
         _payloadNotifier = ValueNotifier<_MarkdownViewPayload>(
           _buildPayload(
@@ -982,6 +1000,7 @@ final class _MarkdownViewState extends State<MarkdownView> {
           _buildCanvasPayload(
             startBlockIndex: settledCount,
             includeTopPadding: false,
+            settledPrefixCount: 0,
             revision: ++_tailCanvasRevision,
           ),
         );
@@ -1499,70 +1518,135 @@ final class _MarkdownViewState extends State<MarkdownView> {
 
 final class _MarkdownSelectionContainerDelegate
     extends StaticSelectionContainerDelegate {
-  static const double _kVerticalThreshold = 3.0;
-
   bool _isSelectAllActive = false;
   bool _disposed = false;
+  bool _selectAllRetryScheduled = false;
   int _selectionResetEpoch = 0;
+  int _nextRegistrationOrder = 0;
+  final Map<Selectable, int> _registrationOrder =
+      Map<Selectable, int>.identity();
+  final Set<Selectable> _registeredOrPending = <Selectable>{};
   final Set<Selectable> _selectAllDispatched = <Selectable>{};
+  final Set<Selectable> _selectAllRetried = <Selectable>{};
   final Map<Selectable, Rect> _cachedOrderRects =
       Map<Selectable, Rect>.identity();
   String Function()? fullPlainTextProvider;
 
-  Rect _screenRectFor(Selectable s) {
+  int _compareByRegistrationOrder(Selectable a, Selectable b) {
+    if (identical(a, b)) {
+      return 0;
+    }
+    return (_registrationOrder[a] ?? 0).compareTo(_registrationOrder[b] ?? 0);
+  }
+
+  Rect? _screenRectFor(Selectable s) {
     final Rect? cached = _cachedOrderRects[s];
     if (cached != null) {
       return cached;
     }
+    if (!isSelectableLayoutReady(s)) {
+      return null;
+    }
     final List<Rect> boxes = s.boundingBoxes;
+    final Rect local;
     if (boxes.isEmpty) {
-      return _cachedOrderRects[s] = MatrixUtils.transformRect(
-        s.getTransformTo(null),
-        Rect.fromLTWH(0.0, 0.0, s.size.width, s.size.height),
-      );
+      local = Rect.fromLTWH(0.0, 0.0, s.size.width, s.size.height);
+    } else {
+      Rect union = boxes.first;
+      for (int i = 1; i < boxes.length; i++) {
+        union = union.expandToInclude(boxes[i]);
+      }
+      local = union;
     }
-    Rect local = boxes.first;
-    for (int i = 1; i < boxes.length; i++) {
-      local = local.expandToInclude(boxes[i]);
-    }
-    return _cachedOrderRects[s] = MatrixUtils.transformRect(
+    final Rect transformed = MatrixUtils.transformRect(
       s.getTransformTo(null),
       local,
     );
+    if (!transformed.isFinite) {
+      return null;
+    }
+    return _cachedOrderRects[s] = transformed;
   }
 
   @override
   Comparator<Selectable> get compareOrder => _compareCachedOrder;
 
   int _compareCachedOrder(Selectable a, Selectable b) {
-    final Rect rectA = _screenRectFor(a);
-    final Rect rectB = _screenRectFor(b);
-    if ((rectA.top - rectB.top < _kVerticalThreshold &&
-            rectA.bottom - rectB.bottom > -_kVerticalThreshold) ||
-        (rectB.top - rectA.top < _kVerticalThreshold &&
-            rectB.bottom - rectA.bottom > -_kVerticalThreshold)) {
-      if (rectA.left - rectB.left < precisionErrorTolerance &&
-          rectA.right - rectB.right > -precisionErrorTolerance) {
-        return -1;
-      }
-      if (rectB.left - rectA.left < precisionErrorTolerance &&
-          rectB.right - rectA.right > -precisionErrorTolerance) {
-        return 1;
-      }
-      if ((rectA.left - rectB.left).abs() > precisionErrorTolerance) {
-        return rectA.left > rectB.left ? 1 : -1;
-      }
-      return rectA.right > rectB.right ? 1 : -1;
+    if (identical(a, b)) {
+      return 0;
     }
-    if ((rectA.top - rectB.top).abs() > _kVerticalThreshold) {
-      return rectA.top > rectB.top ? 1 : -1;
+    final Rect? rectA = _screenRectFor(a);
+    final Rect? rectB = _screenRectFor(b);
+    if (rectA == null || rectB == null) {
+      if (rectA == null && rectB == null) {
+        return _compareByRegistrationOrder(a, b);
+      }
+      return rectA == null ? -1 : 1;
     }
-    return rectA.bottom > rectB.bottom ? 1 : -1;
+    final int order = compareScreenOrderRects(rectA, rectB);
+    if (order != 0) {
+      return order;
+    }
+    return _compareByRegistrationOrder(a, b);
+  }
+
+  @override
+  SelectionGeometry getSelectionGeometry() {
+    final SelectionGeometry computed = super.getSelectionGeometry();
+    final bool hasActiveRange =
+        currentSelectionStartIndex != -1 && currentSelectionEndIndex != -1;
+    final bool hasSelectableContent =
+        _registeredOrPending.isNotEmpty ||
+        selectables.isNotEmpty ||
+        (fullPlainTextProvider?.call().isNotEmpty ?? false);
+    final bool hasUnreadyChildren =
+        _registeredOrPending.length > selectables.length ||
+        selectables.any((Selectable s) => !isSelectableLayoutReady(s));
+    if ((_isSelectAllActive || hasActiveRange) &&
+        hasSelectableContent &&
+        (!computed.hasSelection ||
+            (hasUnreadyChildren &&
+                (computed.startSelectionPoint == null ||
+                    computed.endSelectionPoint == null)))) {
+      final Offset endPos = hasSize
+          ? Offset(containerSize.width, containerSize.height)
+          : Offset.zero;
+      return SelectionGeometry(
+        status: computed.hasSelection
+            ? computed.status
+            : SelectionStatus.uncollapsed,
+        hasContent: true,
+        startSelectionPoint:
+            computed.startSelectionPoint ??
+            const SelectionPoint(
+              localPosition: Offset.zero,
+              lineHeight: 0.0,
+              handleType: TextSelectionHandleType.left,
+            ),
+        endSelectionPoint:
+            computed.endSelectionPoint ??
+            SelectionPoint(
+              localPosition: endPos,
+              lineHeight: 0.0,
+              handleType: TextSelectionHandleType.right,
+            ),
+        selectionRects: computed.selectionRects,
+      );
+    }
+    return computed;
+  }
+
+  @override
+  void add(Selectable selectable) {
+    _registrationOrder[selectable] = _nextRegistrationOrder++;
+    _registeredOrPending.add(selectable);
+    super.add(selectable);
   }
 
   void clearSelectAllState() {
     _isSelectAllActive = false;
     _selectAllDispatched.clear();
+    _selectAllRetried.clear();
   }
 
   void resetSelectionState() {
@@ -1608,9 +1692,91 @@ final class _MarkdownSelectionContainerDelegate
 
   @override
   void remove(Selectable selectable) {
+    _registeredOrPending.remove(selectable);
+    _registrationOrder.remove(selectable);
     _selectAllDispatched.remove(selectable);
+    _selectAllRetried.remove(selectable);
     _cachedOrderRects.remove(selectable);
     super.remove(selectable);
+  }
+
+  @override
+  void ensureChildUpdated(Selectable selectable) {
+    if (!isSelectableLayoutReady(selectable)) {
+      return;
+    }
+    super.ensureChildUpdated(selectable);
+  }
+
+  @override
+  SelectionResult dispatchSelectionEventToChild(
+    Selectable selectable,
+    SelectionEvent event,
+  ) {
+    if (event is! ClearSelectionEvent && !isSelectableLayoutReady(selectable)) {
+      if (event is DirectionallyExtendSelectionEvent ||
+          event is GranularlyExtendSelectionEvent) {
+        return SelectionResult.end;
+      }
+      return SelectionResult.none;
+    }
+    return super.dispatchSelectionEventToChild(selectable, event);
+  }
+
+  void _dispatchSelectAllToReadyChildren() {
+    final Set<Selectable> active = selectables.toSet();
+    _selectAllDispatched.removeWhere((Selectable s) => !active.contains(s));
+    _selectAllRetried.removeWhere((Selectable s) => !active.contains(s));
+    bool shouldScheduleRetry = false;
+    for (final Selectable selectable in selectables) {
+      if (_selectAllDispatched.contains(selectable)) {
+        continue;
+      }
+      if (!isSelectableLayoutReady(selectable)) {
+        if (_selectAllRetried.add(selectable)) {
+          shouldScheduleRetry = true;
+        }
+        continue;
+      }
+      _selectAllRetried.remove(selectable);
+      _selectAllDispatched.add(selectable);
+      dispatchSelectionEventToChild(
+        selectable,
+        const SelectAllSelectionEvent(),
+      );
+    }
+    if (shouldScheduleRetry && !_selectAllRetryScheduled && !_disposed) {
+      _selectAllRetryScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((Duration _) {
+        _selectAllRetryScheduled = false;
+        if (_disposed || !_isSelectAllActive) {
+          return;
+        }
+        bool dispatchedAny = false;
+        for (final Selectable selectable in selectables) {
+          if (_selectAllDispatched.contains(selectable)) {
+            continue;
+          }
+          if (isSelectableLayoutReady(selectable)) {
+            _selectAllRetried.remove(selectable);
+            _selectAllDispatched.add(selectable);
+            dispatchSelectionEventToChild(
+              selectable,
+              const SelectAllSelectionEvent(),
+            );
+            dispatchedAny = true;
+          }
+        }
+        if (dispatchedAny) {
+          currentSelectionStartIndex = selectables.isEmpty ? -1 : 0;
+          currentSelectionEndIndex = selectables.isEmpty
+              ? -1
+              : selectables.length - 1;
+          didReceiveSelectionBoundaryEvents();
+          layoutDidChange();
+        }
+      });
+    }
   }
 
   @override
@@ -1621,16 +1787,7 @@ final class _MarkdownSelectionContainerDelegate
     }
     super.didChangeSelectables();
     if (_isSelectAllActive) {
-      final Set<Selectable> active = selectables.toSet();
-      _selectAllDispatched.removeWhere((Selectable s) => !active.contains(s));
-      for (final Selectable selectable in selectables) {
-        if (_selectAllDispatched.add(selectable)) {
-          dispatchSelectionEventToChild(
-            selectable,
-            const SelectAllSelectionEvent(),
-          );
-        }
-      }
+      _dispatchSelectAllToReadyChildren();
       currentSelectionStartIndex = selectables.isEmpty ? -1 : 0;
       currentSelectionEndIndex = selectables.isEmpty
           ? -1
@@ -1656,10 +1813,15 @@ final class _MarkdownSelectionContainerDelegate
   @override
   SelectionResult handleSelectAll(SelectAllSelectionEvent event) {
     _isSelectAllActive = true;
-    _selectAllDispatched
-      ..clear()
-      ..addAll(selectables);
-    return super.handleSelectAll(event);
+    _selectAllDispatched.clear();
+    _selectAllRetried.clear();
+    _dispatchSelectAllToReadyChildren();
+    currentSelectionStartIndex = selectables.isEmpty ? -1 : 0;
+    currentSelectionEndIndex = selectables.isEmpty
+        ? -1
+        : selectables.length - 1;
+    didReceiveSelectionBoundaryEvents();
+    return SelectionResult.none;
   }
 
   @override
@@ -1703,6 +1865,25 @@ final class _MarkdownSelectionContainerDelegate
   }
 
   @override
+  SelectedContentRange? getSelection() {
+    if (_isSelectAllActive) {
+      final String fullText = fullPlainTextProvider?.call() ?? '';
+      final int len = contentLength > 0 ? contentLength : fullText.length;
+      return SelectedContentRange(startOffset: 0, endOffset: len);
+    }
+    if (currentSelectionStartIndex == -1 ||
+        currentSelectionEndIndex == -1 ||
+        currentSelectionStartIndex >= selectables.length ||
+        currentSelectionEndIndex >= selectables.length) {
+      return null;
+    }
+    if (!selectables.any((Selectable s) => s.getSelection() != null)) {
+      return null;
+    }
+    return super.getSelection();
+  }
+
+  @override
   SelectedContent? getSelectedContent() {
     if (_isSelectAllActive) {
       final String fullText = fullPlainTextProvider?.call() ?? '';
@@ -1714,7 +1895,10 @@ final class _MarkdownSelectionContainerDelegate
   @override
   void dispose() {
     _disposed = true;
+    _registeredOrPending.clear();
+    _registrationOrder.clear();
     _selectAllDispatched.clear();
+    _selectAllRetried.clear();
     _cachedOrderRects.clear();
     super.dispose();
   }

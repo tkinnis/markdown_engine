@@ -36,243 +36,244 @@ void main() {
 
       int sink = 0;
 
-      // Small (~1 KB)
-      final LatencyStats smallEngineAst = measureLatency(
-        label: 'markdown_engine AST',
-        payloadBytes: smallBytes,
-        warmupSamples: 8,
-        samples: 15,
-        batchIterations: 150,
-        operation: () {
-          sink ^= engine.parse(smallDoc).blocks.length;
-        },
-      );
-      final LatencyStats smallEngineHtml = measureLatency(
-        label: 'markdown_engine AST+HTML',
-        payloadBytes: smallBytes,
-        warmupSamples: 4,
-        samples: 15,
-        batchIterations: 150,
-        operation: () {
-          sink ^= engine.parse(smallDoc).toHtml().length;
-        },
-      );
-      final LatencyStats smallFlutterMd = measureLatency(
-        label: 'flutter_md AST',
-        payloadBytes: smallBytes,
-        warmupSamples: 4,
-        samples: 15,
-        batchIterations: 150,
-        operation: () {
-          sink ^= fmd.Markdown.fromString(smallDoc).blocks.length;
-        },
-      );
-      final LatencyStats smallPkgMarkdownAst = measureLatency(
-        label: 'package:markdown AST',
-        payloadBytes: smallBytes,
-        warmupSamples: 4,
-        samples: 15,
-        batchIterations: 150,
-        operation: () {
-          final md.Document doc = md.Document(
-            extensionSet: md.ExtensionSet.gitHubFlavored,
-            encodeHtml: false,
-          );
-          sink ^= doc.parseLines(lineSplitter.convert(smallDoc)).length;
-        },
+      // Small (~1 KB) — interleaved round-robin across all 4 measurements.
+      final List<LatencyStats> smallStats = measureInterleavedLatencies(
+        warmupRounds: 8,
+        timedRounds: 15,
+        specs: <InterleavedBenchmarkSpec>[
+          InterleavedBenchmarkSpec(
+            label: 'markdown_engine AST',
+            payloadBytes: smallBytes,
+            batchIterations: 150,
+            operation: () {
+              sink ^= engine.parse(smallDoc).blocks.length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'markdown_engine AST+HTML',
+            payloadBytes: smallBytes,
+            batchIterations: 150,
+            operation: () {
+              sink ^= engine.parse(smallDoc).toHtml().length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'flutter_md AST',
+            payloadBytes: smallBytes,
+            batchIterations: 150,
+            operation: () {
+              sink ^= fmd.Markdown.fromString(smallDoc).blocks.length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'package:markdown AST',
+            payloadBytes: smallBytes,
+            batchIterations: 150,
+            operation: () {
+              final md.Document doc = md.Document(
+                extensionSet: md.ExtensionSet.gitHubFlavored,
+                encodeHtml: false,
+              );
+              sink ^= doc.parseLines(lineSplitter.convert(smallDoc)).length;
+            },
+          ),
+        ],
       );
 
-      // Medium (~25 KB)
-      final LatencyStats mediumEngineAst = measureLatency(
-        label: 'markdown_engine AST',
-        payloadBytes: mediumBytes,
-        warmupSamples: 3,
-        samples: 15,
-        batchIterations: 10,
-        operation: () {
-          sink ^= engine.parse(mediumDoc).blocks.length;
-        },
-      );
-      final LatencyStats mediumEngineHtml = measureLatency(
-        label: 'markdown_engine AST+HTML',
-        payloadBytes: mediumBytes,
-        warmupSamples: 3,
-        samples: 15,
-        batchIterations: 10,
-        operation: () {
-          sink ^= engine.parse(mediumDoc).toHtml().length;
-        },
-      );
-      final LatencyStats mediumFlutterMd = measureLatency(
-        label: 'flutter_md AST',
-        payloadBytes: mediumBytes,
-        warmupSamples: 3,
-        samples: 15,
-        batchIterations: 10,
-        operation: () {
-          sink ^= fmd.Markdown.fromString(mediumDoc).blocks.length;
-        },
-      );
-      final LatencyStats mediumPkgMarkdownAst = measureLatency(
-        label: 'package:markdown AST',
-        payloadBytes: mediumBytes,
-        warmupSamples: 3,
-        samples: 15,
-        batchIterations: 10,
-        operation: () {
-          final md.Document doc = md.Document(
-            extensionSet: md.ExtensionSet.gitHubFlavored,
-            encodeHtml: false,
-          );
-          sink ^= doc.parseLines(lineSplitter.convert(mediumDoc)).length;
-        },
+      // Medium (~25 KB) — interleaved round-robin.
+      final List<LatencyStats> mediumStats = measureInterleavedLatencies(
+        warmupRounds: 6,
+        timedRounds: 15,
+        specs: <InterleavedBenchmarkSpec>[
+          InterleavedBenchmarkSpec(
+            label: 'markdown_engine AST',
+            payloadBytes: mediumBytes,
+            batchIterations: 10,
+            operation: () {
+              sink ^= engine.parse(mediumDoc).blocks.length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'markdown_engine AST+HTML',
+            payloadBytes: mediumBytes,
+            batchIterations: 10,
+            operation: () {
+              sink ^= engine.parse(mediumDoc).toHtml().length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'flutter_md AST',
+            payloadBytes: mediumBytes,
+            batchIterations: 10,
+            operation: () {
+              sink ^= fmd.Markdown.fromString(mediumDoc).blocks.length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'package:markdown AST',
+            payloadBytes: mediumBytes,
+            batchIterations: 10,
+            operation: () {
+              final md.Document doc = md.Document(
+                extensionSet: md.ExtensionSet.gitHubFlavored,
+                encodeHtml: false,
+              );
+              sink ^= doc.parseLines(lineSplitter.convert(mediumDoc)).length;
+            },
+          ),
+        ],
       );
 
-      // Large (5,000 lines ~173 KB)
-      final LatencyStats largeEngineAst = measureLatency(
-        label: 'markdown_engine AST',
-        payloadBytes: largeBytes,
-        warmupSamples: 2,
-        samples: 11,
-        batchIterations: 2,
-        operation: () {
-          sink ^= engine.parse(largeFixture.baseSource).blocks.length;
-        },
-      );
-      final LatencyStats largeEngineHtml = measureLatency(
-        label: 'markdown_engine AST+HTML',
-        payloadBytes: largeBytes,
-        warmupSamples: 2,
-        samples: 11,
-        batchIterations: 2,
-        operation: () {
-          sink ^= engine.parse(largeFixture.baseSource).toHtml().length;
-        },
-      );
-      final LatencyStats largeFlutterMd = measureLatency(
-        label: 'flutter_md AST',
-        payloadBytes: largeBytes,
-        warmupSamples: 2,
-        samples: 11,
-        batchIterations: 2,
-        operation: () {
-          sink ^= fmd.Markdown.fromString(largeFixture.baseSource)
-              .blocks
-              .length;
-        },
-      );
-      final LatencyStats largePkgMarkdownAst = measureLatency(
-        label: 'package:markdown AST',
-        payloadBytes: largeBytes,
-        warmupSamples: 2,
-        samples: 11,
-        batchIterations: 2,
-        operation: () {
-          final md.Document doc = md.Document(
-            extensionSet: md.ExtensionSet.gitHubFlavored,
-            encodeHtml: false,
-          );
-          sink ^= doc
-              .parseLines(lineSplitter.convert(largeFixture.baseSource))
-              .length;
-        },
+      // Large (5,000 lines ~173 KB) — interleaved round-robin.
+      final List<LatencyStats> largeStats = measureInterleavedLatencies(
+        warmupRounds: 5,
+        timedRounds: 13,
+        specs: <InterleavedBenchmarkSpec>[
+          InterleavedBenchmarkSpec(
+            label: 'markdown_engine AST',
+            payloadBytes: largeBytes,
+            batchIterations: 2,
+            operation: () {
+              sink ^= engine.parse(largeFixture.baseSource).blocks.length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'markdown_engine AST+HTML',
+            payloadBytes: largeBytes,
+            batchIterations: 2,
+            operation: () {
+              sink ^= engine.parse(largeFixture.baseSource).toHtml().length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'flutter_md AST',
+            payloadBytes: largeBytes,
+            batchIterations: 2,
+            operation: () {
+              sink ^= fmd.Markdown.fromString(largeFixture.baseSource)
+                  .blocks
+                  .length;
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'package:markdown AST',
+            payloadBytes: largeBytes,
+            batchIterations: 2,
+            operation: () {
+              final md.Document doc = md.Document(
+                extensionSet: md.ExtensionSet.gitHubFlavored,
+                encodeHtml: false,
+              );
+              sink ^= doc
+                  .parseLines(lineSplitter.convert(largeFixture.baseSource))
+                  .length;
+            },
+          ),
+        ],
       );
 
-      // 50-chunk Streaming
+      // 50-chunk Streaming — interleaved round-robin.
       final StreamingMarkdownController engineStream =
           StreamingMarkdownController(engine: engine, options: gfmOptions);
-      final int chunkCount = stream50Fixture.chunks.length;
-      final LatencyStats streamEngine = measureLatency(
-        label: 'markdown_engine stream (per chunk)',
-        payloadBytes: streamBytes,
-        warmupSamples: 3,
-        samples: 15,
-        batchIterations: 8,
-        unitDivisor: chunkCount,
-        throughputBytesPerUnit: streamBytes / chunkCount,
-        operation: () {
-          engineStream.reset();
-          for (final String chunk in stream50Fixture.chunks) {
-            sink ^= engineStream.append(chunk).blocks.length;
-          }
-        },
-      );
-
       final fmd.StreamingMarkdownParser fmdStream =
           fmd.StreamingMarkdownParser();
-      final LatencyStats streamFlutterMd = measureLatency(
-        label: 'flutter_md stream (per chunk)',
-        payloadBytes: streamBytes,
-        warmupSamples: 3,
-        samples: 15,
-        batchIterations: 8,
-        unitDivisor: chunkCount,
-        throughputBytesPerUnit: streamBytes / chunkCount,
-        operation: () {
-          fmdStream.reset();
-          for (final String chunk in stream50Fixture.chunks) {
-            sink ^= fmdStream.add(chunk).blocks.length;
-          }
-        },
-      );
-
-      final LatencyStats streamPkgMarkdown = measureLatency(
-        label: 'package:markdown full-reparse stream (per chunk)',
-        payloadBytes: streamBytes,
-        warmupSamples: 2,
-        samples: 11,
-        batchIterations: 3,
-        unitDivisor: chunkCount,
-        throughputBytesPerUnit: streamBytes / chunkCount,
-        operation: () {
-          final StringBuffer buf = StringBuffer();
-          for (final String chunk in stream50Fixture.chunks) {
-            buf.write(chunk);
-            final md.Document doc = md.Document(
-              extensionSet: md.ExtensionSet.gitHubFlavored,
-              encodeHtml: false,
-            );
-            sink ^= doc.parseLines(lineSplitter.convert(buf.toString())).length;
-          }
-        },
+      final int chunkCount = stream50Fixture.chunks.length;
+      final List<LatencyStats> streamStats = measureInterleavedLatencies(
+        warmupRounds: 6,
+        timedRounds: 15,
+        specs: <InterleavedBenchmarkSpec>[
+          InterleavedBenchmarkSpec(
+            label: 'markdown_engine stream (per chunk)',
+            payloadBytes: streamBytes,
+            batchIterations: 8,
+            unitDivisor: chunkCount,
+            throughputBytesPerUnit: streamBytes / chunkCount,
+            operation: () {
+              engineStream.reset();
+              for (final String chunk in stream50Fixture.chunks) {
+                sink ^= engineStream.append(chunk).blocks.length;
+              }
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'flutter_md stream (per chunk)',
+            payloadBytes: streamBytes,
+            batchIterations: 8,
+            unitDivisor: chunkCount,
+            throughputBytesPerUnit: streamBytes / chunkCount,
+            operation: () {
+              fmdStream.reset();
+              for (final String chunk in stream50Fixture.chunks) {
+                sink ^= fmdStream.add(chunk).blocks.length;
+              }
+            },
+          ),
+          InterleavedBenchmarkSpec(
+            label: 'package:markdown full-reparse stream (per chunk)',
+            payloadBytes: streamBytes,
+            batchIterations: 3,
+            unitDivisor: chunkCount,
+            throughputBytesPerUnit: streamBytes / chunkCount,
+            operation: () {
+              final StringBuffer buf = StringBuffer();
+              for (final String chunk in stream50Fixture.chunks) {
+                buf.write(chunk);
+                final md.Document doc = md.Document(
+                  extensionSet: md.ExtensionSet.gitHubFlavored,
+                  encodeHtml: false,
+                );
+                sink ^= doc
+                    .parseLines(lineSplitter.convert(buf.toString()))
+                    .length;
+              }
+            },
+          ),
+        ],
       );
 
       expect(sink, isNot(-1));
       engineStream.dispose();
 
+      final LatencyStats streamEngine = streamStats[0];
+      final LatencyStats streamFlutterMd = streamStats[1];
+      final LatencyStats streamPkgMarkdown = streamStats[2];
+
       stdout.writeln('');
       stdout.writeln(
-        '=== Flutter Test JIT Parser Throughput (markdown_engine vs flutter_md 0.3.1 vs package:markdown 7.3.1) ===',
+        '=== Flutter Test JIT Parser Throughput (interleaved p50 / p95: markdown_engine vs flutter_md 0.3.1 vs package:markdown 7.3.1) ===',
       );
       _printThreeWay(
         'Small (~1 KB, ${formatBytes(smallBytes)})',
-        smallEngineAst,
-        smallEngineHtml,
-        smallFlutterMd,
-        smallPkgMarkdownAst,
+        smallStats[0],
+        smallStats[1],
+        smallStats[2],
+        smallStats[3],
       );
       _printThreeWay(
         'Medium (~25 KB, ${formatBytes(mediumBytes)})',
-        mediumEngineAst,
-        mediumEngineHtml,
-        mediumFlutterMd,
-        mediumPkgMarkdownAst,
+        mediumStats[0],
+        mediumStats[1],
+        mediumStats[2],
+        mediumStats[3],
       );
       _printThreeWay(
         'Large (${largeFixture.lineCount} lines, ${formatBytes(largeBytes)})',
-        largeEngineAst,
-        largeEngineHtml,
-        largeFlutterMd,
-        largePkgMarkdownAst,
+        largeStats[0],
+        largeStats[1],
+        largeStats[2],
+        largeStats[3],
       );
       stdout.writeln(
         '  50-chunk Streaming (${formatBytes(streamBytes)}): '
         'markdown_engine=${formatMicroseconds(streamEngine.medianUs)}/chunk '
-        '(${formatMicroseconds(streamEngine.medianUs * chunkCount)} total) | '
+        '(p95 ${formatMicroseconds(streamEngine.p95Us)}, '
+        '${formatMicroseconds(streamEngine.medianUs * chunkCount)} total) | '
         'flutter_md=${formatMicroseconds(streamFlutterMd.medianUs)}/chunk '
-        '(${formatMicroseconds(streamFlutterMd.medianUs * chunkCount)} total) | '
+        '(p95 ${formatMicroseconds(streamFlutterMd.p95Us)}, '
+        '${formatMicroseconds(streamFlutterMd.medianUs * chunkCount)} total) | '
         'package:markdown=${formatMicroseconds(streamPkgMarkdown.medianUs)}/chunk '
-        '(${formatMicroseconds(streamPkgMarkdown.medianUs * chunkCount)} total)',
+        '(p95 ${formatMicroseconds(streamPkgMarkdown.p95Us)}, '
+        '${formatMicroseconds(streamPkgMarkdown.medianUs * chunkCount)} total)',
       );
     });
   });
@@ -462,6 +463,9 @@ void main() {
   });
 
   group('Headless Flutter Widget Benchmarks', () {
+    const int widgetWarmupRounds = 2;
+    const int widgetTimedRounds = 7;
+
     testWidgets('1. Large 400-block document initial build & pump time', (
       WidgetTester tester,
     ) async {
@@ -481,163 +485,131 @@ void main() {
         Brightness.light,
       );
 
-      // 1a. MarkdownView(data) — includes parse + lazy sliver build/layout.
-      final double engineColdMs = await _measureWidgetMounts(
-        tester: tester,
-        warmupCount: 1,
-        sampleCount: 5,
-        builder: (int iteration) => MarkdownView(
-          doc400,
-          key: ValueKey<String>('me_cold_$iteration'),
-          engine: engine,
-          theme: engineLight,
-        ),
+      final List<Widget Function(int round)> builders =
+          <Widget Function(int round)>[
+            (int round) => MarkdownView(
+              doc400,
+              key: ValueKey<String>('me_cold_$round'),
+              engine: engine,
+              theme: engineLight,
+              selectable: false,
+            ),
+            (int round) => MarkdownView.document(
+              key: ValueKey<String>('me_doc_$round'),
+              document: preParsedEngineDoc,
+              theme: engineLight,
+              selectable: false,
+            ),
+            (int round) => MarkdownView(
+              doc400,
+              key: ValueKey<String>('me_cold_sel_$round'),
+              engine: engine,
+              theme: engineLight,
+              selectable: true,
+            ),
+            (int round) => MarkdownView.document(
+              key: ValueKey<String>('me_doc_sel_$round'),
+              document: preParsedEngineDoc,
+              theme: engineLight,
+              selectable: true,
+            ),
+            (int round) => SingleChildScrollView(
+              key: ValueKey<String>('fmd_cold_$round'),
+              child: fmd.MarkdownWidget(
+                markdown: fmd.Markdown.fromString(doc400),
+                theme: fmdLight,
+              ),
+            ),
+            (int round) => SingleChildScrollView(
+              key: ValueKey<String>('fmd_doc_$round'),
+              child: fmd.MarkdownWidget(
+                markdown: preParsedFmdDoc,
+                theme: fmdLight,
+              ),
+            ),
+            (int round) => fmp.Markdown(
+              key: ValueKey<String>('fmp_cold_$round'),
+              data: doc400,
+              styleSheet: fmpLight,
+            ),
+          ];
+
+      final List<List<double>> samplesByEngine = List<List<double>>.generate(
+        builders.length,
+        (_) => <double>[],
       );
 
-      // 1b. MarkdownView.document — pre-parsed lazy sliver build/layout.
-      final double enginePreParsedMs = await _measureWidgetMounts(
-        tester: tester,
-        warmupCount: 1,
-        sampleCount: 5,
-        builder: (int iteration) => MarkdownView.document(
-          key: ValueKey<String>('me_doc_$iteration'),
-          document: preParsedEngineDoc,
-          theme: engineLight,
-        ),
+      await _runInterleavedRounds(
+        warmupRounds: widgetWarmupRounds,
+        timedRounds: widgetTimedRounds,
+        participantCount: builders.length,
+        runParticipant: (int idx, int round, bool isTimed) async {
+          final int keySeed = isTimed ? round : -1 - round;
+          final Stopwatch sw = Stopwatch()..start();
+          await tester.pumpWidget(_benchShell(child: builders[idx](keySeed)));
+          sw.stop();
+          if (isTimed) {
+            samplesByEngine[idx].add(sw.elapsedMicroseconds / 1000.0);
+          }
+          await tester.pumpWidget(const SizedBox.shrink());
+        },
       );
 
-      // 1c. flutter_md MarkdownWidget (parse + full RenderBox layout) &
-      // pre-parsed MarkdownWidget.
-      final double fmdColdMs = await _measureWidgetMounts(
-        tester: tester,
-        warmupCount: 1,
-        sampleCount: 5,
-        builder: (int iteration) => SingleChildScrollView(
-          key: ValueKey<String>('fmd_cold_$iteration'),
-          child: fmd.MarkdownWidget(
-            markdown: fmd.Markdown.fromString(doc400),
-            theme: fmdLight,
-          ),
-        ),
+      final SampleSummary engineCold = summarizeSamples(samplesByEngine[0]);
+      final SampleSummary enginePreParsed = summarizeSamples(
+        samplesByEngine[1],
       );
-      final double fmdPreParsedMs = await _measureWidgetMounts(
-        tester: tester,
-        warmupCount: 1,
-        sampleCount: 5,
-        builder: (int iteration) => SingleChildScrollView(
-          key: ValueKey<String>('fmd_doc_$iteration'),
-          child: fmd.MarkdownWidget(markdown: preParsedFmdDoc, theme: fmdLight),
-        ),
+      final SampleSummary engineColdSel = summarizeSamples(samplesByEngine[2]);
+      final SampleSummary enginePreParsedSel = summarizeSamples(
+        samplesByEngine[3],
       );
-
-      // 1d. flutter_markdown_plus Markdown (parse + eager ListView build).
-      final double fmpColdMs = await _measureWidgetMounts(
-        tester: tester,
-        warmupCount: 1,
-        sampleCount: 5,
-        builder: (int iteration) => fmp.Markdown(
-          key: ValueKey<String>('fmp_cold_$iteration'),
-          data: doc400,
-          styleSheet: fmpLight,
-        ),
-      );
+      final SampleSummary fmdCold = summarizeSamples(samplesByEngine[4]);
+      final SampleSummary fmdPreParsed = summarizeSamples(samplesByEngine[5]);
+      final SampleSummary fmpCold = summarizeSamples(samplesByEngine[6]);
 
       stdout.writeln('');
       stdout.writeln(
         '=== Widget Benchmark 1: 400+ Block Initial Build & Pump '
-        '(${preParsedEngineDoc.blocks.length} blocks, 800x600 viewport) ===',
+        '(${preParsedEngineDoc.blocks.length} blocks, 800x600 viewport, '
+        '$widgetWarmupRounds warmup + $widgetTimedRounds interleaved rounds) ===',
       );
       stdout.writeln(
-        '  MarkdownView(data) (parse + lazy sliver): ${engineColdMs.toStringAsFixed(2)} ms',
+        '  B1 MarkdownView(data) (parse + lazy sliver, selectable: false, apples-to-apples): '
+        '${formatMsSummary(engineCold)} (iqr=${engineCold.iqr.toStringAsFixed(2)} ms)',
       );
       stdout.writeln(
-        '  MarkdownView.document (pre-parsed lazy sliver): ${enginePreParsedMs.toStringAsFixed(2)} ms',
+        '  B1 MarkdownView.document (pre-parsed lazy sliver, selectable: false, apples-to-apples): '
+        '${formatMsSummary(enginePreParsed)} '
+        '(iqr=${enginePreParsed.iqr.toStringAsFixed(2)} ms)',
       );
       stdout.writeln(
-        '  flutter_md (Markdown.fromString + MarkdownWidget): ${fmdColdMs.toStringAsFixed(2)} ms '
-        '(pre-parsed widget only: ${fmdPreParsedMs.toStringAsFixed(2)} ms)',
+        '  B1-Selectable MarkdownView(data) (production default, selectable: true): '
+        '${formatMsSummary(engineColdSel)} (iqr=${engineColdSel.iqr.toStringAsFixed(2)} ms)',
       );
       stdout.writeln(
-        '  flutter_markdown_plus Markdown (parse + eager ListView): ${fmpColdMs.toStringAsFixed(2)} ms',
+        '  B1-Selectable MarkdownView.document (production default, selectable: true): '
+        '${formatMsSummary(enginePreParsedSel)} '
+        '(iqr=${enginePreParsedSel.iqr.toStringAsFixed(2)} ms)',
+      );
+      stdout.writeln(
+        '  flutter_md (Markdown.fromString + MarkdownWidget, selectable: false): '
+        '${formatMsSummary(fmdCold)} '
+        '(pre-parsed widget only: ${formatMsSummary(fmdPreParsed)})',
+      );
+      stdout.writeln(
+        '  flutter_markdown_plus Markdown (parse + eager ListView, selectable: false): '
+        '${formatMsSummary(fmpCold)} (iqr=${fmpCold.iqr.toStringAsFixed(2)} ms)',
       );
     });
 
     testWidgets('2. Light <-> Dark theme toggle time + re-parse count', (
       WidgetTester tester,
     ) async {
-      const int warmupToggles = 2;
-      const int timedToggles = 10;
+      const int settleTogglesPerMount = 2;
+      const int timedTogglesPerRound = 4;
 
-      // 2a. markdown_engine MarkdownView
-      final MarkdownController engineController = MarkdownController();
       const MarkdownThemeData engineLight = MarkdownThemeData.light();
       const MarkdownThemeData engineDark = MarkdownThemeData.dark();
-      final ValueNotifier<bool> engineDarkMode = ValueNotifier<bool>(false);
-
-      await tester.pumpWidget(
-        _benchShell(
-          child: ValueListenableBuilder<bool>(
-            valueListenable: engineDarkMode,
-            builder: (BuildContext context, bool isDark, _) => MarkdownView(
-              doc400,
-              controller: engineController,
-              theme: isDark ? engineDark : engineLight,
-            ),
-          ),
-        ),
-      );
-      expect(engineController.parseCount, 1);
-
-      final double engineToggleMs = await _measureThemeToggles(
-        tester: tester,
-        notifier: engineDarkMode,
-        warmupToggles: warmupToggles,
-        timedToggles: timedToggles,
-      );
-      final int engineReparses = engineController.parseCount - 1;
-      expect(engineReparses, 0);
-
-      engineController.dispose();
-      engineDarkMode.dispose();
-
-      // 2b. flutter_markdown_plus Markdown
-      final _CountingH1Builder fmpParseCounter = _CountingH1Builder();
-      final fmp.MarkdownStyleSheet fmpLight = _buildFmpStyleSheet(
-        Brightness.light,
-      );
-      final fmp.MarkdownStyleSheet fmpDark = _buildFmpStyleSheet(
-        Brightness.dark,
-      );
-      final ValueNotifier<bool> fmpDarkMode = ValueNotifier<bool>(false);
-
-      await tester.pumpWidget(
-        _benchShell(
-          child: ValueListenableBuilder<bool>(
-            valueListenable: fmpDarkMode,
-            builder: (BuildContext context, bool isDark, _) => fmp.Markdown(
-              data: doc400,
-              styleSheet: isDark ? fmpDark : fmpLight,
-              builders: <String, fmp.MarkdownElementBuilder>{
-                'h1': fmpParseCounter,
-              },
-            ),
-          ),
-        ),
-      );
-      expect(fmpParseCounter.count, 1);
-
-      final double fmpToggleMs = await _measureThemeToggles(
-        tester: tester,
-        notifier: fmpDarkMode,
-        warmupToggles: warmupToggles,
-        timedToggles: timedToggles,
-      );
-      final int fmpReparses = fmpParseCounter.count - 1;
-      expect(fmpReparses, warmupToggles + timedToggles);
-
-      fmpDarkMode.dispose();
-
-      // 2c. flutter_md MarkdownWidget (caller caches pre-parsed Markdown).
       final fmd.Markdown cachedFmd = fmd.Markdown.fromString(doc400);
       final fmd.MarkdownThemeData fmdLight = fmd.MarkdownThemeData(
         textStyle: const TextStyle(fontSize: 16.0, color: Color(0xFF0F172A)),
@@ -647,59 +619,190 @@ void main() {
         textStyle: const TextStyle(fontSize: 16.0, color: Color(0xFFE2E8F0)),
         surfaceColor: const Color(0xFF1E293B),
       );
-      final ValueNotifier<bool> fmdDarkMode = ValueNotifier<bool>(false);
+      final fmp.MarkdownStyleSheet fmpLight = _buildFmpStyleSheet(
+        Brightness.light,
+      );
+      final fmp.MarkdownStyleSheet fmpDark = _buildFmpStyleSheet(
+        Brightness.dark,
+      );
 
-      await tester.pumpWidget(
-        _benchShell(
-          child: ValueListenableBuilder<bool>(
-            valueListenable: fmdDarkMode,
-            builder: (BuildContext context, bool isDark, _) =>
-                SingleChildScrollView(
-                  child: fmd.MarkdownWidget(
-                    markdown: cachedFmd,
-                    theme: isDark ? fmdDark : fmdLight,
-                  ),
+      final List<double> engineNonSelSamplesMs = <double>[];
+      final List<double> engineSelSamplesMs = <double>[];
+      final List<double> fmdSamplesMs = <double>[];
+      final List<double> fmpSamplesMs = <double>[];
+      int engineNonSelReparsesTotal = 0;
+      int engineSelReparsesTotal = 0;
+      int fmpReparsesTotal = 0;
+
+      await _runInterleavedRounds(
+        warmupRounds: widgetWarmupRounds,
+        timedRounds: widgetTimedRounds,
+        participantCount: 4,
+        runParticipant: (int idx, int round, bool isTimed) async {
+          if (idx == 0 || idx == 1) {
+            final bool selectable = idx == 1;
+            final MarkdownController engineController = MarkdownController();
+            final ValueNotifier<bool> darkMode = ValueNotifier<bool>(false);
+            await tester.pumpWidget(
+              _benchShell(
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: darkMode,
+                  builder: (BuildContext context, bool isDark, _) =>
+                      MarkdownView(
+                        doc400,
+                        controller: engineController,
+                        theme: isDark ? engineDark : engineLight,
+                        selectable: selectable,
+                      ),
                 ),
-          ),
-        ),
+              ),
+            );
+            try {
+              expect(engineController.parseCount, 1);
+              final List<double> roundSamples = await _measureTogglesInPlace(
+                tester: tester,
+                notifier: darkMode,
+                settleToggles: settleTogglesPerMount,
+                timedToggles: timedTogglesPerRound,
+              );
+              final int reparses = engineController.parseCount - 1;
+              expect(reparses, 0);
+              if (isTimed) {
+                if (selectable) {
+                  engineSelSamplesMs.addAll(roundSamples);
+                  engineSelReparsesTotal += reparses;
+                } else {
+                  engineNonSelSamplesMs.addAll(roundSamples);
+                  engineNonSelReparsesTotal += reparses;
+                }
+              }
+            } finally {
+              await tester.pumpWidget(const SizedBox.shrink());
+              engineController.dispose();
+              darkMode.dispose();
+            }
+          } else if (idx == 2) {
+            final ValueNotifier<bool> darkMode = ValueNotifier<bool>(false);
+            await tester.pumpWidget(
+              _benchShell(
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: darkMode,
+                  builder: (BuildContext context, bool isDark, _) =>
+                      SingleChildScrollView(
+                        child: fmd.MarkdownWidget(
+                          markdown: cachedFmd,
+                          theme: isDark ? fmdDark : fmdLight,
+                        ),
+                      ),
+                ),
+              ),
+            );
+            try {
+              final List<double> roundSamples = await _measureTogglesInPlace(
+                tester: tester,
+                notifier: darkMode,
+                settleToggles: settleTogglesPerMount,
+                timedToggles: timedTogglesPerRound,
+              );
+              if (isTimed) {
+                fmdSamplesMs.addAll(roundSamples);
+              }
+            } finally {
+              await tester.pumpWidget(const SizedBox.shrink());
+              darkMode.dispose();
+            }
+          } else {
+            final _CountingH1Builder fmpParseCounter = _CountingH1Builder();
+            final ValueNotifier<bool> darkMode = ValueNotifier<bool>(false);
+            await tester.pumpWidget(
+              _benchShell(
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: darkMode,
+                  builder: (BuildContext context, bool isDark, _) =>
+                      fmp.Markdown(
+                        data: doc400,
+                        styleSheet: isDark ? fmpDark : fmpLight,
+                        builders: <String, fmp.MarkdownElementBuilder>{
+                          'h1': fmpParseCounter,
+                        },
+                      ),
+                ),
+              ),
+            );
+            try {
+              expect(fmpParseCounter.count, 1);
+              final List<double> roundSamples = await _measureTogglesInPlace(
+                tester: tester,
+                notifier: darkMode,
+                settleToggles: settleTogglesPerMount,
+                timedToggles: timedTogglesPerRound,
+              );
+              final int reparses = fmpParseCounter.count - 1;
+              expect(reparses, settleTogglesPerMount + timedTogglesPerRound);
+              if (isTimed) {
+                fmpSamplesMs.addAll(roundSamples);
+                fmpReparsesTotal += reparses;
+              }
+            } finally {
+              await tester.pumpWidget(const SizedBox.shrink());
+              darkMode.dispose();
+            }
+          }
+        },
       );
 
-      final double fmdToggleMs = await _measureThemeToggles(
-        tester: tester,
-        notifier: fmdDarkMode,
-        warmupToggles: warmupToggles,
-        timedToggles: timedToggles,
+      final SampleSummary engineNonSelSummary = summarizeSamples(
+        engineNonSelSamplesMs,
       );
-      fmdDarkMode.dispose();
+      final SampleSummary engineSelSummary = summarizeSamples(
+        engineSelSamplesMs,
+      );
+      final SampleSummary fmdSummary = summarizeSamples(fmdSamplesMs);
+      final SampleSummary fmpSummary = summarizeSamples(fmpSamplesMs);
 
       stdout.writeln('');
       stdout.writeln(
         '=== Widget Benchmark 2: Light <-> Dark Theme Toggle '
-        '(${warmupToggles + timedToggles} toggles on 400+ block doc) ===',
+        '($widgetWarmupRounds warmup + $widgetTimedRounds interleaved rounds x '
+        '$timedTogglesPerRound timed toggles on 403-block doc) ===',
       );
       stdout.writeln(
-        '  MarkdownView: ${engineToggleMs.toStringAsFixed(2)} ms/toggle | '
-        're-parses=$engineReparses',
+        '  B2 MarkdownView (selectable: false, apples-to-apples): '
+        '${engineNonSelSummary.median.toStringAsFixed(2)} ms/toggle '
+        '(p95=${engineNonSelSummary.p95.toStringAsFixed(2)} ms, '
+        'iqr=${engineNonSelSummary.iqr.toStringAsFixed(2)} ms) | '
+        're-parses=$engineNonSelReparsesTotal',
       );
       stdout.writeln(
-        '  flutter_md (cached Markdown): ${fmdToggleMs.toStringAsFixed(2)} ms/toggle | '
+        '  B2-Selectable MarkdownView (production default, selectable: true): '
+        '${engineSelSummary.median.toStringAsFixed(2)} ms/toggle '
+        '(p95=${engineSelSummary.p95.toStringAsFixed(2)} ms, '
+        'iqr=${engineSelSummary.iqr.toStringAsFixed(2)} ms) | '
+        're-parses=$engineSelReparsesTotal',
+      );
+      stdout.writeln(
+        '  flutter_md (cached Markdown, selectable: false): '
+        '${fmdSummary.median.toStringAsFixed(2)} ms/toggle '
+        '(p95=${fmdSummary.p95.toStringAsFixed(2)} ms, '
+        'iqr=${fmdSummary.iqr.toStringAsFixed(2)} ms) | '
         're-parses=0 (caller-cached AST)',
       );
       stdout.writeln(
-        '  flutter_markdown_plus Markdown: ${fmpToggleMs.toStringAsFixed(2)} ms/toggle | '
-        're-parses=$fmpReparses (full re-parse on every theme flip)',
+        '  flutter_markdown_plus Markdown (selectable: false): '
+        '${fmpSummary.median.toStringAsFixed(2)} ms/toggle '
+        '(p95=${fmpSummary.p95.toStringAsFixed(2)} ms, '
+        'iqr=${fmpSummary.iqr.toStringAsFixed(2)} ms) | '
+        're-parses=$fmpReparsesTotal (full re-parse on every toggle)',
       );
     });
 
     testWidgets('3. Live 30-chunk LLM streaming rebuild cost', (
       WidgetTester tester,
     ) async {
-      const MarkdownEngine engine = MarkdownEngine(
-        defaultOptions: MarkdownOptions.gfm(),
-      );
       final List<String> chunks = stream30Fixture.chunks;
       expect(chunks.length, 30);
 
+      const MarkdownOptions gfmOptions = MarkdownOptions.gfm();
       const MarkdownThemeData engineLight = MarkdownThemeData.light();
       final fmd.MarkdownThemeData fmdLight = fmd.MarkdownThemeData(
         textStyle: const TextStyle(fontSize: 16.0, color: Color(0xFF0F172A)),
@@ -709,157 +812,114 @@ void main() {
         Brightness.light,
       );
 
-      // 3a. MarkdownView.streaming (push-based StreamingMarkdownController)
-      final StreamingMarkdownController engineStream =
-          StreamingMarkdownController(
-            engine: engine,
-            options: const MarkdownOptions.gfm(),
-          );
-      await tester.pumpWidget(
-        _benchShell(
-          child: MarkdownView.streaming(
-            controller: engineStream,
-            theme: engineLight,
-          ),
-        ),
+      final List<double> engineNonSelMs = <double>[];
+      final List<double> engineNonSelFinishMs = <double>[];
+      final List<double> engineSelMs = <double>[];
+      final List<double> engineSelFinishMs = <double>[];
+      final List<double> fmdMs = <double>[];
+      final List<double> fmpMs = <double>[];
+
+      await _runInterleavedRounds(
+        warmupRounds: widgetWarmupRounds,
+        timedRounds: widgetTimedRounds,
+        participantCount: 4,
+        runParticipant: (int idx, int round, bool isTimed) async {
+          if (idx == 0 || idx == 1) {
+            final bool selectable = idx == 1;
+            final ({double activeMs, double finishMs}) res =
+                await _runMarkdownViewStreamSession(
+                  tester: tester,
+                  chunks: chunks,
+                  options: gfmOptions,
+                  theme: engineLight,
+                  delegates: const MarkdownBuilderDelegates(),
+                  selectable: selectable,
+                );
+            if (isTimed) {
+              if (selectable) {
+                engineSelMs.add(res.activeMs);
+                engineSelFinishMs.add(res.finishMs);
+              } else {
+                engineNonSelMs.add(res.activeMs);
+                engineNonSelFinishMs.add(res.finishMs);
+              }
+            }
+          } else if (idx == 2) {
+            final double activeMs = await _runFmdStreamSession(
+              tester: tester,
+              chunks: chunks,
+              theme: fmdLight,
+            );
+            if (isTimed) {
+              fmdMs.add(activeMs);
+            }
+          } else {
+            final double activeMs = await _runFmpStreamSession(
+              tester: tester,
+              chunks: chunks,
+              styleSheet: fmpLight,
+            );
+            if (isTimed) {
+              fmpMs.add(activeMs);
+            }
+          }
+        },
       );
 
-      Future<void> runEngineStreamSession() async {
-        engineStream.reset();
-        await tester.pump();
-        for (final String chunk in chunks) {
-          engineStream.append(chunk);
-          await tester.pump();
-        }
-        engineStream.finish();
-        await tester.pump();
-      }
-
-      // Warmup 1 session, then measure 3 sessions.
-      await runEngineStreamSession();
-      final List<double> engineSessionMs = <double>[];
-      for (int i = 0; i < 3; i++) {
-        final Stopwatch sw = Stopwatch()..start();
-        await runEngineStreamSession();
-        sw.stop();
-        engineSessionMs.add(sw.elapsedMicroseconds / 1000.0);
-      }
-      engineSessionMs.sort();
-      final double engineMedianSessionMs = engineSessionMs[1];
-      await tester.pumpWidget(const SizedBox.shrink());
-      engineStream.dispose();
-
-      // 3b. flutter_md StreamingMarkdownParser + MarkdownWidget
-      final fmd.StreamingMarkdownParser fmdParser =
-          fmd.StreamingMarkdownParser();
-      final ValueNotifier<fmd.Markdown> fmdDocNotifier =
-          ValueNotifier<fmd.Markdown>(const fmd.Markdown.empty());
-      await tester.pumpWidget(
-        _benchShell(
-          child: ValueListenableBuilder<fmd.Markdown>(
-            valueListenable: fmdDocNotifier,
-            builder: (BuildContext context, fmd.Markdown doc, _) =>
-                SingleChildScrollView(
-                  child: fmd.MarkdownWidget(markdown: doc, theme: fmdLight),
-                ),
-          ),
-        ),
+      final SampleSummary engineNonSel = summarizeSamples(engineNonSelMs);
+      final SampleSummary engineNonSelFinish = summarizeSamples(
+        engineNonSelFinishMs,
       );
-
-      Future<void> runFmdStreamSession() async {
-        fmdParser.reset();
-        fmdDocNotifier.value = const fmd.Markdown.empty();
-        await tester.pump();
-        for (final String chunk in chunks) {
-          fmdDocNotifier.value = fmdParser.add(chunk);
-          await tester.pump();
-        }
-      }
-
-      await runFmdStreamSession();
-      final List<double> fmdSessionMs = <double>[];
-      for (int i = 0; i < 3; i++) {
-        final Stopwatch sw = Stopwatch()..start();
-        await runFmdStreamSession();
-        sw.stop();
-        fmdSessionMs.add(sw.elapsedMicroseconds / 1000.0);
-      }
-      fmdSessionMs.sort();
-      final double fmdMedianSessionMs = fmdSessionMs[1];
-      await tester.pumpWidget(const SizedBox.shrink());
-      fmdDocNotifier.dispose();
-
-      // 3c. flutter_markdown_plus full re-parse + full rebuild per chunk
-      final ValueNotifier<String> fmpSourceNotifier = ValueNotifier<String>('');
-      await tester.pumpWidget(
-        _benchShell(
-          child: ValueListenableBuilder<String>(
-            valueListenable: fmpSourceNotifier,
-            builder: (BuildContext context, String data, _) =>
-                fmp.Markdown(data: data, styleSheet: fmpLight),
-          ),
-        ),
-      );
-
-      Future<void> runFmpStreamSession() async {
-        final StringBuffer acc = StringBuffer();
-        fmpSourceNotifier.value = '';
-        await tester.pump();
-        for (final String chunk in chunks) {
-          acc.write(chunk);
-          fmpSourceNotifier.value = acc.toString();
-          await tester.pump();
-        }
-      }
-
-      await runFmpStreamSession();
-      final List<double> fmpSessionMs = <double>[];
-      for (int i = 0; i < 3; i++) {
-        final Stopwatch sw = Stopwatch()..start();
-        await runFmpStreamSession();
-        sw.stop();
-        fmpSessionMs.add(sw.elapsedMicroseconds / 1000.0);
-      }
-      fmpSessionMs.sort();
-      final double fmpMedianSessionMs = fmpSessionMs[1];
-      await tester.pumpWidget(const SizedBox.shrink());
-      fmpSourceNotifier.dispose();
+      final SampleSummary engineSel = summarizeSamples(engineSelMs);
+      final SampleSummary engineSelFinish = summarizeSamples(engineSelFinishMs);
+      final SampleSummary fmdSummary = summarizeSamples(fmdMs);
+      final SampleSummary fmpSummary = summarizeSamples(fmpMs);
 
       stdout.writeln('');
       stdout.writeln(
-        '=== Widget Benchmark 3: Live 30-Chunk LLM Streaming Session ===',
+        '=== Widget Benchmark 3: Live 30-Chunk Prose LLM Streaming '
+        '(31 matched pumps, $widgetWarmupRounds warmup + $widgetTimedRounds interleaved rounds) ===',
       );
       stdout.writeln(
-        '  MarkdownView.streaming: ${engineMedianSessionMs.toStringAsFixed(2)} ms total '
-        '(${(engineMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
+        '  B3 MarkdownView.streaming (selectable: false, apples-to-apples): '
+        '${formatMsSummary(engineNonSel)} total '
+        '(${(engineNonSel.median / chunks.length).toStringAsFixed(2)} ms/chunk) | '
+        '+ finish() delta: ${formatMsSummary(engineNonSelFinish)}',
       );
       stdout.writeln(
-        '  flutter_md StreamingMarkdownParser + MarkdownWidget: '
-        '${fmdMedianSessionMs.toStringAsFixed(2)} ms total '
-        '(${(fmdMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
+        '  B3-Selectable (production default, selectable: true): '
+        '${formatMsSummary(engineSel)} total '
+        '(${(engineSel.median / chunks.length).toStringAsFixed(2)} ms/chunk) | '
+        '+ finish() delta: ${formatMsSummary(engineSelFinish)}',
       );
       stdout.writeln(
-        '  flutter_markdown_plus Markdown (full re-parse/rebuild): '
-        '${fmpMedianSessionMs.toStringAsFixed(2)} ms total '
-        '(${(fmpMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
+        '  flutter_md StreamingMarkdownParser + MarkdownWidget (selectable: false): '
+        '${formatMsSummary(fmdSummary)} total '
+        '(${(fmdSummary.median / chunks.length).toStringAsFixed(2)} ms/chunk)',
+      );
+      stdout.writeln(
+        '  flutter_markdown_plus Markdown (selectable: false, full re-parse/rebuild): '
+        '${formatMsSummary(fmpSummary)} total '
+        '(${(fmpSummary.median / chunks.length).toStringAsFixed(2)} ms/chunk)',
       );
     });
 
     testWidgets(
-      '4. Live mixed-content 30-chunk streaming (settled math, Mermaid & alert + prose tail)',
+      '4a. Live mixed-content 30-chunk streaming — Apples-to-Apples Core/Text Mode',
       (WidgetTester tester) async {
-        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
-        addTearDown(() async {
-          MarkdownBuiltInRenderers.clearCaches();
-          await MarkdownBuiltInRenderers.dispose();
-        });
+        MarkdownBuiltInRenderers.clearCaches();
+        addTearDown(MarkdownBuiltInRenderers.clearCaches);
 
         final List<String> chunks = mixedStream30Fixture.chunks;
         expect(chunks.length, 30);
 
-        const MarkdownEngine engine = MarkdownEngine(
-          defaultOptions: MarkdownOptions.extended(),
-        );
+        const MarkdownOptions gfmOptions = MarkdownOptions.gfm();
+        const MarkdownOptions extendedOptions = MarkdownOptions.extended();
+        const MarkdownBuilderDelegates disabledBuiltIns =
+            MarkdownBuilderDelegates(
+              enableBuiltInMath: false,
+              enableBuiltInMermaid: false,
+            );
         const MarkdownThemeData engineLight = MarkdownThemeData.light();
         final fmd.MarkdownThemeData fmdLight = fmd.MarkdownThemeData(
           textStyle: const TextStyle(fontSize: 16.0, color: Color(0xFF0F172A)),
@@ -869,27 +929,142 @@ void main() {
           Brightness.light,
         );
 
-        // 4a. MarkdownView.streaming (hybrid settled sliver + trailing canvas)
-        final StreamingMarkdownController engineStream =
+        final List<double> engineGfmMs = <double>[];
+        final List<double> engineGfmFinishMs = <double>[];
+        final List<double> engineHybridMs = <double>[];
+        final List<double> engineHybridFinishMs = <double>[];
+        final List<double> fmdMs = <double>[];
+        final List<double> fmpMs = <double>[];
+
+        await _runInterleavedRounds(
+          warmupRounds: widgetWarmupRounds,
+          timedRounds: widgetTimedRounds,
+          participantCount: 4,
+          runParticipant: (int idx, int round, bool isTimed) async {
+            if (idx == 0 || idx == 1) {
+              final bool isHybrid = idx == 1;
+              final ({double activeMs, double finishMs}) res =
+                  await _runMarkdownViewStreamSession(
+                    tester: tester,
+                    chunks: chunks,
+                    options: isHybrid ? extendedOptions : gfmOptions,
+                    theme: engineLight,
+                    delegates: disabledBuiltIns,
+                    selectable: false,
+                  );
+              if (isTimed) {
+                if (isHybrid) {
+                  engineHybridMs.add(res.activeMs);
+                  engineHybridFinishMs.add(res.finishMs);
+                } else {
+                  engineGfmMs.add(res.activeMs);
+                  engineGfmFinishMs.add(res.finishMs);
+                }
+              }
+            } else if (idx == 2) {
+              final double activeMs = await _runFmdStreamSession(
+                tester: tester,
+                chunks: chunks,
+                theme: fmdLight,
+              );
+              if (isTimed) {
+                fmdMs.add(activeMs);
+              }
+            } else {
+              final double activeMs = await _runFmpStreamSession(
+                tester: tester,
+                chunks: chunks,
+                styleSheet: fmpLight,
+              );
+              if (isTimed) {
+                fmpMs.add(activeMs);
+              }
+            }
+          },
+        );
+
+        expect(MarkdownBuiltInRenderers.mathLayoutCount, 0);
+        expect(MarkdownBuiltInRenderers.mermaidRenderCount, 0);
+
+        final SampleSummary gfmSummary = summarizeSamples(engineGfmMs);
+        final SampleSummary gfmFinish = summarizeSamples(engineGfmFinishMs);
+        final SampleSummary hybridSummary = summarizeSamples(engineHybridMs);
+        final SampleSummary hybridFinish = summarizeSamples(
+          engineHybridFinishMs,
+        );
+        final SampleSummary fmdSummary = summarizeSamples(fmdMs);
+        final SampleSummary fmpSummary = summarizeSamples(fmpMs);
+
+        stdout.writeln('');
+        stdout.writeln(
+          '=== Widget Benchmark 4a: Live Mixed-Content 30-Chunk Streaming '
+          '(Apples-to-Apples Core/Text Mode, 31 matched pumps, '
+          '$widgetWarmupRounds warmup + $widgetTimedRounds interleaved rounds) ===',
+        );
+        stdout.writeln(
+          '  B4a MarkdownView.streaming (GFM, built-in math/Mermaid off, selectable: false): '
+          '${formatMsSummary(gfmSummary)} total '
+          '(${(gfmSummary.median / chunks.length).toStringAsFixed(2)} ms/chunk) | '
+          '+ finish() delta: ${formatMsSummary(gfmFinish)}',
+        );
+        stdout.writeln(
+          '  B4a-Hybrid MarkdownView.streaming (extended alerts + raw math fallback, '
+          'built-in math/Mermaid off, selectable: false): '
+          '${formatMsSummary(hybridSummary)} total '
+          '(${(hybridSummary.median / chunks.length).toStringAsFixed(2)} ms/chunk) | '
+          '+ finish() delta: ${formatMsSummary(hybridFinish)}',
+        );
+        stdout.writeln(
+          '  flutter_md StreamingMarkdownParser + MarkdownWidget (raw blocks, selectable: false): '
+          '${formatMsSummary(fmdSummary)} total '
+          '(${(fmdSummary.median / chunks.length).toStringAsFixed(2)} ms/chunk)',
+        );
+        stdout.writeln(
+          '  flutter_markdown_plus Markdown (raw blocks, selectable: false, full re-parse/rebuild): '
+          '${formatMsSummary(fmpSummary)} total '
+          '(${(fmpSummary.median / chunks.length).toStringAsFixed(2)} ms/chunk)',
+        );
+      },
+    );
+
+    testWidgets(
+      '4b. Live mixed-content 30-chunk streaming — Rich Out-of-the-Box Mode (TexMath + Mermaid + Alerts)',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          MarkdownBuiltInRenderers.resetCacheDefaults();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final List<String> chunks = mixedStream30Fixture.chunks;
+        expect(chunks.length, 30);
+
+        const MarkdownOptions extendedOptions = MarkdownOptions.extended();
+        const MarkdownEngine engine = MarkdownEngine(
+          defaultOptions: extendedOptions,
+        );
+        const MarkdownThemeData engineLight = MarkdownThemeData.light();
+
+        // Verified warmup session: prove settled TexMath & VectorGraphic Mermaid
+        // render objects stay identical across trailing prose chunks.
+        final StreamingMarkdownController verifyStream =
             StreamingMarkdownController(
               engine: engine,
-              options: const MarkdownOptions.extended(),
+              options: extendedOptions,
             );
         await tester.pumpWidget(
           _benchShell(
             child: MarkdownView.streaming(
-              controller: engineStream,
+              controller: verifyStream,
               theme: engineLight,
             ),
           ),
         );
-
-        // Verified warmup session: confirm settled math/Mermaid/alert stay
-        // frozen in SliverMarkdownDocument while trailing prose streams on
-        // MarkdownStreamingCanvasLeaf.
         MarkdownBuiltInRenderers.clearCaches();
-        engineStream.reset();
+        verifyStream.reset();
         await tester.pump();
+
         final Finder mathFinder = find.byWidgetPredicate(
           (Widget w) => w.runtimeType.toString() == 'TexMath',
         );
@@ -903,10 +1078,10 @@ void main() {
         RenderObject? settledMathRender;
         RenderObject? settledMermaidRender;
         for (int i = 0; i < chunks.length; i++) {
-          engineStream.append(chunks[i]);
+          verifyStream.append(chunks[i]);
           await tester.pump();
           if (i == 7) {
-            expect(engineStream.settledPrefixBlockCount, 4);
+            expect(verifyStream.settledPrefixBlockCount, 4);
             expect(find.byType(SliverMarkdownDocument), findsOneWidget);
             expect(canvasFinder, findsOneWidget);
             expect(mathFinder, findsOneWidget);
@@ -929,138 +1104,132 @@ void main() {
             );
           }
         }
-        engineStream.finish();
+        verifyStream.finish();
         await tester.pump();
         expect(tester.takeException(), isNull);
-
-        Future<void> runEngineMixedSession() async {
-          engineStream.reset();
-          await tester.pump();
-          for (final String chunk in chunks) {
-            engineStream.append(chunk);
-            await tester.pump();
-          }
-          engineStream.finish();
-          await tester.pump();
-        }
-
-        final List<double> engineSessionMs = <double>[];
-        int sessionMathLayouts = 0;
-        int sessionMermaidRenders = 0;
-        for (int i = 0; i < 3; i++) {
-          MarkdownBuiltInRenderers.clearCaches();
-          final Stopwatch sw = Stopwatch()..start();
-          await runEngineMixedSession();
-          sw.stop();
-          engineSessionMs.add(sw.elapsedMicroseconds / 1000.0);
-          sessionMathLayouts = MarkdownBuiltInRenderers.mathLayoutCount;
-          sessionMermaidRenders = MarkdownBuiltInRenderers.mermaidRenderCount;
-        }
-        expect(sessionMathLayouts, greaterThanOrEqualTo(1));
-        expect(sessionMermaidRenders, greaterThanOrEqualTo(1));
-        engineSessionMs.sort();
-        final double engineMedianSessionMs = engineSessionMs[1];
         await tester.pumpWidget(const SizedBox.shrink());
-        engineStream.dispose();
+        verifyStream.dispose();
 
-        // 4b. flutter_md StreamingMarkdownParser + MarkdownWidget (raw blocks)
-        final fmd.StreamingMarkdownParser fmdParser =
-            fmd.StreamingMarkdownParser();
-        final ValueNotifier<fmd.Markdown> fmdDocNotifier =
-            ValueNotifier<fmd.Markdown>(const fmd.Markdown.empty());
-        await tester.pumpWidget(
-          _benchShell(
-            child: ValueListenableBuilder<fmd.Markdown>(
-              valueListenable: fmdDocNotifier,
-              builder: (BuildContext context, fmd.Markdown doc, _) =>
-                  SingleChildScrollView(
-                    child: fmd.MarkdownWidget(markdown: doc, theme: fmdLight),
-                  ),
-            ),
-          ),
+        // Second warmup round covering both Cold and Warm paths, leaving caches
+        // populated before timed rounds start.
+        await _runMarkdownViewStreamSession(
+          tester: tester,
+          chunks: chunks,
+          options: extendedOptions,
+          theme: engineLight,
+          delegates: const MarkdownBuilderDelegates(),
+          selectable: true,
+          beforeSession: MarkdownBuiltInRenderers.clearCaches,
+        );
+        await _runMarkdownViewStreamSession(
+          tester: tester,
+          chunks: chunks,
+          options: extendedOptions,
+          theme: engineLight,
+          delegates: const MarkdownBuilderDelegates(),
+          selectable: true,
         );
 
-        Future<void> runFmdMixedSession() async {
-          fmdParser.reset();
-          fmdDocNotifier.value = const fmd.Markdown.empty();
-          await tester.pump();
-          for (final String chunk in chunks) {
-            fmdDocNotifier.value = fmdParser.add(chunk);
-            await tester.pump();
-          }
-        }
+        final List<double> coldActiveMs = <double>[];
+        final List<double> coldFinishMs = <double>[];
+        final List<double> warmActiveMs = <double>[];
+        final List<double> warmFinishMs = <double>[];
 
-        await runFmdMixedSession();
-        final List<double> fmdSessionMs = <double>[];
-        for (int i = 0; i < 3; i++) {
-          final Stopwatch sw = Stopwatch()..start();
-          await runFmdMixedSession();
-          sw.stop();
-          fmdSessionMs.add(sw.elapsedMicroseconds / 1000.0);
-        }
-        fmdSessionMs.sort();
-        final double fmdMedianSessionMs = fmdSessionMs[1];
-        await tester.pumpWidget(const SizedBox.shrink());
-        fmdDocNotifier.dispose();
+        int coldMathLayouts = 0;
+        int coldMermaidRenders = 0;
+        int warmMathHits = 0;
+        int warmMermaidHits = 0;
 
-        // 4c. flutter_markdown_plus full re-parse + full rebuild per chunk
-        final ValueNotifier<String> fmpSourceNotifier = ValueNotifier<String>(
-          '',
+        await _runInterleavedRounds(
+          warmupRounds: 0,
+          timedRounds: widgetTimedRounds,
+          participantCount: 2,
+          runParticipant: (int idx, int round, bool isTimed) async {
+            if (idx == 0) {
+              final ({double activeMs, double finishMs}) res =
+                  await _runMarkdownViewStreamSession(
+                    tester: tester,
+                    chunks: chunks,
+                    options: extendedOptions,
+                    theme: engineLight,
+                    delegates: const MarkdownBuilderDelegates(),
+                    selectable: true,
+                    beforeSession: MarkdownBuiltInRenderers.clearCaches,
+                  );
+              coldMathLayouts = MarkdownBuiltInRenderers.mathLayoutCount;
+              coldMermaidRenders = MarkdownBuiltInRenderers.mermaidRenderCount;
+              expect(coldMathLayouts, greaterThanOrEqualTo(1));
+              expect(coldMermaidRenders, greaterThanOrEqualTo(1));
+              coldActiveMs.add(res.activeMs);
+              coldFinishMs.add(res.finishMs);
+            } else {
+              late int layoutsBefore;
+              late int rendersBefore;
+              late int mathHitsBefore;
+              late int mermaidHitsBefore;
+              final ({double activeMs, double finishMs})
+              res = await _runMarkdownViewStreamSession(
+                tester: tester,
+                chunks: chunks,
+                options: extendedOptions,
+                theme: engineLight,
+                delegates: const MarkdownBuilderDelegates(),
+                selectable: true,
+                beforeSession: () {
+                  layoutsBefore = MarkdownBuiltInRenderers.mathLayoutCount;
+                  rendersBefore = MarkdownBuiltInRenderers.mermaidRenderCount;
+                  mathHitsBefore = MarkdownBuiltInRenderers.mathCacheHitCount;
+                  mermaidHitsBefore =
+                      MarkdownBuiltInRenderers.mermaidCacheHitCount;
+                },
+              );
+              final int newLayouts =
+                  MarkdownBuiltInRenderers.mathLayoutCount - layoutsBefore;
+              final int newRenders =
+                  MarkdownBuiltInRenderers.mermaidRenderCount - rendersBefore;
+              warmMathHits =
+                  MarkdownBuiltInRenderers.mathCacheHitCount - mathHitsBefore;
+              warmMermaidHits =
+                  MarkdownBuiltInRenderers.mermaidCacheHitCount -
+                  mermaidHitsBefore;
+              expect(newLayouts, 0);
+              expect(newRenders, 0);
+              expect(warmMathHits, greaterThanOrEqualTo(1));
+              expect(warmMermaidHits, greaterThanOrEqualTo(1));
+              warmActiveMs.add(res.activeMs);
+              warmFinishMs.add(res.finishMs);
+            }
+          },
         );
-        await tester.pumpWidget(
-          _benchShell(
-            child: ValueListenableBuilder<String>(
-              valueListenable: fmpSourceNotifier,
-              builder: (BuildContext context, String data, _) =>
-                  fmp.Markdown(data: data, styleSheet: fmpLight),
-            ),
-          ),
-        );
 
-        Future<void> runFmpMixedSession() async {
-          final StringBuffer acc = StringBuffer();
-          fmpSourceNotifier.value = '';
-          await tester.pump();
-          for (final String chunk in chunks) {
-            acc.write(chunk);
-            fmpSourceNotifier.value = acc.toString();
-            await tester.pump();
-          }
-        }
-
-        await runFmpMixedSession();
-        final List<double> fmpSessionMs = <double>[];
-        for (int i = 0; i < 3; i++) {
-          final Stopwatch sw = Stopwatch()..start();
-          await runFmpMixedSession();
-          sw.stop();
-          fmpSessionMs.add(sw.elapsedMicroseconds / 1000.0);
-        }
-        fmpSessionMs.sort();
-        final double fmpMedianSessionMs = fmpSessionMs[1];
-        await tester.pumpWidget(const SizedBox.shrink());
-        fmpSourceNotifier.dispose();
+        final SampleSummary coldActive = summarizeSamples(coldActiveMs);
+        final SampleSummary coldFinish = summarizeSamples(coldFinishMs);
+        final SampleSummary warmActive = summarizeSamples(warmActiveMs);
+        final SampleSummary warmFinish = summarizeSamples(warmFinishMs);
 
         stdout.writeln('');
         stdout.writeln(
-          '=== Widget Benchmark 4: Live Mixed-Content 30-Chunk Streaming '
-          '(settled math + Mermaid + alert + prose tail) ===',
+          '=== Widget Benchmark 4b: Live Mixed-Content 30-Chunk Streaming '
+          '(Rich Out-of-the-Box: Native TexMath + VectorGraphic Mermaid + Alerts, '
+          'selectable: true, 31 matched active pumps, '
+          '$widgetWarmupRounds warmup + $widgetTimedRounds interleaved rounds) ===',
         );
         stdout.writeln(
-          '  MarkdownView.streaming (hybrid settled sliver + canvas tail): '
-          '${engineMedianSessionMs.toStringAsFixed(2)} ms total '
-          '(${(engineMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk, '
-          'mathLayouts=$sessionMathLayouts, mermaidRenders=$sessionMermaidRenders)',
+          '  Note: flutter_md and flutter_markdown_plus lack native TeX math/Mermaid '
+          'rendering (competitor raw-text baseline is Widget Benchmark 4a).',
         );
         stdout.writeln(
-          '  flutter_md StreamingMarkdownParser + MarkdownWidget (raw blocks): '
-          '${fmdMedianSessionMs.toStringAsFixed(2)} ms total '
-          '(${(fmdMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
+          '  B4b-Cold (Cold LRU Cache): ${formatMsSummary(coldActive)} total '
+          '(${(coldActive.median / chunks.length).toStringAsFixed(2)} ms/chunk) | '
+          '+ finish() delta: ${formatMsSummary(coldFinish)} | '
+          'mathLayouts=$coldMathLayouts, mermaidRenders=$coldMermaidRenders',
         );
         stdout.writeln(
-          '  flutter_markdown_plus Markdown (raw blocks, full re-parse/rebuild): '
-          '${fmpMedianSessionMs.toStringAsFixed(2)} ms total '
-          '(${(fmpMedianSessionMs / chunks.length).toStringAsFixed(2)} ms/chunk)',
+          '  B4b-Warm (Warm LRU Cache): ${formatMsSummary(warmActive)} total '
+          '(${(warmActive.median / chunks.length).toStringAsFixed(2)} ms/chunk) | '
+          '+ finish() delta: ${formatMsSummary(warmFinish)} | '
+          'mathHits=$warmMathHits, mermaidHits=$warmMermaidHits, '
+          'newLayouts=0, newRenders=0',
         );
       },
     );
@@ -1092,36 +1261,35 @@ fmp.MarkdownStyleSheet _buildFmpStyleSheet(Brightness brightness) {
   return fmp.MarkdownStyleSheet.fromTheme(sizedTheme);
 }
 
-Future<double> _measureWidgetMounts({
-  required WidgetTester tester,
-  required int warmupCount,
-  required int sampleCount,
-  required Widget Function(int iteration) builder,
+Future<void> _runInterleavedRounds({
+  required int warmupRounds,
+  required int timedRounds,
+  required int participantCount,
+  required Future<void> Function(int participantIndex, int round, bool isTimed)
+  runParticipant,
 }) async {
-  for (int w = 0; w < warmupCount; w++) {
-    await tester.pumpWidget(_benchShell(child: builder(-1 - w)));
-    await tester.pumpWidget(const SizedBox.shrink());
+  for (int w = 0; w < warmupRounds; w++) {
+    for (final int idx in interleaveRoundIndices(participantCount, w)) {
+      await runParticipant(idx, w, false);
+    }
   }
-
-  final List<double> samplesMs = <double>[];
-  for (int i = 0; i < sampleCount; i++) {
-    final Stopwatch sw = Stopwatch()..start();
-    await tester.pumpWidget(_benchShell(child: builder(i)));
-    sw.stop();
-    samplesMs.add(sw.elapsedMicroseconds / 1000.0);
-    await tester.pumpWidget(const SizedBox.shrink());
+  for (int r = 0; r < timedRounds; r++) {
+    for (final int idx in interleaveRoundIndices(
+      participantCount,
+      warmupRounds + r,
+    )) {
+      await runParticipant(idx, r, true);
+    }
   }
-  samplesMs.sort();
-  return samplesMs[samplesMs.length ~/ 2];
 }
 
-Future<double> _measureThemeToggles({
+Future<List<double>> _measureTogglesInPlace({
   required WidgetTester tester,
   required ValueNotifier<bool> notifier,
-  required int warmupToggles,
+  required int settleToggles,
   required int timedToggles,
 }) async {
-  for (int w = 0; w < warmupToggles; w++) {
+  for (int w = 0; w < settleToggles; w++) {
     notifier.value = !notifier.value;
     await tester.pump();
   }
@@ -1134,8 +1302,127 @@ Future<double> _measureThemeToggles({
     sw.stop();
     samplesMs.add(sw.elapsedMicroseconds / 1000.0);
   }
-  samplesMs.sort();
-  return samplesMs[samplesMs.length ~/ 2];
+  return samplesMs;
+}
+
+Future<({double activeMs, double finishMs})> _runMarkdownViewStreamSession({
+  required WidgetTester tester,
+  required List<String> chunks,
+  required MarkdownOptions options,
+  required MarkdownThemeData theme,
+  required MarkdownBuilderDelegates delegates,
+  required bool selectable,
+  void Function()? beforeSession,
+}) async {
+  final MarkdownEngine engine = MarkdownEngine(defaultOptions: options);
+  final StreamingMarkdownController controller = StreamingMarkdownController(
+    engine: engine,
+    options: options,
+  );
+  await tester.pumpWidget(
+    _benchShell(
+      child: MarkdownView.streaming(
+        controller: controller,
+        theme: theme,
+        delegates: delegates,
+        selectable: selectable,
+      ),
+    ),
+  );
+  try {
+    beforeSession?.call();
+    final Stopwatch activeSw = Stopwatch()..start();
+    controller.reset();
+    await tester.pump();
+    for (final String chunk in chunks) {
+      controller.append(chunk);
+      await tester.pump();
+    }
+    activeSw.stop();
+
+    final Stopwatch finishSw = Stopwatch()..start();
+    controller.finish();
+    await tester.pump();
+    finishSw.stop();
+
+    return (
+      activeMs: activeSw.elapsedMicroseconds / 1000.0,
+      finishMs: finishSw.elapsedMicroseconds / 1000.0,
+    );
+  } finally {
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  }
+}
+
+Future<double> _runFmdStreamSession({
+  required WidgetTester tester,
+  required List<String> chunks,
+  required fmd.MarkdownThemeData theme,
+}) async {
+  final fmd.StreamingMarkdownParser parser = fmd.StreamingMarkdownParser();
+  final ValueNotifier<fmd.Markdown> docNotifier = ValueNotifier<fmd.Markdown>(
+    const fmd.Markdown.empty(),
+  );
+  await tester.pumpWidget(
+    _benchShell(
+      child: ValueListenableBuilder<fmd.Markdown>(
+        valueListenable: docNotifier,
+        builder: (BuildContext context, fmd.Markdown doc, _) =>
+            SingleChildScrollView(
+              child: fmd.MarkdownWidget(markdown: doc, theme: theme),
+            ),
+      ),
+    ),
+  );
+  try {
+    final Stopwatch sw = Stopwatch()..start();
+    parser.reset();
+    docNotifier.value = const fmd.Markdown.empty();
+    await tester.pump();
+    for (final String chunk in chunks) {
+      docNotifier.value = parser.add(chunk);
+      await tester.pump();
+    }
+    sw.stop();
+    return sw.elapsedMicroseconds / 1000.0;
+  } finally {
+    await tester.pumpWidget(const SizedBox.shrink());
+    docNotifier.dispose();
+  }
+}
+
+Future<double> _runFmpStreamSession({
+  required WidgetTester tester,
+  required List<String> chunks,
+  required fmp.MarkdownStyleSheet styleSheet,
+}) async {
+  final ValueNotifier<String> sourceNotifier = ValueNotifier<String>('');
+  await tester.pumpWidget(
+    _benchShell(
+      child: ValueListenableBuilder<String>(
+        valueListenable: sourceNotifier,
+        builder: (BuildContext context, String data, _) =>
+            fmp.Markdown(data: data, styleSheet: styleSheet),
+      ),
+    ),
+  );
+  try {
+    final Stopwatch sw = Stopwatch()..start();
+    final StringBuffer acc = StringBuffer();
+    sourceNotifier.value = '';
+    await tester.pump();
+    for (final String chunk in chunks) {
+      acc.write(chunk);
+      sourceNotifier.value = acc.toString();
+      await tester.pump();
+    }
+    sw.stop();
+    return sw.elapsedMicroseconds / 1000.0;
+  } finally {
+    await tester.pumpWidget(const SizedBox.shrink());
+    sourceNotifier.dispose();
+  }
 }
 
 void _printThreeWay(
@@ -1148,12 +1435,16 @@ void _printThreeWay(
   stdout.writeln(
     '  $title: '
     'markdown_engine AST=${formatMicroseconds(engineAst.medianUs)} '
-    '(${engineAst.throughputMbPerSec.toStringAsFixed(2)} MB/s), '
-    'AST+HTML=${formatMicroseconds(engineHtml.medianUs)} | '
+    '(p95 ${formatMicroseconds(engineAst.p95Us)}, '
+    '${engineAst.throughputMbPerSec.toStringAsFixed(2)} MB/s), '
+    'AST+HTML=${formatMicroseconds(engineHtml.medianUs)} '
+    '(p95 ${formatMicroseconds(engineHtml.p95Us)}) | '
     'flutter_md AST=${formatMicroseconds(fmdAst.medianUs)} '
-    '(${fmdAst.throughputMbPerSec.toStringAsFixed(2)} MB/s) | '
+    '(p95 ${formatMicroseconds(fmdAst.p95Us)}, '
+    '${fmdAst.throughputMbPerSec.toStringAsFixed(2)} MB/s) | '
     'package:markdown AST=${formatMicroseconds(pkgMarkdownAst.medianUs)} '
-    '(${pkgMarkdownAst.throughputMbPerSec.toStringAsFixed(2)} MB/s)',
+    '(p95 ${formatMicroseconds(pkgMarkdownAst.p95Us)}, '
+    '${pkgMarkdownAst.throughputMbPerSec.toStringAsFixed(2)} MB/s)',
   );
 }
 

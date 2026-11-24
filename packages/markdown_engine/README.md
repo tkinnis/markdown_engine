@@ -151,15 +151,15 @@ Verified against the vendored CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.g
 | `gfm_spec` (`0.29.0.gfm.13`) | 670 | 0 | 2 | 672 | **100.0%** |
 | `gfm_extensions` (`0.29.0.gfm.13`) | 30 | 0 | 0 | 30 | **100.0%** |
 
-Native Dart AOT measurements on Apple M4 (`arm64`, macOS 15.6, Dart `3.13.5`) under `MarkdownOptions.gfm()`:
+Native Dart AOT (interleaved `tool/compare/bin/compare_parsers_aot.dart`) measurements on Apple M4 (`arm64`, macOS `15.6`, Dart `3.13.5`) under `MarkdownOptions.gfm()`:
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) |
 | :--- | ---: | ---: | ---: | ---: |
-| `small_doc_parse_and_html` | 937 B (18 lines) | 8.76 us | **8.68 us** | 102.92 MB/s |
-| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 283.51 us | **286.44 us** | 84.05 MB/s |
-| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 1.331 ms | **1.310 ms** | 125.90 MB/s |
-| `incremental_single_paragraph_edit` | 168.9 KB (`1,457/1,458` reused, **87.82x**) | 15.90 us | **14.92 us** | 11056.68 MB/s |
-| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (14/15 settled) | 1.15 us | **1.10 us** | 37.44 MB/s |
+| `small_doc_parse_and_html` | 937 B (18 lines) | 8.67 us | **8.52 us** | 104.91 MB/s |
+| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 277.29 us | **277.56 us** | 86.74 MB/s |
+| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 1.313 ms | **1.290 ms** | 127.91 MB/s |
+| `incremental_single_paragraph_edit` | 168.9 KB (`1,457/1,458` reused, **87.38x**) | 15.22 us | **14.76 us** | 11176.53 MB/s |
+| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (`43.00 us` total, 14/15 settled) | 0.87 us | **0.86 us** | 47.77 MB/s |
 
 ## License & Additional Resources
 

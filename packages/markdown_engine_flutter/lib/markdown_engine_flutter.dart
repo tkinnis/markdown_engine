@@ -39,6 +39,7 @@ export 'src/delegates.dart'
         MarkdownMathInlineBuilder,
         MarkdownWebLinkCallback;
 export 'src/document_reader.dart' show MarkdownDocumentReader;
+export 'src/fast_text.dart' show MarkdownRichText;
 export 'src/markdown_view.dart' show MarkdownView;
 export 'src/sliver_markdown_document.dart' show SliverMarkdownDocument;
 export 'src/theme.dart'

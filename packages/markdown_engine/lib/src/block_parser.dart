@@ -470,6 +470,106 @@ Phase1Result parseNormalizedBlocks(
   );
 }
 
+/// Reusable Phase 1 block parser for already-normalized Markdown slices,
+/// keeping [_BlockEngine], line-range buffers, and cursors across chunks.
+final class ReusableNormalizedBlockParser {
+  /// Creates a [ReusableNormalizedBlockParser] configured with [options].
+  ReusableNormalizedBlockParser(this.options)
+    : budgets = options.effectiveBudgets;
+
+  /// Effective block parsing options.
+  final MarkdownOptions options;
+
+  /// Effective parsing budgets derived from [options].
+  final MarkdownBudgets budgets;
+
+  _BlockEngine? _engine;
+  Int32List _lineRanges = Int32List(128);
+
+  /// Parses already-normalized [normalizedSource] reusing scratch buffers.
+  Phase1Result parse(
+    String normalizedSource, {
+    int baseOffset = 0,
+    int baseLine = 1,
+    String idPrefix = '',
+  }) {
+    FrontmatterNode? frontmatterNode;
+    int bodyStartOffset = 0;
+    int bodyStartLine = baseLine;
+    if (options.frontmatter &&
+        baseOffset == 0 &&
+        normalizedSource.length >= 3 &&
+        (normalizedSource.codeUnitAt(0) == 0x2D ||
+            normalizedSource.codeUnitAt(0) == 0x2B)) {
+      final ParsedFrontmatter? parsed = tryParseFrontmatter(normalizedSource);
+      if (parsed != null) {
+        frontmatterNode = parsed.node;
+        bodyStartOffset = parsed.bodyStartOffset;
+        bodyStartLine = parsed.bodyStartLine;
+      }
+    }
+    final int lineCount = _splitNormalizedLinesIntoScratch(
+      normalizedSource,
+      bodyStartOffset,
+    );
+    _BlockEngine? engine = _engine;
+    if (engine == null) {
+      engine = _BlockEngine(
+        source: normalizedSource,
+        lineCount: lineCount,
+        baseOffset: baseOffset,
+        startLine: bodyStartLine,
+        options: options,
+        budgets: budgets,
+        idPrefix: idPrefix,
+      );
+      _engine = engine;
+    } else {
+      engine.reset(
+        source: normalizedSource,
+        lineCount: lineCount,
+        baseOffset: baseOffset,
+        startLine: bodyStartLine,
+        idPrefix: idPrefix,
+      );
+    }
+    engine.processLines(_lineRanges);
+    return engine.finalize(
+      normalizedSource: normalizedSource,
+      frontmatter: frontmatterNode,
+    );
+  }
+
+  int _splitNormalizedLinesIntoScratch(String normalized, int startOffset) {
+    final int len = normalized.length;
+    if (startOffset >= len) {
+      return 0;
+    }
+    Int32List ranges = _lineRanges;
+    int rangesLen = ranges.length;
+    int slot = 0;
+    int cursor = startOffset;
+    while (cursor < len) {
+      final int nl = normalized.indexOf('\n', cursor);
+      final int lineEnd = nl == -1 ? len : nl;
+      if (slot + 1 >= rangesLen) {
+        final Int32List grown = Int32List(rangesLen * 2);
+        grown.setRange(0, rangesLen, ranges);
+        ranges = grown;
+        _lineRanges = grown;
+        rangesLen = grown.length;
+      }
+      ranges[slot++] = cursor;
+      ranges[slot++] = lineEnd;
+      if (nl == -1) {
+        break;
+      }
+      cursor = nl + 1;
+    }
+    return slot >> 1;
+  }
+}
+
 Phase1Result _parseSplitBlocks({
   required String normalized,
   required Int32List ranges,
@@ -504,6 +604,47 @@ final List<String> _precomputedBlockIds = List<String>.generate(
   (int i) => 'b-$i',
   growable: false,
 );
+
+const int _precomputedSettledGroupCount = 32;
+const int _precomputedSettledIdsPerGroup = 8;
+
+final List<String> _precomputedSettledBlockIds = List<String>.generate(
+  _precomputedSettledGroupCount * _precomputedSettledIdsPerGroup,
+  (int slot) =>
+      's${slot ~/ _precomputedSettledIdsPerGroup}-b-${(slot % _precomputedSettledIdsPerGroup) + 1}',
+  growable: false,
+);
+
+int _computeIdPrefixGroupOffset(String prefix) {
+  final int len = prefix.length;
+  if (len < 3 ||
+      len > 4 ||
+      prefix.codeUnitAt(0) != 0x73 ||
+      prefix.codeUnitAt(len - 1) != 0x2D) {
+    return -1;
+  }
+  final int d0 = prefix.codeUnitAt(1) - 0x30;
+  if (d0 < 0 || d0 > 9) {
+    return -1;
+  }
+  final int group;
+  if (len == 3) {
+    group = d0;
+  } else {
+    if (d0 == 0) {
+      return -1;
+    }
+    final int d1 = prefix.codeUnitAt(2) - 0x30;
+    if (d1 < 0 || d1 > 9) {
+      return -1;
+    }
+    group = d0 * 10 + d1;
+    if (group >= _precomputedSettledGroupCount) {
+      return -1;
+    }
+  }
+  return group * _precomputedSettledIdsPerGroup;
+}
 
 ({Int32List ranges, int lineCount})? _trySplitCleanNormalizedLines(
   String source,
@@ -593,7 +734,7 @@ final List<String> _precomputedBlockIds = List<String>.generate(
 final class _LineCursor {
   _LineCursor(this.source);
 
-  final String source;
+  String source;
   int lineIndex = 0;
   int lineStart = 0;
   int lineEnd = 0;
@@ -1070,17 +1211,72 @@ final class _BlockEngine {
     required this.budgets,
     this.idPrefix = '',
   }) : _cursor = _LineCursor(source),
-       _lookaheadCursor = _LineCursor(source);
+       _idPrefixGroupOffset = _computeIdPrefixGroupOffset(idPrefix);
 
-  final String source;
-  final int lineCount;
-  final int baseOffset;
-  final int startLine;
+  String source;
+  int lineCount;
+  int baseOffset;
+  int startLine;
   final MarkdownOptions options;
   final MarkdownBudgets budgets;
-  final String idPrefix;
+  String idPrefix;
+  int _idPrefixGroupOffset;
   final _LineCursor _cursor;
-  final _LineCursor _lookaheadCursor;
+  _LineCursor? _lookaheadCursor;
+
+  void reset({
+    required String source,
+    required int lineCount,
+    required int baseOffset,
+    required int startLine,
+    required String idPrefix,
+  }) {
+    this.source = source;
+    this.lineCount = lineCount;
+    this.baseOffset = baseOffset;
+    this.startLine = startLine;
+    this.idPrefix = idPrefix;
+    _idPrefixGroupOffset = _computeIdPrefixGroupOffset(idPrefix);
+    _cursor.source = source;
+    _lookaheadCursor?.source = source;
+    _root
+      ..children.clear()
+      ..isOpen = true
+      ..lastLineBlank = false
+      ..endsWithBlank = false
+      ..endOffset = 0
+      ..endLine = 1;
+    _stack.clear();
+    _linkDefinitions = null;
+    _footnoteDefs = null;
+    _abbreviations = null;
+    _idCounter = 0;
+    _blockCount = 0;
+    _subIdCounter = 0;
+    _budgetExceeded = false;
+    _hasHeading = false;
+    _hasPotentialDefList = false;
+    _hasPotentialAbbr = false;
+    _hasTopLevelHtmlBlock = false;
+    _failedDollarSearchContainer = null;
+    _failedDollarSearchLimit = -1;
+    _failedBracketSearchContainer = null;
+    _failedBracketSearchLimit = -1;
+    _allContainersMatched = true;
+    _atxLevel = 0;
+    _atxContent = '';
+    _atxExplicitId = null;
+    _explicitText = '';
+    _explicitId = null;
+    _listOrdered = false;
+    _listStart = 1;
+    _listDelimiter = '';
+    _listBulletChar = 0;
+    _listIndent = 0;
+    _listMarkerChars = 0;
+    _listPadding = 0;
+    _listSpacesConsumed = 0;
+  }
 
   static final Uint8List _blockStarterLut = _buildBlockStarterLut();
 
@@ -1146,6 +1342,9 @@ final class _BlockEngine {
 
   String _nextId() {
     final int idx = ++_idCounter;
+    if (_idPrefixGroupOffset >= 0 && idx <= _precomputedSettledIdsPerGroup) {
+      return _precomputedSettledBlockIds[_idPrefixGroupOffset + idx - 1];
+    }
     if (idPrefix.isEmpty && idx < _precomputedBlockIds.length) {
       return _precomputedBlockIds[idx];
     }
@@ -1251,7 +1450,7 @@ final class _BlockEngine {
             source.codeUnitAt(lineStart) == 0x7C &&
             singleChild.tableRows.length < budgets.maxTableRows) {
           singleChild.tableRows.add(
-            _splitTableRowSpan(
+            splitTableRowSpan(
               source,
               lineStart,
               lineEnd,
@@ -1755,7 +1954,7 @@ final class _BlockEngine {
         return;
       }
       if (tip.tableRows.length < budgets.maxTableRows) {
-        final List<String> rowCells = _splitTableRowSpan(
+        final List<String> rowCells = splitTableRowSpan(
           source,
           cursor.index,
           cursor.lineEnd,
@@ -2206,7 +2405,7 @@ final class _BlockEngine {
     final String headerLine = lastNl == -1
         ? remaining
         : remaining.substring(lastNl + 1);
-    final List<String> headerCells = _splitTableRowSpan(
+    final List<String> headerCells = splitTableRowSpan(
       headerLine,
       0,
       headerLine.length,
@@ -3971,7 +4170,7 @@ final class _BlockEngine {
     _OpenBlock currentContainer, {
     required bool isBracket,
   }) {
-    final _LineCursor look = _lookaheadCursor;
+    final _LineCursor look = _lookaheadCursor ??= _LineCursor(source);
     int inFenceChar = 0;
     int inFenceLen = 0;
 
@@ -5533,7 +5732,7 @@ String _trimmedCellSlice(String source, int start, int end) {
 /// Splits a pipe-delimited GFM table row into trimmed cells, unescaping `\|`
 /// to `|` per `cmark-gfm` (`S_row_from_string`) while leaving `\\|` as `\\` +
 /// cell separator. Stops once [maxColumns] cells are extracted.
-List<String> _splitTableRowSpan(
+List<String> splitTableRowSpan(
   String line,
   int lineStart,
   int lineEnd, {

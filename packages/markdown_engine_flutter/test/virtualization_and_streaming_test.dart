@@ -3,9 +3,11 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
+import 'package:markdown_engine_flutter/src/fast_text.dart';
 import 'package:markdown_engine_flutter/src/isolate_parse_io.dart';
 import 'package:markdown_engine_flutter/src/streaming_canvas.dart';
 import 'package:tex_math_flutter/tex_math_flutter.dart' show TexMath;
@@ -1884,6 +1886,940 @@ $tail
         await tester.pump();
         await tester.pump();
         expect(tester.takeException(), isNull);
+      },
+    );
+  });
+
+  group('Sliver leading scroll-offset batching and extent caching', () {
+    RenderSliverMultiBoxAdaptor findMarkdownSliver(WidgetTester tester) {
+      return tester.allRenderObjects
+          .whereType<RenderSliverMultiBoxAdaptor>()
+          .first;
+    }
+
+    void expectMonotonicChildLayoutOffsets(
+      RenderSliverMultiBoxAdaptor sliver, {
+      bool requireFirstIndexZero = false,
+    }) {
+      RenderBox? child = sliver.firstChild;
+      expect(child, isNotNull);
+      final SliverMultiBoxAdaptorParentData firstPd =
+          child!.parentData! as SliverMultiBoxAdaptorParentData;
+      if (requireFirstIndexZero) {
+        expect(firstPd.index, 0);
+        expect(firstPd.layoutOffset, 0.0);
+      }
+      double prevOffset = -1.0;
+      int? prevIndex;
+      while (child != null) {
+        final SliverMultiBoxAdaptorParentData pd =
+            child.parentData! as SliverMultiBoxAdaptorParentData;
+        expect(pd.layoutOffset, isNotNull);
+        expect(pd.layoutOffset!.isNaN, isFalse);
+        expect(pd.layoutOffset!.isFinite, isTrue);
+        expect(pd.layoutOffset!, greaterThanOrEqualTo(prevOffset));
+        if (prevIndex != null) {
+          expect(pd.index, prevIndex + 1);
+        }
+        prevIndex = pd.index;
+        prevOffset = pd.layoutOffset!;
+        child = sliver.childAfter(child);
+      }
+    }
+
+    testWidgets(
+      '500-section document survives deep scroll, width narrowing, and negative overscroll (-503.977, -2500, -5000) without exceeding RenderViewport cycles',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final StringBuffer buf = StringBuffer('# 500-Section Stress\n\n');
+        for (int i = 1; i <= 500; i++) {
+          buf
+            ..writeln('## Section $i {#section-$i}')
+            ..writeln()
+            ..writeln(
+              'Paragraph $i exercises virtualized sliver layout with **bold**, '
+              '_italic_, `block-$i`, inline math \$x_{$i} = ${i * 2}\$, and '
+              'additional prose tokens that wrap onto many tall lines when the '
+              'viewport narrows sharply.',
+            )
+            ..writeln();
+        }
+        final String stressDoc = buf.toString();
+        final ScrollController scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+
+        double viewportWidth = 1100.0;
+        double viewportHeight = 700.0;
+        late StateSetter rebuildHost;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuildHost = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: viewportWidth,
+                    height: viewportHeight,
+                    child: MarkdownView(
+                      stressDoc,
+                      options: const MarkdownOptions.extended(),
+                      padding: const EdgeInsets.all(20.0),
+                      physics: const BouncingScrollPhysics(),
+                      cacheExtent: 2000.0,
+                      scrollController: scrollController,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        // Jump deep so blocks 0..15 are collected from the leading edge.
+        scrollController.jumpTo(8500.0);
+        await tester.pump();
+        expect(find.text('500-Section Stress'), findsNothing);
+
+        // Narrow width & shrink viewport height to 300px so blocks 0..15 grow
+        // much taller than dead-reckoned layoutOffsets while cacheExtent stays 2000.
+        rebuildHost(() {
+          viewportWidth = 260.0;
+          viewportHeight = 300.0;
+        });
+        await tester.pump();
+
+        // Drive extreme negative overscroll directly from deep offset so
+        // RenderSliverList batches leading children in bounded cycles without
+        // exceeding RenderViewport.maxLayoutCycles.
+        for (final double overscroll in <double>[-503.977, -2500.0, -5000.0]) {
+          scrollController.jumpTo(9500.0);
+          await tester.pump();
+          scrollController.jumpTo(overscroll);
+          await tester.pump();
+          expect(tester.takeException(), isNull);
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+          expectMonotonicChildLayoutOffsets(findMarkdownSliver(tester));
+        }
+
+        // Now position near the top cache zone (blocks 0..15 taller than
+        // dead-reckoned offsets) and drive negative overscroll + settle back
+        // to index 0 with monotonic layoutOffsets.
+        for (final double overscroll in <double>[-503.977, -2500.0, -5000.0]) {
+          scrollController.jumpTo(9500.0);
+          await tester.pump();
+          scrollController.jumpTo(1200.0);
+          await tester.pump();
+          scrollController.jumpTo(overscroll);
+          await tester.pump();
+          expect(tester.takeException(), isNull);
+          // Finish settling any residual positive correction back to block 0.
+          while (scrollController.position.pixels > 0.0) {
+            scrollController.jumpTo(0.0);
+            await tester.pump();
+            expect(tester.takeException(), isNull);
+          }
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+
+          final RenderSliverMultiBoxAdaptor sliver = findMarkdownSliver(tester);
+          expectMonotonicChildLayoutOffsets(
+            sliver,
+            requireFirstIndexZero: true,
+          );
+          expect(find.text('500-Section Stress'), findsOneWidget);
+        }
+
+        // Real upward ballistic fling from near the top cache zone past 0.
+        scrollController.jumpTo(1400.0);
+        await tester.pump();
+        await tester.fling(
+          find.byType(CustomScrollView),
+          const Offset(0.0, 2600.0),
+          7500.0,
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expectMonotonicChildLayoutOffsets(
+          findMarkdownSliver(tester),
+          requireFirstIndexZero: true,
+        );
+      },
+    );
+
+    testWidgets(
+      'short blocks (<20px tall) in top cache zone converge without RenderViewport cycle errors when scrolling back without negative overscroll',
+      (WidgetTester tester) async {
+        final StringBuffer buf = StringBuffer();
+        for (int i = 0; i < 120; i++) {
+          buf.writeln('Row $i\n');
+        }
+        final ScrollController scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 300.0,
+                child: MarkdownTheme(
+                  data: const MarkdownThemeData.light(blockSpacing: 2.0),
+                  child: MarkdownView(
+                    buf.toString(),
+                    padding: EdgeInsets.zero,
+                    physics: const ClampingScrollPhysics(),
+                    cacheExtent: 250.0,
+                    scrollController: scrollController,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        // Scroll deep so >25 short (<20px) blocks above the cache zone are collected.
+        scrollController.jumpTo(1400.0);
+        await tester.pump();
+        final RenderSliverMultiBoxAdaptor sliverDeep = findMarkdownSliver(
+          tester,
+        );
+        final SliverMultiBoxAdaptorParentData deepFirst =
+            sliverDeep.firstChild!.parentData!
+                as SliverMultiBoxAdaptorParentData;
+        expect(deepFirst.index, greaterThan(15));
+
+        // Scroll back near top and directly to 0.0 without negative overscroll.
+        scrollController.jumpTo(5.0);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        scrollController.jumpTo(0.0);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expectMonotonicChildLayoutOffsets(
+          findMarkdownSliver(tester),
+          requireFirstIndexZero: true,
+        );
+        expect(find.text('Row 0'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'zero-height leading blocks (HTML comments + blockSpacing: 0.0) prepend at scrollOffset == 0.0 without scrollOffsetCorrection == 0.0 failure',
+      (WidgetTester tester) async {
+        // Case A: all leading zero-height blocks plus positive body blocks.
+        final StringBuffer buf = StringBuffer();
+        for (int i = 0; i < 20; i++) {
+          buf.writeln('<!-- leading zero block $i -->\n');
+        }
+        for (int i = 0; i < 60; i++) {
+          buf.writeln('Visible paragraph #$i after zero-height comments.\n');
+        }
+
+        final ScrollController scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 300.0,
+                child: MarkdownTheme(
+                  data: const MarkdownThemeData.light(blockSpacing: 0.0),
+                  child: MarkdownView(
+                    buf.toString(),
+                    padding: EdgeInsets.zero,
+                    physics: const ClampingScrollPhysics(),
+                    cacheExtent: 0.0,
+                    scrollController: scrollController,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        scrollController.jumpTo(1200.0);
+        await tester.pump();
+        final RenderSliverMultiBoxAdaptor deepSliver = findMarkdownSliver(
+          tester,
+        );
+        expect(
+          (deepSliver.firstChild!.parentData!
+                  as SliverMultiBoxAdaptorParentData)
+              .index,
+          greaterThan(20),
+        );
+
+        scrollController.jumpTo(0.0);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expectMonotonicChildLayoutOffsets(
+          findMarkdownSliver(tester),
+          requireFirstIndexZero: true,
+        );
+        expect(
+          find.text('Visible paragraph #0 after zero-height comments.'),
+          findsOneWidget,
+        );
+
+        // Case B: prepending strictly 0-height leading blocks when firstChild is already at layoutOffset 0.0.
+        String toggledSource =
+            'First block\n\nSecond block\n\nThird block\n\nTail block';
+        late StateSetter rebuild;
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuild = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: 600.0,
+                    height: 300.0,
+                    child: MarkdownTheme(
+                      data: const MarkdownThemeData.light(blockSpacing: 0.0),
+                      child: MarkdownView(
+                        toggledSource,
+                        padding: EdgeInsets.zero,
+                        physics: const ClampingScrollPhysics(),
+                        cacheExtent: 0.0,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        rebuild(() {
+          toggledSource =
+              '<!-- z0 -->\n\n<!-- z1 -->\n\n<!-- z2 -->\n\n'
+              'First block\n\nSecond block\n\nThird block\n\nTail block';
+        });
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expectMonotonicChildLayoutOffsets(
+          findMarkdownSliver(tester),
+          requireFirstIndexZero: true,
+        );
+      },
+    );
+
+    testWidgets(
+      'non-first SliverMarkdownDocument after 5000px leading sliver and shrinkWrap: true MarkdownView produce zero exceptions or NaN metrics',
+      (WidgetTester tester) async {
+        final StringBuffer buf = StringBuffer();
+        for (int i = 0; i < 80; i++) {
+          buf.writeln('Sliver body block #$i with **rich** content.\n');
+        }
+        final MarkdownDocument doc = const MarkdownEngine(
+          defaultOptions: MarkdownOptions.gfm(),
+        ).parse(buf.toString());
+        final ScrollController scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 400.0,
+                child: CustomScrollView(
+                  controller: scrollController,
+                  physics: const BouncingScrollPhysics(),
+                  slivers: <Widget>[
+                    const SliverToBoxAdapter(child: SizedBox(height: 5000.0)),
+                    SliverMarkdownDocument(document: doc),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        // Scroll deep into the second sliver so its leading blocks collect.
+        scrollController.jumpTo(7600.0);
+        await tester.pump();
+        expect(find.textContaining('Sliver body block #0'), findsNothing);
+
+        // Cross back above the leading 5000px boundary and into negative overscroll.
+        scrollController.jumpTo(4900.0);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        scrollController.jumpTo(-500.0);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        // Verify shrinkWrap: true + BouncingScrollPhysics produces zero NaN geometry.
+        final ScrollController shrinkController = ScrollController();
+        addTearDown(shrinkController.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 500.0,
+                height: 350.0,
+                child: MarkdownView(
+                  buf.toString(),
+                  shrinkWrap: true,
+                  physics: const BouncingScrollPhysics(),
+                  scrollController: shrinkController,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        shrinkController.jumpTo(600.0);
+        await tester.pump();
+        shrinkController.jumpTo(-300.0);
+        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(shrinkController.position.maxScrollExtent.isNaN, isFalse);
+      },
+    );
+
+    testWidgets(
+      'visual continuity: visible block screen-Y stays within 0.5px of scroll delta across batched leading correction',
+      (WidgetTester tester) async {
+        tester.view.physicalSize = const Size(1200.0, 900.0);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final StringBuffer buf = StringBuffer();
+        for (int i = 0; i < 120; i++) {
+          buf.writeln(
+            'Paragraph $i carries multiple descriptive words so narrowing '
+            'from desktop width to mobile width increases line wrapping height '
+            'substantially.',
+          );
+          buf.writeln();
+        }
+        final ScrollController scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+
+        double width = 1000.0;
+        late StateSetter rebuildHost;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuildHost = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: width,
+                    height: 800.0,
+                    child: MarkdownView(
+                      buf.toString(),
+                      padding: const EdgeInsets.all(20.0),
+                      physics: const BouncingScrollPhysics(),
+                      cacheExtent: 0.0,
+                      scrollController: scrollController,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        // Scroll past top blocks so blocks 0..k are unmounted at wide width.
+        scrollController.jumpTo(320.0);
+        await tester.pump();
+
+        // Narrow viewport while staying scrolled at 320.0 (unmounted leading
+        // blocks now have much larger wrapped height than dead-reckoned offset).
+        rebuildHost(() => width = 280.0);
+        await tester.pump();
+
+        // Pick a visible paragraph near the top of the 800px viewport so after
+        // a 360px upward scroll step it remains visible inside the viewport.
+        String? anchorPrefix;
+        double? topBefore;
+        for (int i = 0; i < 120; i++) {
+          final String needle = 'Paragraph $i carries';
+          final Finder f = find.textContaining(needle);
+          if (f.evaluate().isNotEmpty) {
+            final double dy = tester.getTopLeft(f.first).dy;
+            if (dy >= 0.0 && dy <= 300.0) {
+              anchorPrefix = needle;
+              topBefore = dy;
+              break;
+            }
+          }
+        }
+        expect(anchorPrefix, isNotNull);
+        expect(topBefore, isNotNull);
+
+        // Scroll upward into negative overscroll/leading correction region so
+        // RenderSliverList batches all taller leading blocks in one pass while
+        // the anchor paragraph remains inside the 800px viewport.
+        const double targetPixels = -40.0;
+        final double expectedScreenDelta =
+            scrollController.position.pixels - targetPixels;
+        scrollController.jumpTo(targetPixels);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        final Finder anchorFinder = find.textContaining(anchorPrefix!);
+        expect(anchorFinder, findsOneWidget);
+        final double topAfter = tester.getTopLeft(anchorFinder).dy;
+        expect(
+          (topAfter - topBefore! - expectedScreenDelta).abs(),
+          lessThan(0.5),
+        );
+      },
+    );
+  });
+
+  group('Keep-alive selection safety across offscreen mutations', () {
+    testWidgets(
+      'Studio repro: inline math, links, kbd, sub/sup, footnotes, and WidgetSpans survive SelectAll + drag, offscreen _keepAliveBucket scroll (>3000px), Light/Dark toggle, and source updates',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final StringBuffer docBuf = StringBuffer(
+          '# Studio Selection Repro\n\n'
+          'Top rich line with \$x_i = 2i\$, [Dart](https://dart.dev), '
+          '<kbd>Cmd</kbd>, H~2~O, 2^3^, and note[^n1].\n\n'
+          '```dart\nfinal int code = 42;\n```\n\n',
+        );
+        for (int i = 1; i <= 120; i++) {
+          docBuf
+            ..writeln('## Section $i')
+            ..writeln()
+            ..writeln(
+              'Scrollable body $i with inline math \$y_$i = $i\$ and '
+              '<kbd>K$i</kbd> plus [Link $i](https://example.com/$i).',
+            )
+            ..writeln();
+        }
+        docBuf.writeln('[^n1]: Footnote detail text.');
+
+        String currentSource = docBuf.toString();
+        bool isDark = false;
+        final ScrollController scrollController = ScrollController();
+        final FocusNode focusNode = FocusNode();
+        addTearDown(scrollController.dispose);
+        addTearDown(focusNode.dispose);
+        late StateSetter rebuildHost;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuildHost = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: 800.0,
+                    height: 500.0,
+                    child: MarkdownTheme(
+                      data: isDark
+                          ? const MarkdownThemeData.dark()
+                          : const MarkdownThemeData.light(),
+                      child: MarkdownView(
+                        currentSource,
+                        options: const MarkdownOptions.extended(),
+                        scrollController: scrollController,
+                        focusNode: focusNode,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        // 1. Pointer drag selection on top rich line -> scroll >3000px into
+        // _keepAliveBucket -> toggle theme & update source -> scroll back.
+        final Finder topPara = find.textContaining('Top rich line');
+        expect(topPara, findsOneWidget);
+        final Rect topRect = tester.getRect(topPara);
+        final TestGesture drag = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(drag.removePointer);
+        await drag.down(topRect.centerLeft + const Offset(4.0, 0.0));
+        await tester.pump();
+        await drag.moveTo(topRect.centerRight - const Offset(4.0, 0.0));
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        scrollController.jumpTo(3600.0);
+        await tester.pump();
+        rebuildHost(() => isDark = true);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        rebuildHost(() => isDark = false);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        scrollController.jumpTo(0.0);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        // 2. SelectAll -> scroll >3000px into _keepAliveBucket -> toggle theme
+        // Light<->Dark and update source across multiple frames.
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        scrollController.jumpTo(3800.0);
+        await tester.pump();
+        rebuildHost(() => isDark = true);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        rebuildHost(() {
+          isDark = false;
+          currentSource = currentSource.replaceFirst(
+            'Top rich line with',
+            'Updated rich line with',
+          );
+        });
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        scrollController.jumpTo(0.0);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(find.textContaining('Updated rich line'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'copy order after deferred reorder preserves exact reading order for kept-alive WidgetSpan paragraphs',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        String? copiedClipboard;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                copiedClipboard = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        final StringBuffer docBuf = StringBuffer(
+          'before \$x^2\$ after\n\n'
+          'before <kbd>K</kbd> after\n\n',
+        );
+        for (int i = 0; i < 120; i++) {
+          docBuf.writeln(
+            'Spacer paragraph #$i pushing kept-alive blocks offscreen.\n',
+          );
+        }
+
+        double viewportWidth = 600.0;
+        final ScrollController scrollController = ScrollController();
+        final FocusNode focusNode = FocusNode();
+        addTearDown(scrollController.dispose);
+        addTearDown(focusNode.dispose);
+        late StateSetter rebuildHost;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuildHost = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: viewportWidth,
+                    height: 360.0,
+                    child: MarkdownView(
+                      docBuf.toString(),
+                      options: const MarkdownOptions.extended(),
+                      scrollController: scrollController,
+                      focusNode: focusNode,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        // Select across both "before $x^2$ after" and "before <kbd>K</kbd> after".
+        final Finder firstRich = find.byWidgetPredicate(
+          (Widget w) =>
+              w is MarkdownRichText &&
+              w.textSpan != null &&
+              w.textSpan!.toPlainText().contains('before') &&
+              w.textSpan!.toPlainText().contains('after'),
+        );
+        expect(firstRich, findsNWidgets(2));
+        final Rect firstRect = tester.getRect(firstRich.first);
+        final Rect secondRect = tester.getRect(firstRich.at(1));
+        final TestGesture drag = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(drag.removePointer);
+        await drag.down(firstRect.centerLeft + const Offset(2.0, 0.0));
+        await tester.pump();
+        await drag.moveTo(secondRect.centerRight - const Offset(2.0, 0.0));
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+
+        // Capture kept-alive RenderParagraph objects for the selected WidgetSpan
+        // paragraphs while still mounted.
+        final List<RenderParagraph> keptParagraphs = tester
+            .renderObjectList<RenderParagraph>(
+              find.byWidgetPredicate(
+                (Widget w) =>
+                    w is RichText && w.text.toPlainText().contains('before'),
+              ),
+            )
+            .toList(growable: false);
+        expect(keptParagraphs, isNotEmpty);
+
+        // Scroll offscreen (>3000px into _keepAliveBucket), dirty the kept-alive
+        // paragraphs via width change + explicit markNeedsLayout while offscreen.
+        scrollController.jumpTo(3600.0);
+        await tester.pump();
+        for (final RenderParagraph ro in keptParagraphs) {
+          ro.markNeedsLayout();
+        }
+        rebuildHost(() => viewportWidth = 420.0);
+        await tester.pump();
+        await tester.pump();
+
+        // Scroll back on-screen and copy WITHOUT another pointer drag.
+        scrollController.jumpTo(0.0);
+        await tester.pump();
+        await tester.pump();
+
+        focusNode.requestFocus();
+        await tester.pump();
+        copiedClipboard = null;
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(copiedClipboard, isNotNull);
+
+        final int firstBefore = copiedClipboard!.indexOf('before');
+        final int firstAfter = copiedClipboard!.indexOf('after');
+        expect(firstBefore, greaterThanOrEqualTo(0));
+        expect(firstAfter, greaterThan(firstBefore));
+
+        final int secondBefore = copiedClipboard!.indexOf('before', firstAfter);
+        final int kIdx = copiedClipboard!.indexOf('K', secondBefore);
+        final int secondAfter = copiedClipboard!.indexOf('after', secondBefore);
+        expect(secondBefore, greaterThan(firstAfter));
+        expect(kIdx, greaterThan(secondBefore));
+        expect(secondAfter, greaterThan(kIdx));
+      },
+    );
+
+    testWidgets(
+      'FastMarkdownText (useLeafRenderBox: true and false) kept-alive mutation, SelectAll, and SelectionContainer.disabled badges stay non-selectable',
+      (WidgetTester tester) async {
+        String? copiedClipboard;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                copiedClipboard = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        final ScrollController scrollController = ScrollController();
+        final FocusNode focusNode = FocusNode();
+        addTearDown(scrollController.dispose);
+        addTearDown(focusNode.dispose);
+
+        bool mutated = false;
+        late StateSetter rebuildHost;
+
+        await tester.pumpWidget(
+          StatefulBuilder(
+            builder: (BuildContext _, StateSetter setState) {
+              rebuildHost = setState;
+              return MaterialApp(
+                home: Scaffold(
+                  body: SizedBox(
+                    width: 600.0,
+                    height: 360.0,
+                    child: SelectionArea(
+                      focusNode: focusNode,
+                      child: CustomScrollView(
+                        controller: scrollController,
+                        slivers: <Widget>[
+                          SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (BuildContext context, int index) {
+                                final SelectionRegistrar? registrar =
+                                    SelectionContainer.maybeOf(context);
+                                if (index == 0) {
+                                  return Row(
+                                    children: <Widget>[
+                                      Expanded(
+                                        child: FastMarkdownText(
+                                          span: TextSpan(
+                                            text: mutated
+                                                ? 'Leaf mutated paragraph'
+                                                : 'Leaf initial paragraph',
+                                          ),
+                                          plainText: mutated
+                                              ? 'Leaf mutated paragraph'
+                                              : 'Leaf initial paragraph',
+                                          effectiveStyle: const TextStyle(
+                                            fontSize: 16.0,
+                                          ),
+                                          resolvedTextAlign: TextAlign.start,
+                                          resolvedTextDirection:
+                                              TextDirection.ltr,
+                                          resolvedTextScaler:
+                                              TextScaler.noScaling,
+                                          selectionRegistrar: registrar,
+                                          selectionColor: Colors.blue,
+                                          useLeafRenderBox: true,
+                                        ),
+                                      ),
+                                      const SelectionContainer.disabled(
+                                        child: Text('CHROME-BADGE'),
+                                      ),
+                                    ],
+                                  );
+                                }
+                                if (index == 1) {
+                                  return FastMarkdownText(
+                                    span: TextSpan(
+                                      text: mutated
+                                          ? 'Rich mutated link paragraph'
+                                          : 'Rich initial link paragraph',
+                                    ),
+                                    plainText: mutated
+                                        ? 'Rich mutated link paragraph'
+                                        : 'Rich initial link paragraph',
+                                    effectiveStyle: const TextStyle(
+                                      fontSize: 16.0,
+                                    ),
+                                    resolvedTextAlign: TextAlign.start,
+                                    resolvedTextDirection: TextDirection.ltr,
+                                    resolvedTextScaler: TextScaler.noScaling,
+                                    selectionRegistrar: registrar,
+                                    selectionColor: Colors.blue,
+                                    useLeafRenderBox: false,
+                                  );
+                                }
+                                return SizedBox(
+                                  height: 60.0,
+                                  child: Text('Filler item $index'),
+                                );
+                              },
+                              childCount: 80,
+                              addAutomaticKeepAlives: true,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+        await tester.pump();
+
+        // SelectAll, scroll top FastMarkdownText items offscreen (>3000px),
+        // mutate them while kept-alive, scroll back, and re-copy.
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+        expect(copiedClipboard, contains('Leaf initial paragraph'));
+        expect(copiedClipboard, contains('Rich initial link paragraph'));
+        expect(copiedClipboard, isNot(contains('CHROME-BADGE')));
+
+        scrollController.jumpTo(3500.0);
+        await tester.pump();
+        rebuildHost(() => mutated = true);
+        await tester.pump();
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        scrollController.jumpTo(0.0);
+        await tester.pump();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+        copiedClipboard = null;
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(copiedClipboard, contains('Leaf mutated paragraph'));
+        expect(copiedClipboard, contains('Rich mutated link paragraph'));
+        expect(copiedClipboard, isNot(contains('CHROME-BADGE')));
       },
     );
   });

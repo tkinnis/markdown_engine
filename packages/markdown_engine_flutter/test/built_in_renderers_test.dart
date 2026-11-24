@@ -810,7 +810,7 @@ End of document.
           return true;
         });
         final MarkdownThemeData resolvedTheme = MarkdownTheme.of(
-          tester.element(find.byType(Text).first),
+          tester.element(find.bySubtype<Text>().first),
         );
         expect(codeStyle, isNotNull);
         expect(codeStyle!.fontFamily, resolvedTheme.effectiveCodeFontFamily);

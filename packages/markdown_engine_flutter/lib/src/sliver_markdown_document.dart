@@ -1,4 +1,9 @@
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'dart:math' as math;
+import 'dart:typed_data' show Float64List;
+
+import 'package:flutter/foundation.dart'
+    show ValueListenable, precisionErrorTolerance;
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 
@@ -175,6 +180,7 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   final List<Widget?> _cachedInnerWidgets = <Widget?>[];
   final List<Widget?> _cachedTopWidgets = <Widget?>[];
   final List<bool> _cachedHasBottomSpacing = <bool>[];
+  final _MarkdownSliverExtentCache _extentCache = _MarkdownSliverExtentCache();
 
   @override
   void initState() {
@@ -208,6 +214,7 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
         _visibleBlocks = nextBlocks;
         _idToIndex = null;
         _cachedSliver = null;
+        _extentCache.resetForBlocks(_visibleBlocks.length);
         if (_cachedBlockNodes.length > _visibleBlocks.length) {
           _cachedBlockNodes.length = _visibleBlocks.length;
           _cachedInnerWidgets.length = _visibleBlocks.length;
@@ -216,12 +223,17 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
         }
       }
     }
+    if (oldWidget.trailingBlockSpacing != widget.trailingBlockSpacing) {
+      _extentCache.invalidateIndex(_visibleBlocks.length - 1);
+      _cachedSliver = null;
+    }
   }
 
   @override
   void dispose() {
     _cachedSliver = null;
     _clearPerBlockCache();
+    _extentCache.release();
     super.dispose();
   }
 
@@ -242,6 +254,7 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
     _idToIndex = null;
     _cachedSliver = null;
     _clearPerBlockCache();
+    _extentCache.resetForBlocks(_visibleBlocks.length);
   }
 
   static bool _blockListsIdentical(
@@ -310,13 +323,16 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
     if (_blockCacheContext != renderContext) {
       _clearPerBlockCache();
       _blockCacheContext = renderContext;
+      _extentCache.resetForBlocks(blocks.length);
     }
 
     final ValueListenable<MarkdownBlockNode> Function(MarkdownBlockNode block)?
     slotListenableFor = streamScope?.slotListenableFor;
     final double blockSpacing = resolvedTheme.blockSpacing;
 
-    final Widget listSliver = SliverList(
+    final Widget listSliver = _MarkdownSliverList(
+      extentCache: _extentCache,
+      cacheGeneration: _extentCache.generation,
       delegate: SliverChildBuilderDelegate(
         (BuildContext itemContext, int index) {
           final MarkdownBlockNode block = blocks[index];
@@ -549,5 +565,567 @@ final class _StreamingBlockSlotState extends State<_StreamingBlockSlot> {
       bottomSpacing: widget.bottomSpacing,
       prebuiltInner: inner,
     );
+  }
+}
+
+/// Reusable `Float64List`-backed measured-extent cache shared between
+/// [_SliverMarkdownDocumentState], [_MarkdownSliverList], and
+/// [_RenderMarkdownSliverList].
+final class _MarkdownSliverExtentCache {
+  Float64List _extents = Float64List(0);
+  int _blockCount = 0;
+  int _measuredCount = 0;
+  double _measuredSum = 0.0;
+  int _highestMeasuredIndex = -1;
+  double? _lastCrossAxisExtent;
+  int _generation = 0;
+
+  int get generation => _generation;
+
+  void resetForBlocks(int count) {
+    if (count <= 0) {
+      _blockCount = 0;
+      _measuredCount = 0;
+      _measuredSum = 0.0;
+      _highestMeasuredIndex = -1;
+      _generation += 1;
+      return;
+    }
+    if (_extents.length < count) {
+      _extents = Float64List(count);
+    }
+    _extents.fillRange(0, count, -1.0);
+    _blockCount = count;
+    _measuredCount = 0;
+    _measuredSum = 0.0;
+    _highestMeasuredIndex = -1;
+    _generation += 1;
+  }
+
+  void release() {
+    _extents = Float64List(0);
+    _blockCount = 0;
+    _measuredCount = 0;
+    _measuredSum = 0.0;
+    _highestMeasuredIndex = -1;
+    _lastCrossAxisExtent = null;
+    _generation += 1;
+  }
+
+  void invalidateIndex(int index) {
+    if (index < 0 || index >= _blockCount) {
+      return;
+    }
+    final double previous = _extents[index];
+    if (previous >= 0.0) {
+      _measuredCount -= 1;
+      _measuredSum = _measuredCount <= 0
+          ? 0.0
+          : math.max(0.0, _measuredSum - previous);
+      _extents[index] = -1.0;
+    }
+    _generation += 1;
+  }
+
+  void syncCrossAxisExtent(double crossAxisExtent) {
+    final double normalized = crossAxisExtent.isFinite ? crossAxisExtent : -1.0;
+    if (_lastCrossAxisExtent == normalized) {
+      return;
+    }
+    _lastCrossAxisExtent = normalized;
+    if (_measuredCount > 0) {
+      _extents.fillRange(0, _blockCount, -1.0);
+      _measuredCount = 0;
+      _measuredSum = 0.0;
+      _highestMeasuredIndex = -1;
+    }
+  }
+
+  void recordExtent(int index, double extent) {
+    if (index < 0 || index >= _blockCount || !extent.isFinite || extent < 0.0) {
+      return;
+    }
+    final double previous = _extents[index];
+    if (previous == extent) {
+      return;
+    }
+    if (previous >= 0.0) {
+      _measuredSum = math.max(0.0, _measuredSum + (extent - previous));
+    } else {
+      _measuredCount += 1;
+      _measuredSum += extent;
+    }
+    _extents[index] = extent;
+    if (index > _highestMeasuredIndex) {
+      _highestMeasuredIndex = index;
+    }
+  }
+
+  double? estimateMaxScrollOffset(
+    SliverConstraints? constraints,
+    int firstIndex,
+    int lastIndex,
+    double leadingScrollOffset,
+    double trailingScrollOffset,
+    int? childCount,
+  ) {
+    if (childCount == null || childCount <= 0) {
+      return null;
+    }
+    if (constraints != null) {
+      syncCrossAxisExtent(constraints.crossAxisExtent);
+    }
+    final double minBound = leadingScrollOffset < 0.0
+        ? trailingScrollOffset - leadingScrollOffset
+        : trailingScrollOffset;
+    if (lastIndex >= childCount - 1) {
+      return minBound;
+    }
+    final double rawFallbackAvg =
+        lastIndex >= firstIndex && trailingScrollOffset > leadingScrollOffset
+        ? (trailingScrollOffset - leadingScrollOffset) /
+              (lastIndex - firstIndex + 1)
+        : 0.0;
+    final double fallbackAvg = rawFallbackAvg.isFinite && rawFallbackAvg > 0.0
+        ? rawFallbackAvg
+        : 0.0;
+    final double avg = _measuredCount > 0
+        ? (_measuredSum <= 0.0 ? 0.0 : _measuredSum / _measuredCount)
+        : fallbackAvg;
+
+    double estimated = trailingScrollOffset;
+    final int tailStart = lastIndex + 1;
+    final int limit = math.min(childCount, _blockCount);
+    final int measuredEnd = math.min(limit, _highestMeasuredIndex + 1);
+    int unmeasuredCount = childCount - tailStart;
+    for (int i = tailStart; i < measuredEnd; i++) {
+      final double ext = _extents[i];
+      if (ext >= 0.0) {
+        estimated += ext;
+        unmeasuredCount -= 1;
+      }
+    }
+    if (unmeasuredCount > 0) {
+      estimated += unmeasuredCount * avg;
+    }
+    return estimated < minBound ? minBound : estimated;
+  }
+}
+
+final class _MarkdownSliverList extends SliverList {
+  const _MarkdownSliverList({
+    required super.delegate,
+    required this.extentCache,
+    required this.cacheGeneration,
+  });
+
+  final _MarkdownSliverExtentCache extentCache;
+  final int cacheGeneration;
+
+  @override
+  _RenderMarkdownSliverList createRenderObject(BuildContext context) {
+    return _RenderMarkdownSliverList(
+      extentCache,
+      cacheGeneration,
+      childManager: context as SliverMultiBoxAdaptorElement,
+    );
+  }
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderMarkdownSliverList renderObject,
+  ) {
+    renderObject.updateExtentCache(extentCache, cacheGeneration);
+  }
+
+  @override
+  double? estimateMaxScrollOffset(
+    SliverConstraints? constraints,
+    int firstIndex,
+    int lastIndex,
+    double leadingScrollOffset,
+    double trailingScrollOffset,
+  ) {
+    return extentCache.estimateMaxScrollOffset(
+      constraints,
+      firstIndex,
+      lastIndex,
+      leadingScrollOffset,
+      trailingScrollOffset,
+      delegate.estimatedChildCount,
+    );
+  }
+}
+
+/// [RenderSliverList] subclass that batches leading-child scroll-offset
+/// corrections when `scrollOffset < precisionErrorTolerance` (for example under
+/// fast upward ballistic flings) so [RenderViewport] never exceeds
+/// `maxLayoutCycles`, and records measured child extents into
+/// [_MarkdownSliverExtentCache].
+final class _RenderMarkdownSliverList extends RenderSliverList {
+  _RenderMarkdownSliverList(
+    this._extentCache,
+    this._cacheGeneration, {
+    required super.childManager,
+  });
+
+  _MarkdownSliverExtentCache _extentCache;
+  int _cacheGeneration;
+  int _consecutiveCorrectionCycles = 0;
+
+  void updateExtentCache(
+    _MarkdownSliverExtentCache extentCache,
+    int cacheGeneration,
+  ) {
+    final bool changed =
+        !identical(_extentCache, extentCache) ||
+        _cacheGeneration != cacheGeneration;
+    _extentCache = extentCache;
+    _cacheGeneration = cacheGeneration;
+    if (changed) {
+      markNeedsLayout();
+    }
+  }
+
+  @override
+  void detach() {
+    _consecutiveCorrectionCycles = 0;
+    super.detach();
+  }
+
+  double _computeBatchTarget(SliverConstraints constraints) {
+    if (_consecutiveCorrectionCycles >= 3) {
+      return double.infinity;
+    }
+    final double vp = constraints.viewportMainAxisExtent;
+    final double remPaint = constraints.remainingPaintExtent;
+    final double remCache = constraints.remainingCacheExtent;
+    final double overscroll = constraints.overlap < 0.0
+        ? -constraints.overlap
+        : 0.0;
+    final bool finiteMetrics =
+        vp.isFinite && remPaint.isFinite && remCache.isFinite;
+    final double needed;
+    if (finiteMetrics) {
+      final double unconsumedAbove = math.max(0.0, vp - remPaint);
+      final double distanceToTop = math.max(overscroll, unconsumedAbove);
+      final double rawTrailingCache =
+          (remCache - remPaint) + constraints.cacheOrigin;
+      final double trailingCache = (remCache == 0.0 && overscroll > 0.0)
+          ? 250.0
+          : math.max(0.0, rawTrailingCache);
+      final double remainingCacheMargin = math.max(
+        0.0,
+        trailingCache - constraints.scrollOffset,
+      );
+      needed = distanceToTop + remainingCacheMargin + 1.0;
+    } else {
+      needed = overscroll + 250.0;
+    }
+    final double scale = (1 << _consecutiveCorrectionCycles).toDouble();
+    final double floor = _consecutiveCorrectionCycles == 0
+        ? 0.0
+        : (vp.isFinite ? vp * scale : 250.0 * scale);
+    return math.max(needed * scale, floor);
+  }
+
+  void _recordMeasuredExtents() {
+    RenderBox? child = firstChild;
+    while (child != null) {
+      if (child.hasSize) {
+        _extentCache.recordExtent(indexOf(child), paintExtentOf(child));
+      }
+      child = childAfter(child);
+    }
+  }
+
+  @override
+  void performLayout() {
+    final SliverConstraints constraints = this.constraints;
+    _extentCache.syncCrossAxisExtent(constraints.crossAxisExtent);
+    childManager.didStartLayout();
+    childManager.setDidUnderflow(false);
+
+    final double scrollOffset =
+        constraints.scrollOffset + constraints.cacheOrigin;
+    assert(scrollOffset >= 0.0);
+    final double remainingExtent = constraints.remainingCacheExtent;
+    assert(remainingExtent >= 0.0);
+    final double targetEndScrollOffset = scrollOffset + remainingExtent;
+    final BoxConstraints childConstraints = constraints.asBoxConstraints();
+    int leadingGarbage = 0;
+    int trailingGarbage = 0;
+    bool reachedEnd = false;
+
+    if (firstChild == null) {
+      if (!addInitialChild()) {
+        _consecutiveCorrectionCycles = 0;
+        geometry = SliverGeometry.zero;
+        childManager.didFinishLayout();
+        return;
+      }
+    }
+
+    RenderBox? leadingChildWithLayout;
+    RenderBox? trailingChildWithLayout;
+
+    RenderBox? earliestUsefulChild = firstChild;
+
+    if (childScrollOffset(firstChild!) == null) {
+      int leadingChildrenWithoutLayoutOffset = 0;
+      while (earliestUsefulChild != null &&
+          childScrollOffset(earliestUsefulChild) == null) {
+        earliestUsefulChild = childAfter(earliestUsefulChild);
+        leadingChildrenWithoutLayoutOffset += 1;
+      }
+      collectGarbage(leadingChildrenWithoutLayoutOffset, 0);
+      if (firstChild == null) {
+        if (!addInitialChild()) {
+          _consecutiveCorrectionCycles = 0;
+          geometry = SliverGeometry.zero;
+          childManager.didFinishLayout();
+          return;
+        }
+      }
+    }
+
+    // Loop 1: Find the last child that is at or before scrollOffset.
+    double pendingCorrectionFromLoop1 = 0.0;
+    earliestUsefulChild = firstChild;
+    for (
+      double earliestScrollOffset = childScrollOffset(earliestUsefulChild!)!;
+      earliestScrollOffset > scrollOffset;
+      earliestScrollOffset = childScrollOffset(earliestUsefulChild)!
+    ) {
+      earliestUsefulChild = insertAndLayoutLeadingChild(
+        childConstraints,
+        parentUsesSize: true,
+      );
+      if (earliestUsefulChild == null) {
+        final SliverMultiBoxAdaptorParentData childParentData =
+            firstChild!.parentData! as SliverMultiBoxAdaptorParentData;
+        childParentData.layoutOffset = 0.0;
+
+        if (scrollOffset == 0.0) {
+          firstChild!.layout(childConstraints, parentUsesSize: true);
+          earliestUsefulChild = firstChild;
+          leadingChildWithLayout = earliestUsefulChild;
+          trailingChildWithLayout ??= earliestUsefulChild;
+          break;
+        } else {
+          _consecutiveCorrectionCycles += 1;
+          geometry = SliverGeometry(scrollOffsetCorrection: -scrollOffset);
+          return;
+        }
+      }
+
+      final double firstChildScrollOffset =
+          earliestScrollOffset - paintExtentOf(firstChild!);
+      if (firstChildScrollOffset < -precisionErrorTolerance) {
+        final SliverMultiBoxAdaptorParentData childParentData =
+            firstChild!.parentData! as SliverMultiBoxAdaptorParentData;
+        childParentData.layoutOffset = 0.0;
+        final double correction = -firstChildScrollOffset;
+        if (scrollOffset >= precisionErrorTolerance) {
+          _consecutiveCorrectionCycles += 1;
+          geometry = SliverGeometry(scrollOffsetCorrection: correction);
+          return;
+        }
+        // When scrollOffset < precisionErrorTolerance, continue into Loop 2 to
+        // batch leading prepends in the same layout pass.
+        pendingCorrectionFromLoop1 = correction;
+        leadingChildWithLayout = earliestUsefulChild;
+        trailingChildWithLayout ??= earliestUsefulChild;
+        break;
+      }
+
+      final SliverMultiBoxAdaptorParentData childParentData =
+          earliestUsefulChild.parentData! as SliverMultiBoxAdaptorParentData;
+      childParentData.layoutOffset = firstChildScrollOffset < 0.0
+          ? 0.0
+          : firstChildScrollOffset;
+      assert(earliestUsefulChild == firstChild);
+      leadingChildWithLayout = earliestUsefulChild;
+      trailingChildWithLayout ??= earliestUsefulChild;
+    }
+
+    assert(childScrollOffset(firstChild!)! > -precisionErrorTolerance);
+
+    // Loop 2: When scrollOffset is at zero, walk back to index 0 (or until the
+    // accumulated correction covers the overscroll and trailing cache margin).
+    if (scrollOffset < precisionErrorTolerance) {
+      final double batchTarget = _computeBatchTarget(constraints);
+      double totalCorrection = pendingCorrectionFromLoop1;
+      if (totalCorrection > precisionErrorTolerance &&
+          (indexOf(firstChild!) == 0 || totalCorrection >= batchTarget)) {
+        _consecutiveCorrectionCycles += 1;
+        geometry = SliverGeometry(scrollOffsetCorrection: totalCorrection);
+        return;
+      }
+      while (indexOf(firstChild!) > 0) {
+        final double earliestScrollOffset = childScrollOffset(firstChild!)!;
+        final RenderBox? leading = insertAndLayoutLeadingChild(
+          childConstraints,
+          parentUsesSize: true,
+        );
+        if (leading == null) {
+          break;
+        }
+        earliestUsefulChild = leading;
+        final double firstChildScrollOffset =
+            earliestScrollOffset - paintExtentOf(firstChild!);
+        final SliverMultiBoxAdaptorParentData childParentData =
+            firstChild!.parentData! as SliverMultiBoxAdaptorParentData;
+        if (firstChildScrollOffset < -precisionErrorTolerance) {
+          totalCorrection += -firstChildScrollOffset;
+          childParentData.layoutOffset = 0.0;
+        } else {
+          childParentData.layoutOffset = firstChildScrollOffset < 0.0
+              ? 0.0
+              : firstChildScrollOffset;
+          leadingChildWithLayout = earliestUsefulChild;
+          trailingChildWithLayout ??= earliestUsefulChild;
+        }
+        if (totalCorrection > precisionErrorTolerance &&
+            (indexOf(firstChild!) == 0 || totalCorrection >= batchTarget)) {
+          _consecutiveCorrectionCycles += 1;
+          geometry = SliverGeometry(scrollOffsetCorrection: totalCorrection);
+          return;
+        }
+      }
+      if (totalCorrection > precisionErrorTolerance) {
+        _consecutiveCorrectionCycles += 1;
+        geometry = SliverGeometry(scrollOffsetCorrection: totalCorrection);
+        return;
+      }
+    }
+
+    assert(earliestUsefulChild == firstChild);
+    assert(childScrollOffset(earliestUsefulChild!)! <= scrollOffset);
+
+    if (leadingChildWithLayout == null) {
+      earliestUsefulChild!.layout(childConstraints, parentUsesSize: true);
+      leadingChildWithLayout = earliestUsefulChild;
+      trailingChildWithLayout = earliestUsefulChild;
+    }
+    trailingChildWithLayout ??= firstChild;
+
+    bool inLayoutRange = true;
+    RenderBox? child = earliestUsefulChild;
+    int index = indexOf(child!);
+    double endScrollOffset = childScrollOffset(child)! + paintExtentOf(child);
+    bool advance() {
+      assert(child != null);
+      if (child == trailingChildWithLayout) {
+        inLayoutRange = false;
+      }
+      child = childAfter(child!);
+      if (child == null) {
+        inLayoutRange = false;
+      }
+      index += 1;
+      if (!inLayoutRange) {
+        if (child == null || indexOf(child!) != index) {
+          child = insertAndLayoutChild(
+            childConstraints,
+            after: trailingChildWithLayout,
+            parentUsesSize: true,
+          );
+          if (child == null) {
+            return false;
+          }
+        } else {
+          child!.layout(childConstraints, parentUsesSize: true);
+        }
+        trailingChildWithLayout = child;
+      }
+      assert(child != null);
+      final SliverMultiBoxAdaptorParentData childParentData =
+          child!.parentData! as SliverMultiBoxAdaptorParentData;
+      childParentData.layoutOffset = endScrollOffset;
+      assert(childParentData.index == index);
+      endScrollOffset = childScrollOffset(child!)! + paintExtentOf(child!);
+      return true;
+    }
+
+    while (endScrollOffset < scrollOffset) {
+      leadingGarbage += 1;
+      if (!advance()) {
+        assert(leadingGarbage == childCount);
+        assert(child == null);
+        collectGarbage(leadingGarbage - 1, 0);
+        assert(firstChild == lastChild);
+        _recordMeasuredExtents();
+        final double extent =
+            childScrollOffset(lastChild!)! + paintExtentOf(lastChild!);
+        _consecutiveCorrectionCycles = 0;
+        geometry = SliverGeometry(scrollExtent: extent, maxPaintExtent: extent);
+        return;
+      }
+    }
+
+    while (endScrollOffset < targetEndScrollOffset) {
+      if (!advance()) {
+        reachedEnd = true;
+        break;
+      }
+    }
+
+    if (child != null) {
+      child = childAfter(child!);
+      while (child != null) {
+        trailingGarbage += 1;
+        child = childAfter(child!);
+      }
+    }
+
+    collectGarbage(leadingGarbage, trailingGarbage);
+    _recordMeasuredExtents();
+
+    assert(debugAssertChildListIsNonEmptyAndContiguous());
+    final double estimatedMaxScrollOffset;
+    if (reachedEnd) {
+      estimatedMaxScrollOffset = endScrollOffset;
+    } else {
+      estimatedMaxScrollOffset = childManager.estimateMaxScrollOffset(
+        constraints,
+        firstIndex: indexOf(firstChild!),
+        lastIndex: indexOf(lastChild!),
+        leadingScrollOffset: childScrollOffset(firstChild!),
+        trailingScrollOffset: endScrollOffset,
+      );
+      assert(
+        estimatedMaxScrollOffset >=
+            endScrollOffset - childScrollOffset(firstChild!)!,
+      );
+    }
+    final double paintExtent = calculatePaintOffset(
+      constraints,
+      from: childScrollOffset(firstChild!)!,
+      to: endScrollOffset,
+    );
+    final double cacheExtent = calculateCacheOffset(
+      constraints,
+      from: childScrollOffset(firstChild!)!,
+      to: endScrollOffset,
+    );
+    final double targetEndScrollOffsetForPaint =
+        constraints.scrollOffset + constraints.remainingPaintExtent;
+    _consecutiveCorrectionCycles = 0;
+    geometry = SliverGeometry(
+      scrollExtent: estimatedMaxScrollOffset,
+      paintExtent: paintExtent,
+      cacheExtent: cacheExtent,
+      maxPaintExtent: estimatedMaxScrollOffset,
+      hasVisualOverflow:
+          endScrollOffset > targetEndScrollOffsetForPaint ||
+          constraints.scrollOffset > 0.0,
+    );
+
+    if (estimatedMaxScrollOffset == endScrollOffset) {
+      childManager.setDidUnderflow(true);
+    }
+    childManager.didFinishLayout();
   }
 }

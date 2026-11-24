@@ -46,119 +46,135 @@ void main(List<String> args) {
 
   int sink = 0;
 
-  // 1. Small doc (~1 KB) parse + HTML.
-  final LatencyStats smallEngine = measureLatency(
-    label: 'markdown_engine small parse+HTML',
-    payloadBytes: smallBytes,
-    warmupSamples: 5,
-    samples: 25,
-    batchIterations: 400,
-    operation: () {
-      sink ^= engine.parse(smallDoc).toHtml().length;
-    },
+  // 1. Small doc (~1 KB) parse + HTML (interleaved).
+  final List<LatencyStats> smallStats = measureInterleavedLatencies(
+    warmupRounds: 6,
+    timedRounds: 25,
+    specs: <InterleavedBenchmarkSpec>[
+      InterleavedBenchmarkSpec(
+        label: 'markdown_engine small parse+HTML',
+        payloadBytes: smallBytes,
+        batchIterations: 400,
+        operation: () {
+          sink ^= engine.parse(smallDoc).toHtml().length;
+        },
+      ),
+      InterleavedBenchmarkSpec(
+        label: 'package:markdown small parse+HTML',
+        payloadBytes: smallBytes,
+        batchIterations: 400,
+        operation: () {
+          sink ^= md
+              .markdownToHtml(
+                smallDoc,
+                extensionSet: md.ExtensionSet.gitHubFlavored,
+                enableTagfilter: true,
+              )
+              .length;
+        },
+      ),
+    ],
   );
-  final LatencyStats smallPkgMarkdown = measureLatency(
-    label: 'package:markdown small parse+HTML',
-    payloadBytes: smallBytes,
-    warmupSamples: 5,
-    samples: 25,
-    batchIterations: 400,
-    operation: () {
-      sink ^= md
-          .markdownToHtml(
-            smallDoc,
-            extensionSet: md.ExtensionSet.gitHubFlavored,
-            enableTagfilter: true,
-          )
-          .length;
-    },
-  );
+  final LatencyStats smallEngine = smallStats[0];
+  final LatencyStats smallPkgMarkdown = smallStats[1];
 
-  // 2. Medium doc (~25 KB) parse + HTML.
-  final LatencyStats mediumEngine = measureLatency(
-    label: 'markdown_engine medium parse+HTML',
-    payloadBytes: mediumBytes,
-    warmupSamples: 4,
-    samples: 25,
-    batchIterations: 25,
-    operation: () {
-      sink ^= engine.parse(mediumDoc).toHtml().length;
-    },
+  // 2. Medium doc (~25 KB) parse + HTML (interleaved).
+  final List<LatencyStats> mediumStats = measureInterleavedLatencies(
+    warmupRounds: 6,
+    timedRounds: 25,
+    specs: <InterleavedBenchmarkSpec>[
+      InterleavedBenchmarkSpec(
+        label: 'markdown_engine medium parse+HTML',
+        payloadBytes: mediumBytes,
+        batchIterations: 25,
+        operation: () {
+          sink ^= engine.parse(mediumDoc).toHtml().length;
+        },
+      ),
+      InterleavedBenchmarkSpec(
+        label: 'package:markdown medium parse+HTML',
+        payloadBytes: mediumBytes,
+        batchIterations: 25,
+        operation: () {
+          sink ^= md
+              .markdownToHtml(
+                mediumDoc,
+                extensionSet: md.ExtensionSet.gitHubFlavored,
+                enableTagfilter: true,
+              )
+              .length;
+        },
+      ),
+    ],
   );
-  final LatencyStats mediumPkgMarkdown = measureLatency(
-    label: 'package:markdown medium parse+HTML',
-    payloadBytes: mediumBytes,
-    warmupSamples: 4,
-    samples: 25,
-    batchIterations: 25,
-    operation: () {
-      sink ^= md
-          .markdownToHtml(
-            mediumDoc,
-            extensionSet: md.ExtensionSet.gitHubFlavored,
-            enableTagfilter: true,
-          )
-          .length;
-    },
-  );
+  final LatencyStats mediumEngine = mediumStats[0];
+  final LatencyStats mediumPkgMarkdown = mediumStats[1];
 
-  // 3. Large doc (5,000 lines, ~173 KB) AST parse and parse+HTML.
-  final LatencyStats largeEngineAst = measureLatency(
-    label: 'markdown_engine large AST parse',
-    payloadBytes: largeBytes,
-    warmupSamples: 3,
-    samples: 21,
-    batchIterations: 4,
-    operation: () {
-      sink ^= engine.parse(largeFixture.baseSource).blocks.length;
-    },
-  );
-  final LatencyStats largePkgMarkdownAst = measureLatency(
-    label: 'package:markdown large AST parse',
-    payloadBytes: largeBytes,
-    warmupSamples: 3,
-    samples: 21,
-    batchIterations: 4,
-    operation: () {
-      final md.Document doc = md.Document(
-        extensionSet: md.ExtensionSet.gitHubFlavored,
-      );
-      sink ^= doc.parse(largeFixture.baseSource).length;
-    },
-  );
-
-  final LatencyStats largeEngineHtml = measureLatency(
-    label: 'markdown_engine large parse+HTML',
-    payloadBytes: largeBytes,
-    warmupSamples: 3,
-    samples: 21,
-    batchIterations: 4,
-    operation: () {
-      sink ^= engine.parse(largeFixture.baseSource).toHtml().length;
-    },
-  );
-  final LatencyStats largePkgMarkdownHtml = measureLatency(
-    label: 'package:markdown large parse+HTML',
-    payloadBytes: largeBytes,
-    warmupSamples: 3,
-    samples: 21,
-    batchIterations: 4,
-    operation: () {
-      sink ^= md
-          .markdownToHtml(
-            largeFixture.baseSource,
+  // 3. Large doc (5,000 lines, ~173 KB) AST parse and parse+HTML (interleaved).
+  final List<LatencyStats> largeAstStats = measureInterleavedLatencies(
+    warmupRounds: 5,
+    timedRounds: 21,
+    specs: <InterleavedBenchmarkSpec>[
+      InterleavedBenchmarkSpec(
+        label: 'markdown_engine large AST parse',
+        payloadBytes: largeBytes,
+        batchIterations: 4,
+        operation: () {
+          sink ^= engine.parse(largeFixture.baseSource).blocks.length;
+        },
+      ),
+      InterleavedBenchmarkSpec(
+        label: 'package:markdown large AST parse',
+        payloadBytes: largeBytes,
+        batchIterations: 4,
+        operation: () {
+          final md.Document doc = md.Document(
             extensionSet: md.ExtensionSet.gitHubFlavored,
-            enableTagfilter: true,
-          )
-          .length;
-    },
+          );
+          sink ^= doc.parse(largeFixture.baseSource).length;
+        },
+      ),
+    ],
   );
+  final LatencyStats largeEngineAst = largeAstStats[0];
+  final LatencyStats largePkgMarkdownAst = largeAstStats[1];
+
+  final List<LatencyStats> largeHtmlStats = measureInterleavedLatencies(
+    warmupRounds: 5,
+    timedRounds: 21,
+    specs: <InterleavedBenchmarkSpec>[
+      InterleavedBenchmarkSpec(
+        label: 'markdown_engine large parse+HTML',
+        payloadBytes: largeBytes,
+        batchIterations: 4,
+        operation: () {
+          sink ^= engine.parse(largeFixture.baseSource).toHtml().length;
+        },
+      ),
+      InterleavedBenchmarkSpec(
+        label: 'package:markdown large parse+HTML',
+        payloadBytes: largeBytes,
+        batchIterations: 4,
+        operation: () {
+          sink ^= md
+              .markdownToHtml(
+                largeFixture.baseSource,
+                extensionSet: md.ExtensionSet.gitHubFlavored,
+                enableTagfilter: true,
+              )
+              .length;
+        },
+      ),
+    ],
+  );
+  final LatencyStats largeEngineHtml = largeHtmlStats[0];
+  final LatencyStats largePkgMarkdownHtml = largeHtmlStats[1];
 
   // 4. Incremental 1-paragraph edit on 5,000 lines vs full re-parse.
   final LatencyStats incrementalEngine = measureLatency(
     label: 'markdown_engine incremental edit',
     payloadBytes: largeBytes,
-    warmupSamples: 4,
+    warmupSamples: 6,
     samples: 25,
     batchIterations: 25,
     operation: () {
@@ -173,45 +189,49 @@ void main(List<String> args) {
     },
   );
 
-  // 5. 50-chunk LLM stream (incremental tail vs full re-parse per chunk).
+  // 5. 50-chunk LLM stream (incremental tail vs full re-parse, interleaved).
   final StreamingMarkdownController streamController =
       StreamingMarkdownController(engine: engine, options: gfmOptions);
   final int chunkCount = streamingFixture.chunks.length;
-  final LatencyStats streamEngine = measureLatency(
-    label: 'markdown_engine 50-chunk stream (per-chunk)',
-    payloadBytes: streamBytes,
-    warmupSamples: 4,
-    samples: 25,
-    batchIterations: 15,
-    unitDivisor: chunkCount,
-    throughputBytesPerUnit: streamBytes / chunkCount,
-    operation: () {
-      streamController.reset();
-      for (final String chunk in streamingFixture.chunks) {
-        sink ^= streamController.append(chunk).blocks.length;
-      }
-    },
+  final List<LatencyStats> streamStats = measureInterleavedLatencies(
+    warmupRounds: 6,
+    timedRounds: 25,
+    specs: <InterleavedBenchmarkSpec>[
+      InterleavedBenchmarkSpec(
+        label: 'markdown_engine 50-chunk stream (per-chunk)',
+        payloadBytes: streamBytes,
+        batchIterations: 15,
+        unitDivisor: chunkCount,
+        throughputBytesPerUnit: streamBytes / chunkCount,
+        operation: () {
+          streamController.reset();
+          for (final String chunk in streamingFixture.chunks) {
+            sink ^= streamController.append(chunk).blocks.length;
+          }
+        },
+      ),
+      InterleavedBenchmarkSpec(
+        label: 'package:markdown 50-chunk full-reparse (per-chunk)',
+        payloadBytes: streamBytes,
+        batchIterations: 5,
+        unitDivisor: chunkCount,
+        throughputBytesPerUnit: streamBytes / chunkCount,
+        operation: () {
+          final StringBuffer accumulated = StringBuffer();
+          for (final String chunk in streamingFixture.chunks) {
+            accumulated.write(chunk);
+            final md.Document doc = md.Document(
+              extensionSet: md.ExtensionSet.gitHubFlavored,
+            );
+            sink ^= doc.parse(accumulated.toString()).length;
+          }
+        },
+      ),
+    ],
   );
-
-  final LatencyStats streamPkgMarkdown = measureLatency(
-    label: 'package:markdown 50-chunk full-reparse (per-chunk)',
-    payloadBytes: streamBytes,
-    warmupSamples: 3,
-    samples: 21,
-    batchIterations: 5,
-    unitDivisor: chunkCount,
-    throughputBytesPerUnit: streamBytes / chunkCount,
-    operation: () {
-      final StringBuffer accumulated = StringBuffer();
-      for (final String chunk in streamingFixture.chunks) {
-        accumulated.write(chunk);
-        final md.Document doc = md.Document(
-          extensionSet: md.ExtensionSet.gitHubFlavored,
-        );
-        sink ^= doc.parse(accumulated.toString()).length;
-      }
-    },
-  );
+  final LatencyStats streamEngine = streamStats[0];
+  final LatencyStats streamPkgMarkdown = streamStats[1];
+  streamController.dispose();
 
   // 6. Adversarial inputs (safe try/catch for StackOverflowError or Errors).
   final List<_AdversarialComparison> adversarialResults =
@@ -257,6 +277,7 @@ void main(List<String> args) {
   }
 
   final Map<String, Object?> report = <String, Object?>{
+    'sampling': 'interleaved',
     'host': host.toJson(),
     'payloads': <String, Object?>{
       'smallBytes': smallBytes,
@@ -328,69 +349,99 @@ _AdversarialComparison _runAdversarialCase({
   required MarkdownOptions engineOptions,
 }) {
   final int inputBytes = utf8.encode(input).length;
-  final _AdversarialOutcome engineOutcome = _measureSingleProtected(
-    operation: () =>
-        engine.parse(input, options: engineOptions).toHtml().length,
-  );
-  final _AdversarialOutcome pkgOutcome = _measureSingleProtected(
-    operation: () => md
-        .markdownToHtml(
-          input,
-          extensionSet: md.ExtensionSet.gitHubFlavored,
-          enableTagfilter: true,
-        )
-        .length,
-  );
+  int engineOp() => engine.parse(input, options: engineOptions).toHtml().length;
+  int pkgOp() => md
+      .markdownToHtml(
+        input,
+        extensionSet: md.ExtensionSet.gitHubFlavored,
+        enableTagfilter: true,
+      )
+      .length;
+
+  final List<({String status, double elapsedUs, int outputLength})> firstRound =
+      <({String status, double elapsedUs, int outputLength})>[
+        _runSingleProtected(engineOp),
+        _runSingleProtected(pkgOp),
+      ];
+
+  final List<List<double>> samplesUs = <List<double>>[
+    <double>[firstRound[0].elapsedUs],
+    <double>[firstRound[1].elapsedUs],
+  ];
+  final bool engineFast =
+      firstRound[0].status == 'ok' && firstRound[0].elapsedUs < 25000.0;
+  final bool pkgFast =
+      firstRound[1].status == 'ok' && firstRound[1].elapsedUs < 25000.0;
+
+  if (engineFast || pkgFast) {
+    for (int round = 1; round <= 4; round++) {
+      for (final int idx in interleaveRoundIndices(2, round)) {
+        if (idx == 0 && engineFast) {
+          final ({String status, double elapsedUs, int outputLength}) res =
+              _runSingleProtected(engineOp);
+          if (res.status == 'ok') {
+            samplesUs[0].add(res.elapsedUs);
+          }
+        } else if (idx == 1 && pkgFast) {
+          final ({String status, double elapsedUs, int outputLength}) res =
+              _runSingleProtected(pkgOp);
+          if (res.status == 'ok') {
+            samplesUs[1].add(res.elapsedUs);
+          }
+        }
+      }
+    }
+  }
+
+  _AdversarialOutcome toOutcome(int idx) {
+    final ({String status, double elapsedUs, int outputLength}) initial =
+        firstRound[idx];
+    if (initial.status != 'ok') {
+      return _AdversarialOutcome(
+        status: initial.status,
+        elapsedUs: initial.elapsedUs,
+        outputLength: 0,
+      );
+    }
+    final SampleSummary summary = summarizeSamples(samplesUs[idx]);
+    return _AdversarialOutcome(
+      status: 'ok',
+      elapsedUs: summary.median,
+      outputLength: initial.outputLength,
+    );
+  }
 
   return _AdversarialComparison(
     id: id,
     label: label,
     inputBytes: inputBytes,
-    markdownEngine: engineOutcome,
-    packageMarkdown: pkgOutcome,
+    markdownEngine: toOutcome(0),
+    packageMarkdown: toOutcome(1),
   );
 }
 
-_AdversarialOutcome _measureSingleProtected({
-  required int Function() operation,
-}) {
+({String status, double elapsedUs, int outputLength}) _runSingleProtected(
+  int Function() operation,
+) {
   final Stopwatch sw = Stopwatch()..start();
   try {
     final int outputLen = operation();
     sw.stop();
-    // Run 4 additional samples when fast (< 25 ms) to reduce cold-start jitter.
-    if (sw.elapsedMicroseconds < 25000) {
-      final List<double> samplesUs = <double>[
-        sw.elapsedMicroseconds.toDouble(),
-      ];
-      for (int i = 0; i < 4; i++) {
-        final Stopwatch iterSw = Stopwatch()..start();
-        operation();
-        iterSw.stop();
-        samplesUs.add(iterSw.elapsedMicroseconds.toDouble());
-      }
-      samplesUs.sort();
-      return _AdversarialOutcome(
-        status: 'ok',
-        elapsedUs: samplesUs[samplesUs.length ~/ 2],
-        outputLength: outputLen,
-      );
-    }
-    return _AdversarialOutcome(
+    return (
       status: 'ok',
       elapsedUs: sw.elapsedMicroseconds.toDouble(),
       outputLength: outputLen,
     );
   } on StackOverflowError {
     sw.stop();
-    return _AdversarialOutcome(
+    return (
       status: 'StackOverflowError',
       elapsedUs: sw.elapsedMicroseconds.toDouble(),
       outputLength: 0,
     );
   } on Object catch (error) {
     sw.stop();
-    return _AdversarialOutcome(
+    return (
       status: 'Error(${error.runtimeType})',
       elapsedUs: sw.elapsedMicroseconds.toDouble(),
       outputLength: 0,
@@ -559,7 +610,7 @@ void _printReport({
   );
   stdout.writeln();
 
-  stdout.writeln('--- Throughput & Latency (p50 median) ---');
+  stdout.writeln('--- Throughput & Latency (interleaved p50 median / p95) ---');
   _printPair(
     'Small (~1 KB, ${formatBytes(smallBytes)}) parse+HTML',
     smallEngine,
@@ -590,7 +641,8 @@ void _printReport({
   stdout.writeln(
     'Incremental 1-paragraph edit ($largeLines lines): '
     'markdown_engine=${formatMicroseconds(incrementalEngine.medianUs)} '
-    '(reused ${verifiedInc.reusedBlockCount}/${verifiedInc.document.blocks.length} blocks, '
+    '(p95 ${formatMicroseconds(incrementalEngine.p95Us)}, '
+    'reused ${verifiedInc.reusedBlockCount}/${verifiedInc.document.blocks.length} blocks, '
     '${incVsEngineFull.toStringAsFixed(2)}x vs markdown_engine full parse, '
     '${incVsPkgFull.toStringAsFixed(2)}x vs package:markdown full parse '
     '${formatMicroseconds(largePkgMarkdownAst.medianUs)})',
@@ -602,9 +654,11 @@ void _printReport({
   stdout.writeln(
     'Streaming $chunkCount chunks (${formatBytes(streamBytes)}): '
     'markdown_engine=${formatMicroseconds(streamEngine.medianUs)}/chunk '
-    '(${formatMicroseconds(streamEngine.medianUs * chunkCount)} total) vs '
+    '(p95 ${formatMicroseconds(streamEngine.p95Us)}, '
+    '${formatMicroseconds(streamEngine.medianUs * chunkCount)} total) vs '
     'package:markdown full re-parse=${formatMicroseconds(streamPkgMarkdown.medianUs)}/chunk '
-    '(${formatMicroseconds(streamPkgMarkdown.medianUs * chunkCount)} total) '
+    '(p95 ${formatMicroseconds(streamPkgMarkdown.p95Us)}, '
+    '${formatMicroseconds(streamPkgMarkdown.medianUs * chunkCount)} total) '
     '[${streamSpeedup.toStringAsFixed(2)}x faster]',
   );
   stdout.writeln();
@@ -652,9 +706,11 @@ void _printPair(String title, LatencyStats engineStats, LatencyStats pkgStats) {
   stdout.writeln(
     '  $title: '
     'markdown_engine=${formatMicroseconds(engineStats.medianUs)} '
-    '(${engineStats.throughputMbPerSec.toStringAsFixed(2)} MB/s) | '
+    '(p95 ${formatMicroseconds(engineStats.p95Us)}, '
+    '${engineStats.throughputMbPerSec.toStringAsFixed(2)} MB/s) | '
     'package:markdown=${formatMicroseconds(pkgStats.medianUs)} '
-    '(${pkgStats.throughputMbPerSec.toStringAsFixed(2)} MB/s) '
+    '(p95 ${formatMicroseconds(pkgStats.p95Us)}, '
+    '${pkgStats.throughputMbPerSec.toStringAsFixed(2)} MB/s) '
     '[$comparisonLabel]',
   );
 }

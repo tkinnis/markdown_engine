@@ -311,8 +311,8 @@ final class _StudioSyntaxCodeBlockState extends State<_StudioSyntaxCodeBlock> {
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.all(12.0),
             child: trimmed.length > 20000
-                ? Text(trimmed, style: baseCodeStyle)
-                : Text.rich(
+                ? MarkdownRichText(trimmed, style: baseCodeStyle)
+                : MarkdownRichText.rich(
                     TextSpan(
                       style: baseCodeStyle,
                       children: _highlightCodeSpans(trimmed, theme),

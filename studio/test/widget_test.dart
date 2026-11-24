@@ -446,7 +446,7 @@ void main() {
 
     // Locate the TapGestureRecognizer attached to the safe link span.
     bool tapped = false;
-    for (final Element element in find.byType(RichText).evaluate()) {
+    for (final Element element in find.bySubtype<RichText>().evaluate()) {
       final RichText richText = element.widget as RichText;
       richText.text.visitChildren((InlineSpan span) {
         if (span is TextSpan &&
@@ -553,6 +553,152 @@ void main() {
         ),
         findsWidgets,
       );
+    },
+  );
+
+  testWidgets(
+    '500-Section Stress outline jump, upward ballistic fling/overscroll, active selection across math & code block, theme toggle, and preset switch throw zero exceptions',
+    (WidgetTester tester) async {
+      _setDesktopViewport(tester);
+      await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+      addTearDown(() async {
+        MarkdownBuiltInRenderers.clearCaches();
+        await MarkdownBuiltInRenderers.dispose();
+      });
+
+      await tester.pumpWidget(const MarkdownStudioApp());
+      await tester.pumpAndSettle();
+
+      // 1. Scroll to inline math & Dart code block on Showcase, select across
+      // them, scroll past into _keepAliveBucket, toggle Light/Dark theme, and
+      // switch to 500-Section Virtualization Stress.
+      final Finder previewScrollable = find
+          .descendant(
+            of: find.byType(MarkdownView),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      final ScrollableState previewState = tester.state<ScrollableState>(
+        previewScrollable,
+      );
+      final Finder showcaseMath = find.descendant(
+        of: find.byType(MarkdownView),
+        matching: find.byWidgetPredicate(
+          (Widget w) => '${w.runtimeType}' == 'TexMath',
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.textContaining('Display equations render natively'),
+        ),
+        250.0,
+        scrollable: previewScrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(showcaseMath, findsWidgets);
+
+      final Element previewSelectableElement = tester.element(
+        find
+            .descendant(
+              of: find.byType(MarkdownView),
+              matching: find.byType(SelectionContainer),
+            )
+            .first,
+      );
+      Focus.of(previewSelectableElement).requestFocus();
+      await tester.pump();
+      Actions.invoke(
+        previewSelectableElement,
+        const SelectAllTextIntent(SelectionChangedCause.keyboard),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+
+      // Scroll away from inline math into the bottom of Showcase (and
+      // toggle Studio Light/Dark theme) with zero exceptions.
+      previewState.position.jumpTo(previewState.position.maxScrollExtent);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('studio-theme-toggle')));
+      await tester.pump();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.byKey(const Key('studio-theme-toggle')));
+      await tester.pump();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+
+      // 2. Switch to 500-Section Virtualization Stress preset.
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('500-Section Virtualization Stress').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // Outline jump to a deep section, then upward ballistic fling &
+      // negative overscroll (-503.977) back to top.
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey<String>('outline-item-section-25-25')),
+        200.0,
+        scrollable: find.descendant(
+          of: find.byKey(const Key('studio-outline-list')),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey<String>('outline-item-section-25-25')),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      await tester.fling(previewScrollable, const Offset(0.0, 2600.0), 7500.0);
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      previewState.position.jumpTo(1600.0);
+      await tester.pump();
+      previewState.position.jumpTo(-503.977);
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // 3. Drag selection over top rich inline-math paragraph, scroll >3000px
+      // offscreen, toggle theme, and switch to Kitchen Sink preset.
+      final Finder stressMathPara = find.byWidgetPredicate(
+        (Widget w) =>
+            w is MarkdownRichText &&
+            w.textSpan != null &&
+            w.textSpan!.toPlainText().contains('Paragraph 1 exercises'),
+      );
+      expect(stressMathPara, findsOneWidget);
+      final Rect paraRect = tester.getRect(stressMathPara);
+      final TestGesture drag = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+      );
+      addTearDown(drag.removePointer);
+      await drag.down(paraRect.centerLeft + const Offset(4.0, 0.0));
+      await tester.pump();
+      await drag.moveTo(paraRect.centerRight - const Offset(4.0, 0.0));
+      await tester.pump();
+      await drag.up();
+      await tester.pump();
+
+      previewState.position.jumpTo(3600.0);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('studio-theme-toggle')));
+      await tester.pump();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.byKey(const Key('studio-preset-dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Kitchen Sink (Visual Parity)').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
     },
   );
 }

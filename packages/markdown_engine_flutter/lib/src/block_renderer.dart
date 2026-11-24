@@ -482,7 +482,7 @@ Widget _buildFrontmatterCard(FrontmatterNode node, MarkdownThemeData theme) {
                   color: theme.accent.withValues(alpha: 0.14),
                   borderRadius: BorderRadius.circular(4.0),
                 ),
-                child: Text(
+                child: MarkdownRichText(
                   formatLabel,
                   style: TextStyle(
                     color: theme.accent,
@@ -494,7 +494,7 @@ Widget _buildFrontmatterCard(FrontmatterNode node, MarkdownThemeData theme) {
                 ),
               ),
               const SizedBox(width: 8.0),
-              Text(
+              MarkdownRichText(
                 'Frontmatter',
                 style: TextStyle(
                   color: theme.muted,
@@ -519,7 +519,7 @@ Widget _buildFrontmatterCard(FrontmatterNode node, MarkdownThemeData theme) {
               ],
             )
           else if (node.raw.trim().isNotEmpty)
-            Text(
+            MarkdownRichText(
               node.raw.trim(),
               style: theme.codeTextStyle(
                 fontSizeOverride: theme.fontSize * 0.82,
@@ -554,7 +554,7 @@ Widget _buildFrontmatterRow(
       runSpacing: 4.0,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: <Widget>[
-        Text('$key:', style: keyStyle),
+        MarkdownRichText('$key:', style: keyStyle),
         for (final Object? item in value)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 7.0, vertical: 2.0),
@@ -562,7 +562,7 @@ Widget _buildFrontmatterRow(
               color: theme.border.withValues(alpha: 0.45),
               borderRadius: BorderRadius.circular(999.0),
             ),
-            child: Text('$item', style: valStyle),
+            child: MarkdownRichText('$item', style: valStyle),
           ),
       ],
     );
@@ -571,8 +571,8 @@ Widget _buildFrontmatterRow(
   return Row(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: <Widget>[
-      Text('$key: ', style: keyStyle),
-      Expanded(child: Text('${value ?? ''}', style: valStyle)),
+      MarkdownRichText('$key: ', style: keyStyle),
+      Expanded(child: MarkdownRichText('${value ?? ''}', style: valStyle)),
     ],
   );
 }
@@ -1731,7 +1731,7 @@ Widget _buildMathBlock(
       child: Center(
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          child: Text(
+          child: MarkdownRichText(
             node.latex,
             style: theme.codeTextStyle().copyWith(fontStyle: FontStyle.italic),
           ),
@@ -1864,7 +1864,7 @@ Widget _buildFootnoteDefinition(
       children: <Widget>[
         SizedBox(
           width: 24.0,
-          child: Text(
+          child: MarkdownRichText(
             '${node.index > 0 ? node.index : 1}.',
             textAlign: TextAlign.right,
             style: noteTheme.bodyTextStyle(color: theme.muted),
@@ -1953,7 +1953,10 @@ Widget _buildHtmlBlockFallback(
     return const SizedBox.shrink();
   }
   final String decoded = _decodeHtmlEntities(stripped);
-  return Text(decoded, style: theme.bodyTextStyle(color: theme.muted));
+  return MarkdownRichText(
+    decoded,
+    style: theme.bodyTextStyle(color: theme.muted),
+  );
 }
 
 const Map<String, String> _namedHtmlEntities = <String, String>{

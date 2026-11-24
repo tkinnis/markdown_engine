@@ -156,15 +156,15 @@ Verified offline against vendored upstream specifications tracked in [`REFERENCE
 | `gfm_spec` | `cmark-gfm 0.29.0.gfm.13` (`test/spec.txt`) | 670 | 0 | 2 | 672 | **100.0%** |
 | `gfm_extensions` | `cmark-gfm 0.29.0.gfm.13` (`test/extensions.txt`) | 30 | 0 | 0 | 30 | **100.0%** |
 
-Native Dart AOT timings on Apple M4 (`arm64`, macOS 15.6, Dart `3.13.5`) under `MarkdownOptions.gfm()` — see [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md) for the full head-to-head scoreboard (`package:markdown`, `flutter_md`, `flutter_markdown_plus`), adversarial benchmarks, persistent vs one-shot Mermaid isolate measurements, hybrid mixed-content streaming telemetry, charts, real macOS `--profile` Impeller frame timings (`0.93 ms` scroll p50 / `0.43 ms` streaming p50, `0` jank frames), and CI regression ceilings:
+Native Dart AOT (interleaved `tool/compare/bin/compare_parsers_aot.dart`) timings on Apple M4 (`arm64`, macOS `15.6`, Dart `3.13.5`) under `MarkdownOptions.gfm()` — see [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md) for the two-tier head-to-head scoreboard (`package:markdown`, `flutter_md`, `flutter_markdown_plus`), adversarial benchmarks, persistent vs one-shot Mermaid isolate measurements, hybrid mixed-content streaming telemetry, charts, real macOS `--profile` Impeller frame timings (`0.77 ms` scroll p50 / `0.29 ms` streaming p50, `0` jank frames), and `tool/benchmark_suite.dart` CI regression ceilings:
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) | Highlights |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| `small_doc_parse_and_html` | 937 B (18 lines) | 8.76 us | **8.68 us** | 102.92 MB/s | Full GFM parse + `toHtml()` (`24.41x` vs `package:markdown`) |
-| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 283.51 us | **286.44 us** | 84.05 MB/s | Sub-ms README parse + `toHtml()` (`20.95x` vs `package:markdown`) |
-| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 1.331 ms | **1.310 ms** | 125.90 MB/s | Full AST parse (`1,458` blocks, `34.06x` vs `package:markdown`) |
-| `incremental_single_paragraph_edit` | 168.9 KB (4,996 lines) | 15.90 us | **14.92 us** | 11056.68 MB/s | **87.82x faster** vs own full parse, **1,457/1,458 (99.93%)** blocks reused |
-| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks | 1.15 us | **1.10 us** | 37.44 MB/s | Avg/chunk (`55.00 us` total, **14/15** settled, `241.76x` vs `package:markdown`) |
+| `small_doc_parse_and_html` | 937 B (18 lines) | 8.67 us | **8.52 us** | 104.91 MB/s | Full GFM parse + `toHtml()` (`23.87x` vs `package:markdown`; CI ceiling `<= 2.000 ms`) |
+| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 277.29 us | **277.56 us** | 86.74 MB/s | Sub-ms README parse + `toHtml()` (`19.63x` vs `package:markdown`; CI ceiling `<= 30.000 ms`) |
+| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 1.313 ms | **1.290 ms** | 127.91 MB/s | Full AST parse (`1,458` blocks, `30.28x` vs `package:markdown`; CI ceiling `<= 200.000 ms`) |
+| `incremental_single_paragraph_edit` | 168.9 KB (4,996 lines) | 15.22 us | **14.76 us** | 11176.53 MB/s | **87.38x faster** vs own full parse, **1,457/1,458 (99.93%)** blocks reused (CI ceiling `<= 25.000 ms`) |
+| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks | 0.87 us | **0.86 us** | 47.77 MB/s | Avg/chunk (`43.00 us` total, **14/15** settled, `264.38x` vs `package:markdown`; CI ceiling `<= 5.000 ms`) |
 
 ## Workspace Packages
 

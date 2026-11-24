@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui show Picture, PictureRecorder, TextBox;
+import 'dart:ui' as ui show LineMetrics, Picture, PictureRecorder, TextBox;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/rendering.dart';
@@ -34,6 +34,7 @@ final class MarkdownStreamingCanvasPayload {
     required this.revision,
     this.startBlockIndex = 0,
     this.includeTopPadding = true,
+    this.settledPrefixCount = 0,
   });
 
   /// Latest parsed Markdown document.
@@ -61,13 +62,34 @@ final class MarkdownStreamingCanvasPayload {
   /// Set to `false` when mounted below a settled prefix sliver.
   final bool includeTopPadding;
 
+  /// Number of leading blocks in `document.blocks` verified as settled by the
+  /// streaming controller so layout sync can skip re-scanning them.
+  final int settledPrefixCount;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is MarkdownStreamingCanvasPayload && revision == other.revision;
+      other is MarkdownStreamingCanvasPayload &&
+          revision == other.revision &&
+          startBlockIndex == other.startBlockIndex &&
+          includeTopPadding == other.includeTopPadding &&
+          settledPrefixCount == other.settledPrefixCount &&
+          showFrontmatter == other.showFrontmatter &&
+          identical(document, other.document) &&
+          themeOverride == other.themeOverride &&
+          padding == other.padding;
 
   @override
-  int get hashCode => revision.hashCode;
+  int get hashCode => Object.hash(
+    revision,
+    startBlockIndex,
+    includeTopPadding,
+    settledPrefixCount,
+    showFrontmatter,
+    identityHashCode(document),
+    themeOverride,
+    padding,
+  );
 }
 
 /// Returns `true` when [delegates] defines no custom block or inline widget
@@ -458,6 +480,7 @@ final class _TableCellCache {
   const _TableCellCache({
     required this.node,
     required this.alignment,
+    required this.theme,
     required this.painter,
     required this.intrinsicW,
     required this.plainText,
@@ -466,6 +489,7 @@ final class _TableCellCache {
 
   final TableCellNode node;
   final TableAlignment alignment;
+  final MarkdownThemeData theme;
   final TextPainter painter;
   final double intrinsicW;
   final String plainText;
@@ -496,6 +520,7 @@ final class _CanvasTopBlockEntry {
     required this.top,
     required this.layout,
     required this.cumulativeEndChars,
+    required this.slotIndex,
   }) : runCount = layout.textRuns.length,
        charCount = _sumRunChars(layout.textRuns);
 
@@ -523,6 +548,7 @@ final class _CanvasTopBlockEntry {
   int runCount;
   int charCount;
   int cumulativeEndChars;
+  int slotIndex;
 }
 
 final class _SelectableSlice {
@@ -598,6 +624,121 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
   double _viewportPicPadLeft = double.nan;
   int _stablePaintHits = 0;
   bool _pendingPaintAfterDrySync = false;
+  bool _needsLayoutFlag = true;
+  int _verifiedSettledStartIdx = 0;
+  int _verifiedSettledRawEnd = 0;
+  int _verifiedSettledVisibleEnd = 0;
+  int _verifiedFirstVisibleRawIdx = -1;
+  int _verifiedLastVisibleRawIdx = -1;
+  bool _verifiedShowFrontmatter = false;
+
+  static EdgeInsets _resolvePadding(
+    EdgeInsetsGeometry padding,
+    TextDirection direction,
+  ) => padding is EdgeInsets ? padding : padding.resolve(direction);
+
+  static void _collectLiveNodePainters(
+    _CanvasNodeLayout layout,
+    Set<TextPainter> out,
+  ) {
+    switch (layout) {
+      case _CanvasHeadingLayout():
+        out.add(layout.painter);
+      case _CanvasParagraphLayout():
+        out.add(layout.painter);
+      case _CanvasThematicBreakLayout():
+        return;
+      case _CanvasBlockQuoteLayout():
+        for (int i = 0; i < layout.children.length; i++) {
+          _collectLiveNodePainters(layout.children[i], out);
+        }
+      case _CanvasListLayout():
+        for (int i = 0; i < layout.items.length; i++) {
+          final List<_CanvasNodeLayout> children = layout.items[i].children;
+          for (int j = 0; j < children.length; j++) {
+            _collectLiveNodePainters(children[j], out);
+          }
+        }
+      case _CanvasCodeBlockLayout():
+        out.add(layout.codePainter);
+      case _CanvasTableLayout():
+        for (int r = 0; r < layout.cellCaches.length; r++) {
+          final List<_TableCellCache> row = layout.cellCaches[r];
+          for (int c = 0; c < row.length; c++) {
+            out.add(row[c].painter);
+          }
+        }
+    }
+  }
+
+  static void _disposeNodeLayout(
+    _CanvasNodeLayout layout, {
+    Set<TextPainter>? keep,
+  }) {
+    switch (layout) {
+      case _CanvasHeadingLayout():
+        if (keep == null || keep.add(layout.painter)) {
+          layout.painter.dispose();
+        }
+      case _CanvasParagraphLayout():
+        if (keep == null || keep.add(layout.painter)) {
+          layout.painter.dispose();
+        }
+      case _CanvasThematicBreakLayout():
+        return;
+      case _CanvasBlockQuoteLayout():
+        for (int i = 0; i < layout.children.length; i++) {
+          _disposeNodeLayout(layout.children[i], keep: keep);
+        }
+      case _CanvasListLayout():
+        for (int i = 0; i < layout.items.length; i++) {
+          final List<_CanvasNodeLayout> children = layout.items[i].children;
+          for (int j = 0; j < children.length; j++) {
+            _disposeNodeLayout(children[j], keep: keep);
+          }
+        }
+      case _CanvasCodeBlockLayout():
+        if (keep == null || keep.add(layout.codePainter)) {
+          layout.codePainter.dispose();
+        }
+      case _CanvasTableLayout():
+        for (int r = 0; r < layout.cellCaches.length; r++) {
+          final List<_TableCellCache> row = layout.cellCaches[r];
+          for (int c = 0; c < row.length; c++) {
+            final TextPainter tp = row[c].painter;
+            if (keep == null || keep.add(tp)) {
+              tp.dispose();
+            }
+          }
+        }
+    }
+  }
+
+  void _resetVerifiedSettledPrefix() {
+    _verifiedSettledStartIdx = 0;
+    _verifiedSettledRawEnd = 0;
+    _verifiedSettledVisibleEnd = 0;
+    _verifiedFirstVisibleRawIdx = -1;
+    _verifiedLastVisibleRawIdx = -1;
+    _verifiedShowFrontmatter = false;
+  }
+
+  void _disposeAllEntries() {
+    if (_entries.isNotEmpty) {
+      final Set<TextPainter> seen = Set<TextPainter>.identity();
+      for (int i = 0; i < _entries.length; i++) {
+        _disposeNodeLayout(_entries[i].layout, keep: seen);
+      }
+      _entries.clear();
+    }
+    _resetVerifiedSettledPrefix();
+  }
+
+  @override
+  void markNeedsLayout() {
+    _needsLayoutFlag = true;
+    super.markNeedsLayout();
+  }
 
   void _invalidateViewportPicture() {
     _viewportPic?.dispose();
@@ -723,7 +864,9 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     _copiedBlockIds.clear();
     _selectable?.dispose();
     _selectable = null;
-    _entries.clear();
+    _disposeAllEntries();
+    _styles?.dispose();
+    _styles = null;
     _entriesById.clear();
     _slices.clear();
     _copyTargets.clear();
@@ -739,7 +882,10 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     final MarkdownStreamingCanvasPayload payload = _listenable.value;
     final MarkdownThemeData theme = payload.themeOverride ?? _ambientTheme;
     final MarkdownRenderEnvironment env = _environment;
-    final EdgeInsets rawPad = payload.padding.resolve(env.textDirection);
+    final EdgeInsets rawPad = _resolvePadding(
+      payload.padding,
+      env.textDirection,
+    );
     final EdgeInsets pad = payload.includeTopPadding
         ? rawPad
         : EdgeInsets.fromLTRB(rawPad.left, 0.0, rawPad.right, rawPad.bottom);
@@ -756,6 +902,7 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
         _laidOutEnv != env;
 
     if (configInvalid || _styles == null) {
+      _styles?.dispose();
       _styles = _ResolvedCanvasStyles(theme: theme, env: env);
     }
 
@@ -767,7 +914,7 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     if (startIdx >= count) {
       final bool hadContent =
           _entries.isNotEmpty || _totalSelectableLength != 0;
-      _entries.clear();
+      _disposeAllEntries();
       _entriesById.clear();
       _invalidateViewportPicture();
       _totalHeight = pad.vertical;
@@ -785,16 +932,36 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     }
 
     if (configInvalid) {
-      _entries.clear();
+      _disposeAllEntries();
       _entriesById.clear();
       _invalidateViewportPicture();
     }
 
+    final int settledEnd = payload.settledPrefixCount.clamp(startIdx, count);
     int firstDirty = 0;
     int firstDirtyRawIdx = startIdx;
     if (!configInvalid) {
-      int visibleIdx = 0;
-      for (int i = startIdx; i < count; i++) {
+      if (_verifiedSettledRawEnd > startIdx &&
+          settledEnd >= _verifiedSettledRawEnd &&
+          startIdx == _verifiedSettledStartIdx &&
+          payload.showFrontmatter == _verifiedShowFrontmatter &&
+          _verifiedSettledVisibleEnd > 0 &&
+          _verifiedSettledVisibleEnd <= _entries.length &&
+          _verifiedFirstVisibleRawIdx >= startIdx &&
+          _verifiedLastVisibleRawIdx < _verifiedSettledRawEnd &&
+          identical(
+            _entries[0].block,
+            rawBlocks[_verifiedFirstVisibleRawIdx],
+          ) &&
+          identical(
+            _entries[_verifiedSettledVisibleEnd - 1].block,
+            rawBlocks[_verifiedLastVisibleRawIdx],
+          )) {
+        firstDirty = _verifiedSettledVisibleEnd;
+        firstDirtyRawIdx = _verifiedSettledRawEnd;
+      }
+      int visibleIdx = firstDirty;
+      for (int i = firstDirtyRawIdx; i < count; i++) {
         final MarkdownBlockNode b = rawBlocks[i];
         if (!payload.showFrontmatter && b is FrontmatterNode) {
           firstDirtyRawIdx = i + 1;
@@ -814,6 +981,12 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     if (!configInvalid &&
         firstDirtyRawIdx == count &&
         firstDirty == _entries.length) {
+      _syncVerifiedSettledPrefix(
+        rawBlocks: rawBlocks,
+        startIdx: startIdx,
+        settledEnd: settledEnd,
+        showFrontmatter: payload.showFrontmatter,
+      );
       return;
     }
 
@@ -831,6 +1004,7 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     final _ResolvedCanvasStyles styles = _styles!;
     bool anyVisualChange = configInvalid;
     double dirtyMinTop = configInvalid ? 0.0 : double.infinity;
+    List<_CanvasNodeLayout>? supersededLayouts;
 
     int visibleIdx = firstDirty;
     for (int i = firstDirtyRawIdx; i < count; i++) {
@@ -841,7 +1015,13 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
       final _CanvasTopBlockEntry? oldSlot = visibleIdx < prevEntriesLen
           ? _entries[visibleIdx]
           : null;
-      final _CanvasTopBlockEntry? prev = _entriesById[b.blockId];
+      final _CanvasTopBlockEntry? rawPrev = _entriesById[b.blockId];
+      final _CanvasTopBlockEntry? prev =
+          (rawPrev != null &&
+              rawPrev.slotIndex >= visibleIdx &&
+              rawPrev.block.blockId == b.blockId)
+          ? rawPrev
+          : null;
       final _CanvasNodeLayout layout;
       if (!configInvalid &&
           prev != null &&
@@ -863,7 +1043,9 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
           identical(layout, oldSlot.layout) &&
           oldSlot.top == y &&
           oldSlot.block.blockId == b.blockId) {
-        oldSlot.block = b;
+        oldSlot
+          ..block = b
+          ..slotIndex = visibleIdx;
         totalLen = oldSlot.cumulativeEndChars;
         _entriesById[b.blockId] = oldSlot;
       } else {
@@ -881,13 +1063,31 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
           charCount,
         );
         if (oldSlot != null) {
+          if (!identical(layout, oldSlot.layout)) {
+            final _CanvasNodeLayout oldLayout = oldSlot.layout;
+            final bool reusedLeafPainter =
+                identical(prev, oldSlot) &&
+                ((oldLayout is _CanvasParagraphLayout &&
+                        layout is _CanvasParagraphLayout &&
+                        identical(oldLayout.painter, layout.painter)) ||
+                    (oldLayout is _CanvasHeadingLayout &&
+                        layout is _CanvasHeadingLayout &&
+                        identical(oldLayout.painter, layout.painter)) ||
+                    (oldLayout is _CanvasCodeBlockLayout &&
+                        layout is _CanvasCodeBlockLayout &&
+                        identical(oldLayout.codePainter, layout.codePainter)));
+            if (!reusedLeafPainter) {
+              (supersededLayouts ??= <_CanvasNodeLayout>[]).add(oldLayout);
+            }
+          }
           oldSlot
             ..block = b
             ..top = y
             ..layout = layout
             ..runCount = runCount
             ..charCount = charCount
-            ..cumulativeEndChars = totalLen;
+            ..cumulativeEndChars = totalLen
+            ..slotIndex = visibleIdx;
           _entriesById[b.blockId] = oldSlot;
         } else {
           final _CanvasTopBlockEntry entry = _CanvasTopBlockEntry(
@@ -895,6 +1095,7 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
             top: y,
             layout: layout,
             cumulativeEndChars: totalLen,
+            slotIndex: visibleIdx,
           );
           _entries.add(entry);
           _entriesById[b.blockId] = entry;
@@ -910,7 +1111,20 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
       if (removedTop < dirtyMinTop) {
         dirtyMinTop = removedTop;
       }
+      for (int k = visibleIdx; k < _entries.length; k++) {
+        (supersededLayouts ??= <_CanvasNodeLayout>[]).add(_entries[k].layout);
+      }
       _entries.length = visibleIdx;
+    }
+
+    if (supersededLayouts != null) {
+      final Set<TextPainter> livePainters = Set<TextPainter>.identity();
+      for (int i = firstDirty; i < _entries.length; i++) {
+        _collectLiveNodePainters(_entries[i].layout, livePainters);
+      }
+      for (int i = 0; i < supersededLayouts.length; i++) {
+        _disposeNodeLayout(supersededLayouts[i], keep: livePainters);
+      }
     }
 
     if (_entries.length < prevEntriesLen ||
@@ -921,6 +1135,13 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
         _entriesById[entry.block.blockId] = entry;
       }
     }
+
+    _syncVerifiedSettledPrefix(
+      rawBlocks: rawBlocks,
+      startIdx: startIdx,
+      settledEnd: settledEnd,
+      showFrontmatter: payload.showFrontmatter,
+    );
 
     if (_entries.isEmpty) {
       _totalHeight = pad.vertical;
@@ -943,6 +1164,42 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     }
   }
 
+  void _syncVerifiedSettledPrefix({
+    required List<MarkdownBlockNode> rawBlocks,
+    required int startIdx,
+    required int settledEnd,
+    required bool showFrontmatter,
+  }) {
+    if (settledEnd <= startIdx) {
+      _resetVerifiedSettledPrefix();
+      return;
+    }
+    if (_verifiedSettledRawEnd == settledEnd &&
+        _verifiedSettledStartIdx == startIdx &&
+        _verifiedShowFrontmatter == showFrontmatter) {
+      return;
+    }
+    int vis = 0;
+    int firstVis = -1;
+    int lastVis = -1;
+    for (int i = startIdx; i < settledEnd; i++) {
+      if (!showFrontmatter && rawBlocks[i] is FrontmatterNode) {
+        continue;
+      }
+      if (firstVis == -1) {
+        firstVis = i;
+      }
+      lastVis = i;
+      vis++;
+    }
+    _verifiedSettledStartIdx = startIdx;
+    _verifiedSettledRawEnd = settledEnd;
+    _verifiedSettledVisibleEnd = vis;
+    _verifiedFirstVisibleRawIdx = firstVis;
+    _verifiedLastVisibleRawIdx = lastVis;
+    _verifiedShowFrontmatter = showFrontmatter;
+  }
+
   void _ensureSlices() {
     if (!_slicesDirty) {
       return;
@@ -950,7 +1207,8 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     _slicesDirty = false;
     _slices.clear();
     final EdgeInsets pad =
-        _laidOutPadding ?? _listenable.value.padding.resolve(_textDirection);
+        _laidOutPadding ??
+        _resolvePadding(_listenable.value.padding, _textDirection);
     final double baseX = pad.left;
     int offset = 0;
     for (int i = 0; i < _entries.length; i++) {
@@ -987,7 +1245,8 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     _copyTargetsDirty = false;
     _copyTargets.clear();
     final EdgeInsets pad =
-        _laidOutPadding ?? _listenable.value.padding.resolve(_textDirection);
+        _laidOutPadding ??
+        _resolvePadding(_listenable.value.padding, _textDirection);
     final double baseX = pad.left;
     for (int i = 0; i < _entries.length; i++) {
       final _CanvasTopBlockEntry entry = _entries[i];
@@ -1159,6 +1418,7 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
     final Size prevSize = hasSize ? size : Size.zero;
     final Size nextSize = constraints.constrain(Size(w, _totalHeight));
     size = nextSize;
+    _needsLayoutFlag = false;
     if (_pendingPaintAfterDrySync) {
       _pendingPaintAfterDrySync = false;
       if (prevSize == nextSize) {
@@ -1188,7 +1448,8 @@ final class RenderMarkdownStreamingCanvas extends RenderBox
 
     final Canvas canvas = context.canvas;
     final EdgeInsets pad =
-        _laidOutPadding ?? _listenable.value.padding.resolve(_textDirection);
+        _laidOutPadding ??
+        _resolvePadding(_listenable.value.padding, _textDirection);
     final _ResolvedCanvasStyles styles =
         _styles ??
         (_styles = _ResolvedCanvasStyles(
@@ -1833,6 +2094,29 @@ final class _ResolvedCanvasStyles {
   TextStyle get tableBodyCodeSpanStyle =>
       _tableBodyCodeSpanStyle ??= _deriveCodeSpanStyle(tableBodyStyle, theme);
 
+  TextStyle? _quoteTableHeaderStyle;
+  TextStyle get quoteTableHeaderStyle =>
+      _quoteTableHeaderStyle ??= env.resolveTextStyle(
+        quoteTheme.bodyTextStyle().copyWith(fontWeight: FontWeight.w700),
+      );
+
+  TextStyle? _quoteTableHeaderCodeSpanStyle;
+  TextStyle get quoteTableHeaderCodeSpanStyle =>
+      _quoteTableHeaderCodeSpanStyle ??= _deriveCodeSpanStyle(
+        quoteTableHeaderStyle,
+        quoteTheme,
+      );
+
+  TextStyle? _quoteTableBodyStyle;
+  TextStyle get quoteTableBodyStyle =>
+      _quoteTableBodyStyle ??= env.resolveTextStyle(
+        quoteTheme.bodyTextStyle().copyWith(fontWeight: FontWeight.w400),
+      );
+
+  TextStyle? _quoteTableBodyCodeSpanStyle;
+  TextStyle get quoteTableBodyCodeSpanStyle => _quoteTableBodyCodeSpanStyle ??=
+      _deriveCodeSpanStyle(quoteTableBodyStyle, quoteTheme);
+
   Paint? _borderFillPaint;
   Paint get borderFillPaint => _borderFillPaint ??= Paint()
     ..color = theme.border
@@ -1957,6 +2241,21 @@ final class _ResolvedCanvasStyles {
         textScaler: env.textScaler,
         locale: env.locale,
       )..layout(minWidth: 26.0, maxWidth: 26.0);
+
+  void dispose() {
+    _copyPainter?.dispose();
+    _copyPainter = null;
+    _copiedPainter?.dispose();
+    _copiedPainter = null;
+    for (final TextPainter tp in _badgePainters.values) {
+      tp.dispose();
+    }
+    _badgePainters.clear();
+    for (final TextPainter tp in _orderedMarkerPainters.values) {
+      tp.dispose();
+    }
+    _orderedMarkerPainters.clear();
+  }
 
   TextPainter _newPainter({
     required InlineSpan span,
@@ -2342,7 +2641,9 @@ final class _ResolvedCanvasStyles {
               : null,
           textAlign: textAlign,
           paragraphStyleOverride: bodyStyle,
-          themeOverride: activeTheme,
+          themeOverride: identical(activeTheme, theme) || activeTheme == theme
+              ? null
+              : activeTheme,
         );
         childOffsetsY.add(cy);
         childLayouts.add(cl);
@@ -2517,10 +2818,49 @@ final class _ResolvedCanvasStyles {
       }
     }
 
+    final bool isRootTheme =
+        identical(activeTheme, theme) || activeTheme == theme;
+    final bool isQuoteTheme =
+        !isRootTheme &&
+        (identical(activeTheme, _quoteTheme) || activeTheme == quoteTheme);
+    final TextStyle resolvedHeaderStyle = isRootTheme
+        ? tableHeaderStyle
+        : (isQuoteTheme
+              ? quoteTableHeaderStyle
+              : env.resolveTextStyle(
+                  activeTheme.bodyTextStyle().copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ));
+    final TextStyle resolvedBodyStyle = isRootTheme
+        ? tableBodyStyle
+        : (isQuoteTheme
+              ? quoteTableBodyStyle
+              : env.resolveTextStyle(
+                  activeTheme.bodyTextStyle().copyWith(
+                    fontWeight: FontWeight.w400,
+                  ),
+                ));
+    final TextStyle resolvedHeaderCodeSpanStyle = isRootTheme
+        ? tableHeaderCodeSpanStyle
+        : (isQuoteTheme
+              ? quoteTableHeaderCodeSpanStyle
+              : _deriveCodeSpanStyle(resolvedHeaderStyle, activeTheme));
+    final TextStyle resolvedBodyCodeSpanStyle = isRootTheme
+        ? tableBodyCodeSpanStyle
+        : (isQuoteTheme
+              ? quoteTableBodyCodeSpanStyle
+              : _deriveCodeSpanStyle(resolvedBodyStyle, activeTheme));
+
     for (int r = 0; r < totalRows; r++) {
       final bool isHeader = r == 0;
       final List<TableCellNode> sourceRow = isHeader ? headers : rows[r - 1];
-      final TextStyle style = isHeader ? tableHeaderStyle : tableBodyStyle;
+      final TextStyle style = isHeader
+          ? resolvedHeaderStyle
+          : resolvedBodyStyle;
+      final TextStyle codeSpanStyle = isHeader
+          ? resolvedHeaderCodeSpanStyle
+          : resolvedBodyCodeSpanStyle;
       final List<_TableCellCache>? prevRow =
           (prevCaches != null && r < prevCaches.length) ? prevCaches[r] : null;
       final List<_TableCellCache> rowCache = <_TableCellCache>[];
@@ -2540,9 +2880,10 @@ final class _ResolvedCanvasStyles {
         if (cached != null &&
             !cached.narrowWrapped &&
             cached.alignment == align &&
+            (identical(cached.theme, activeTheme) ||
+                cached.theme == activeTheme) &&
             (identical(cached.node, cell) ||
-                (cached.node.span.length == cell.span.length &&
-                    _sameSimpleInlines(cached.node.children, cell.children)))) {
+                _sameSimpleInlines(cached.node.children, cell.children))) {
           rowCache.add(cached);
           if (cached.intrinsicW > colWidths[c]) {
             colWidths[c] = cached.intrinsicW;
@@ -2554,9 +2895,7 @@ final class _ResolvedCanvasStyles {
               cell.children,
               style,
               activeTheme,
-              cachedCodeSpanStyle: isHeader
-                  ? tableHeaderCodeSpanStyle
-                  : tableBodyCodeSpanStyle,
+              cachedCodeSpanStyle: codeSpanStyle,
             );
         final TextPainter tp;
         if (cached != null && cached.alignment == align) {
@@ -2575,6 +2914,7 @@ final class _ResolvedCanvasStyles {
           _TableCellCache(
             node: cell,
             alignment: align,
+            theme: activeTheme,
             painter: tp,
             intrinsicW: intrinsicW,
             plainText: built.plainText,
@@ -2606,6 +2946,7 @@ final class _ResolvedCanvasStyles {
           rowCache[c] = _TableCellCache(
             node: item.node,
             alignment: item.alignment,
+            theme: item.theme,
             painter: tp,
             intrinsicW: item.intrinsicW,
             plainText: item.plainText,
@@ -2667,7 +3008,8 @@ final class _ResolvedCanvasStyles {
 }
 
 final class _StreamingCanvasSelectable extends ChangeNotifier
-    with Selectable, SelectionRegistrant {
+    with Selectable, SelectionRegistrant
+    implements MarkdownLayoutAwareSelectable {
   _StreamingCanvasSelectable(this._box);
 
   final RenderMarkdownStreamingCanvas _box;
@@ -2690,6 +3032,13 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
       (_endHandleLink != null && _geometry.endSelectionPoint != null);
 
   @override
+  bool get isLayoutReady =>
+      _box.attached &&
+      _box.hasSize &&
+      !_box._needsLayoutFlag &&
+      !_box.debugNeedsLayout;
+
+  @override
   SelectionGeometry get value => _geometry;
 
   @override
@@ -2700,11 +3049,11 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
 
   @override
   List<Rect> get boundingBoxes =>
-      _box.hasSize ? <Rect>[_box.paintBounds] : const <Rect>[];
+      _box.hasSize ? <Rect>[_box.paintBounds] : const <Rect>[Rect.zero];
 
   @override
   Matrix4 getTransformTo(RenderObject? ancestor) =>
-      _box.getTransformTo(ancestor);
+      _box.attached ? _box.getTransformTo(ancestor) : Matrix4.identity();
 
   void clearHandleLayers() {
     _startHandleLink = null;
@@ -2825,12 +3174,8 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
             .clamp(0, best.plainText.length);
   }
 
-  _SelectableSlice? _sliceForOffset(int offset) {
-    _box._ensureSlices();
+  int _sliceIndexForOffset(int offset) {
     final List<_SelectableSlice> slices = _box._slices;
-    if (slices.isEmpty) {
-      return null;
-    }
     int lo = 0;
     int hi = slices.length - 1;
     while (lo <= hi) {
@@ -2841,10 +3186,71 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
       } else if (offset > s.endOffset) {
         lo = mid + 1;
       } else {
-        return s;
+        return mid;
       }
     }
-    return slices[lo.clamp(0, slices.length - 1)];
+    return lo.clamp(0, slices.length - 1);
+  }
+
+  _SelectableSlice? _sliceForOffset(int offset) {
+    _box._ensureSlices();
+    if (_box._slices.isEmpty) {
+      return null;
+    }
+    return _box._slices[_sliceIndexForOffset(offset)];
+  }
+
+  static double _horizontalDist(_SelectableSlice slice, double localDx) {
+    final double left = slice.offset.dx;
+    final double right = left + slice.painter.width;
+    if (localDx < left) {
+      return left - localDx;
+    }
+    if (localDx > right) {
+      return localDx - right;
+    }
+    return 0.0;
+  }
+
+  static _SelectableSlice _closestSliceOnRow(
+    List<_SelectableSlice> slices,
+    int seedIdx,
+    double localDx,
+  ) {
+    final double targetTop = slices[seedIdx].top;
+    _SelectableSlice best = slices[seedIdx];
+    double bestDist = _horizontalDist(best, localDx);
+    for (int k = seedIdx - 1; k >= 0 && slices[k].top == targetTop; k--) {
+      final double d = _horizontalDist(slices[k], localDx);
+      if (d < bestDist) {
+        bestDist = d;
+        best = slices[k];
+      }
+    }
+    for (
+      int k = seedIdx + 1;
+      k < slices.length && slices[k].top == targetTop;
+      k++
+    ) {
+      final double d = _horizontalDist(slices[k], localDx);
+      if (d < bestDist) {
+        bestDist = d;
+        best = slices[k];
+      }
+    }
+    return best;
+  }
+
+  static int _offsetInSliceAt(
+    _SelectableSlice slice,
+    double localDx,
+    double localY,
+  ) {
+    return slice.startOffset +
+        slice.painter
+            .getPositionForOffset(Offset(localDx - slice.offset.dx, localY))
+            .offset
+            .clamp(0, slice.plainText.length);
   }
 
   Offset _caretForOffset(int offset, {required double lineHeightFallback}) {
@@ -2876,7 +3282,7 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
   SelectionGeometry _computeGeometry() {
     final int len = _box._totalSelectableLength;
     final bool hasContent = len > 0;
-    if (!hasContent || !hasSelection) {
+    if (!hasSelection) {
       return SelectionGeometry(
         status: SelectionStatus.none,
         hasContent: hasContent,
@@ -2884,26 +3290,10 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
     }
     final int start = _start!.clamp(0, len);
     final int end = _end!.clamp(0, len);
-    if (!_box.hasSize) {
-      return SelectionGeometry(
-        status: start == end
-            ? SelectionStatus.collapsed
-            : SelectionStatus.uncollapsed,
-        hasContent: true,
-      );
-    }
-
-    final double startLh = _lineHeightAtOffset(start);
-    final double endLh = _lineHeightAtOffset(end);
-    final Offset startCaret = _caretForOffset(
-      start,
-      lineHeightFallback: startLh,
-    );
-    final Offset endCaret = _caretForOffset(end, lineHeightFallback: endLh);
+    final bool collapsed = start == end;
     final bool isReversed = start > end;
     final bool flipHandles =
         isReversed != (_box._textDirection == TextDirection.rtl);
-    final bool collapsed = start == end;
     final (
       TextSelectionHandleType startType,
       TextSelectionHandleType endType,
@@ -2921,6 +3311,32 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
         TextSelectionHandleType.right,
       ),
     };
+    if (!hasContent || !_box.hasSize || !_box.attached) {
+      return SelectionGeometry(
+        startSelectionPoint: SelectionPoint(
+          localPosition: Offset.zero,
+          lineHeight: 0.0,
+          handleType: startType,
+        ),
+        endSelectionPoint: SelectionPoint(
+          localPosition: Offset.zero,
+          lineHeight: 0.0,
+          handleType: endType,
+        ),
+        status: collapsed
+            ? SelectionStatus.collapsed
+            : SelectionStatus.uncollapsed,
+        hasContent: hasContent,
+      );
+    }
+
+    final double startLh = _lineHeightAtOffset(start);
+    final double endLh = _lineHeightAtOffset(end);
+    final Offset startCaret = _caretForOffset(
+      start,
+      lineHeightFallback: startLh,
+    );
+    final Offset endCaret = _caretForOffset(end, lineHeightFallback: endLh);
 
     final List<Rect> rects = <Rect>[];
     if (!collapsed) {
@@ -3046,162 +3462,340 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
     final int len = _box._totalSelectableLength;
     late final SelectionResult result;
 
-    switch (event.type) {
-      case SelectionEventType.selectAll:
-        _start = 0;
-        _end = len;
-        result = SelectionResult.none;
-      case SelectionEventType.clear:
-        _start = null;
-        _end = null;
-        result = SelectionResult.none;
-      case SelectionEventType.selectWord:
-        final SelectWordSelectionEvent wordEvent =
-            event as SelectWordSelectionEvent;
-        final Offset local = _box.globalToLocal(wordEvent.globalPosition);
-        final int globalOff = _offsetForLocal(local);
-        final _SelectableSlice? slice = _sliceForOffset(globalOff);
-        if (slice == null) {
-          _start = 0;
-          _end = 0;
-        } else {
-          final int localOff = (globalOff - slice.startOffset).clamp(
-            0,
-            slice.plainText.length,
-          );
-          final TextRange word = slice.painter.getWordBoundary(
-            TextPosition(offset: localOff),
-          );
-          _start = slice.startOffset + word.start;
-          _end = slice.startOffset + word.end;
-        }
-        result = SelectionResult.end;
-      case SelectionEventType.selectParagraph:
-        final SelectParagraphSelectionEvent paraEvent =
-            event as SelectParagraphSelectionEvent;
-        final Offset local = _box.globalToLocal(paraEvent.globalPosition);
-        final int globalOff = _offsetForLocal(local);
-        final _SelectableSlice? slice = _sliceForOffset(globalOff);
-        if (slice == null) {
+    if (event is SelectAllSelectionEvent) {
+      _start = 0;
+      _end = len;
+      result = SelectionResult.none;
+    } else if (event is ClearSelectionEvent) {
+      _start = null;
+      _end = null;
+      result = SelectionResult.none;
+    } else if (!_box.hasSize || !_box.attached) {
+      switch (event.type) {
+        case SelectionEventType.selectAll:
+        case SelectionEventType.clear:
+        case SelectionEventType.selectWord:
+        case SelectionEventType.startEdgeUpdate:
+        case SelectionEventType.endEdgeUpdate:
+          result = SelectionResult.none;
+        case SelectionEventType.selectParagraph:
+          final SelectParagraphSelectionEvent paraEvent =
+              event as SelectParagraphSelectionEvent;
+          result = paraEvent.absorb
+              ? SelectionResult.next
+              : SelectionResult.none;
+        case SelectionEventType.granularlyExtendSelection:
+          result = SelectionResult.end;
+        case SelectionEventType.directionallyExtendSelection:
+          final DirectionallyExtendSelectionEvent ext =
+              event as DirectionallyExtendSelectionEvent;
+          result = switch (ext.direction) {
+            SelectionExtendDirection.previousLine => SelectionResult.previous,
+            SelectionExtendDirection.nextLine => SelectionResult.next,
+            SelectionExtendDirection.forward ||
+            SelectionExtendDirection.backward => SelectionResult.end,
+          };
+      }
+    } else {
+      switch (event.type) {
+        case SelectionEventType.selectAll:
           _start = 0;
           _end = len;
-        } else {
-          _start = slice.startOffset;
-          _end = slice.endOffset;
-        }
-        result = paraEvent.absorb ? SelectionResult.next : SelectionResult.end;
-      case SelectionEventType.startEdgeUpdate:
-      case SelectionEventType.endEdgeUpdate:
-        final SelectionEdgeUpdateEvent edgeEvent =
-            event as SelectionEdgeUpdateEvent;
-        final bool isEnd = edgeEvent.type == SelectionEventType.endEdgeUpdate;
-        final Offset local = _box.globalToLocal(edgeEvent.globalPosition);
-        final SelectionResult edgeResult = SelectionUtils.getResultBasedOnRect(
-          _box.paintBounds,
-          local,
-        );
-        final int targetOffset;
-        switch (edgeResult) {
-          case SelectionResult.previous:
-            targetOffset = 0;
-          case SelectionResult.next:
-            targetOffset = len;
-          case SelectionResult.end:
-          case SelectionResult.pending:
-          case SelectionResult.none:
-            final Offset adjusted = SelectionUtils.adjustDragOffset(
-              _box.paintBounds,
-              local,
-              direction: _box._textDirection,
+          result = SelectionResult.none;
+        case SelectionEventType.clear:
+          _start = null;
+          _end = null;
+          result = SelectionResult.none;
+        case SelectionEventType.selectWord:
+          final SelectWordSelectionEvent wordEvent =
+              event as SelectWordSelectionEvent;
+          final Offset local = _box.globalToLocal(wordEvent.globalPosition);
+          final int globalOff = _offsetForLocal(local);
+          final _SelectableSlice? slice = _sliceForOffset(globalOff);
+          if (slice == null) {
+            _start = 0;
+            _end = 0;
+          } else {
+            final int localOff = (globalOff - slice.startOffset).clamp(
+              0,
+              slice.plainText.length,
             );
-            final int globalOff = _offsetForLocal(adjusted);
-            switch (edgeEvent.granularity) {
-              case TextGranularity.word:
-                final _SelectableSlice? slice = _sliceForOffset(globalOff);
-                if (slice == null) {
-                  targetOffset = globalOff;
-                } else {
-                  final int localOff = (globalOff - slice.startOffset).clamp(
-                    0,
-                    slice.plainText.length,
-                  );
-                  final TextRange word = slice.painter.getWordBoundary(
-                    TextPosition(offset: localOff),
-                  );
-                  final int wStart = slice.startOffset + word.start;
-                  final int wEnd = slice.startOffset + word.end;
-                  final int? other = isEnd ? _start : _end;
-                  if (other != null && globalOff < other) {
-                    targetOffset = wStart;
-                  } else if (other != null && globalOff > other) {
-                    targetOffset = wEnd;
+            final TextRange word = slice.painter.getWordBoundary(
+              TextPosition(offset: localOff),
+            );
+            _start = slice.startOffset + word.start;
+            _end = slice.startOffset + word.end;
+          }
+          result = SelectionResult.end;
+        case SelectionEventType.selectParagraph:
+          final SelectParagraphSelectionEvent paraEvent =
+              event as SelectParagraphSelectionEvent;
+          final Offset local = _box.globalToLocal(paraEvent.globalPosition);
+          final int globalOff = _offsetForLocal(local);
+          final _SelectableSlice? slice = _sliceForOffset(globalOff);
+          if (slice == null) {
+            _start = 0;
+            _end = len;
+          } else {
+            _start = slice.startOffset;
+            _end = slice.endOffset;
+          }
+          result = paraEvent.absorb
+              ? SelectionResult.next
+              : SelectionResult.end;
+        case SelectionEventType.startEdgeUpdate:
+        case SelectionEventType.endEdgeUpdate:
+          final SelectionEdgeUpdateEvent edgeEvent =
+              event as SelectionEdgeUpdateEvent;
+          final bool isEnd = edgeEvent.type == SelectionEventType.endEdgeUpdate;
+          final Offset local = _box.globalToLocal(edgeEvent.globalPosition);
+          final SelectionResult edgeResult =
+              SelectionUtils.getResultBasedOnRect(_box.paintBounds, local);
+          final int targetOffset;
+          switch (edgeResult) {
+            case SelectionResult.previous:
+              targetOffset = 0;
+            case SelectionResult.next:
+              targetOffset = len;
+            case SelectionResult.end:
+            case SelectionResult.pending:
+            case SelectionResult.none:
+              final Offset adjusted = SelectionUtils.adjustDragOffset(
+                _box.paintBounds,
+                local,
+                direction: _box._textDirection,
+              );
+              final int globalOff = _offsetForLocal(adjusted);
+              switch (edgeEvent.granularity) {
+                case TextGranularity.word:
+                  final _SelectableSlice? slice = _sliceForOffset(globalOff);
+                  if (slice == null) {
+                    targetOffset = globalOff;
                   } else {
-                    targetOffset = (globalOff - wStart) <= (wEnd - globalOff)
-                        ? wStart
-                        : wEnd;
+                    final int localOff = (globalOff - slice.startOffset).clamp(
+                      0,
+                      slice.plainText.length,
+                    );
+                    final TextRange word = slice.painter.getWordBoundary(
+                      TextPosition(offset: localOff),
+                    );
+                    final int wStart = slice.startOffset + word.start;
+                    final int wEnd = slice.startOffset + word.end;
+                    final int? other = isEnd ? _start : _end;
+                    if (other != null && globalOff < other) {
+                      targetOffset = wStart;
+                    } else if (other != null && globalOff > other) {
+                      targetOffset = wEnd;
+                    } else {
+                      targetOffset = (globalOff - wStart) <= (wEnd - globalOff)
+                          ? wStart
+                          : wEnd;
+                    }
+                  }
+                case TextGranularity.paragraph:
+                  final _SelectableSlice? slice = _sliceForOffset(globalOff);
+                  if (slice == null) {
+                    targetOffset = globalOff;
+                  } else {
+                    final int? other = isEnd ? _start : _end;
+                    targetOffset = (other != null && globalOff < other)
+                        ? slice.startOffset
+                        : slice.endOffset;
+                  }
+                case TextGranularity.character:
+                case TextGranularity.line:
+                case TextGranularity.document:
+                  targetOffset = globalOff.clamp(0, len);
+              }
+          }
+          if (isEnd) {
+            _end = targetOffset;
+            _start ??= targetOffset;
+          } else {
+            _start = targetOffset;
+            _end ??= targetOffset;
+          }
+          result = edgeResult;
+        case SelectionEventType.granularlyExtendSelection:
+          final GranularlyExtendSelectionEvent ext =
+              event as GranularlyExtendSelectionEvent;
+          final int current =
+              (ext.isEnd ? _end : _start) ?? (ext.forward ? 0 : len);
+          final int next = (ext.forward ? current + 1 : current - 1).clamp(
+            0,
+            len,
+          );
+          if (ext.isEnd) {
+            _end = next;
+            _start ??= next;
+          } else {
+            _start = next;
+            _end ??= next;
+          }
+          result = (ext.forward && next == len)
+              ? SelectionResult.next
+              : (!ext.forward && next == 0)
+              ? SelectionResult.previous
+              : SelectionResult.end;
+        case SelectionEventType.directionallyExtendSelection:
+          final DirectionallyExtendSelectionEvent ext =
+              event as DirectionallyExtendSelectionEvent;
+          _box._ensureSlices();
+          final List<_SelectableSlice> slices = _box._slices;
+          if (len == 0 || slices.isEmpty) {
+            if (ext.isEnd) {
+              _end = 0;
+              _start ??= 0;
+            } else {
+              _start = 0;
+              _end ??= 0;
+            }
+            result = switch (ext.direction) {
+              SelectionExtendDirection.previousLine => SelectionResult.previous,
+              SelectionExtendDirection.nextLine => SelectionResult.next,
+              SelectionExtendDirection.forward ||
+              SelectionExtendDirection.backward => SelectionResult.end,
+            };
+          } else {
+            final double rawLocalDx = ext.dx.isFinite
+                ? _box.globalToLocal(Offset(ext.dx, 0.0)).dx
+                : 0.0;
+            final double localDx = rawLocalDx.isFinite ? rawLocalDx : 0.0;
+            final int next;
+            switch (ext.direction) {
+              case SelectionExtendDirection.forward:
+              case SelectionExtendDirection.backward:
+                final bool isForward =
+                    ext.direction == SelectionExtendDirection.forward;
+                final int current =
+                    (ext.isEnd ? _end : _start) ?? (isForward ? 0 : len);
+                final _SelectableSlice slice =
+                    slices[_sliceIndexForOffset(current)];
+                final int localOff = (current - slice.startOffset).clamp(
+                  0,
+                  slice.plainText.length,
+                );
+                final Offset caret = slice.painter.getOffsetForCaret(
+                  TextPosition(offset: localOff),
+                  Rect.zero,
+                );
+                next = _offsetInSliceAt(
+                  slice,
+                  localDx,
+                  caret.dy + slice.painter.preferredLineHeight * 0.5,
+                );
+                result = SelectionResult.end;
+              case SelectionExtendDirection.previousLine:
+              case SelectionExtendDirection.nextLine:
+                final bool below =
+                    ext.direction == SelectionExtendDirection.nextLine;
+                final int current =
+                    (ext.isEnd ? _end : _start) ?? (below ? 0 : len);
+                final int sliceIdx = _sliceIndexForOffset(current);
+                final _SelectableSlice slice = slices[sliceIdx];
+                final int localOff = (current - slice.startOffset).clamp(
+                  0,
+                  slice.plainText.length,
+                );
+                final Offset caret = slice.painter.getOffsetForCaret(
+                  TextPosition(offset: localOff),
+                  Rect.zero,
+                );
+                final List<ui.LineMetrics> lines = slice.painter
+                    .computeLineMetrics();
+                int currentLine = lines.isEmpty ? 0 : lines.length - 1;
+                for (int l = 0; l < lines.length; l++) {
+                  if (lines[l].baseline > caret.dy) {
+                    currentLine = l;
+                    break;
                   }
                 }
-              case TextGranularity.paragraph:
-                final _SelectableSlice? slice = _sliceForOffset(globalOff);
-                if (slice == null) {
-                  targetOffset = globalOff;
+                if (!below) {
+                  if (currentLine > 0) {
+                    next = _offsetInSliceAt(
+                      slice,
+                      localDx,
+                      lines[currentLine - 1].baseline,
+                    );
+                    result = SelectionResult.end;
+                  } else {
+                    int prevRowIdx = -1;
+                    for (int k = sliceIdx - 1; k >= 0; k--) {
+                      if (slices[k].top < slice.top) {
+                        prevRowIdx = k;
+                        break;
+                      }
+                    }
+                    if (prevRowIdx != -1) {
+                      final _SelectableSlice target = _closestSliceOnRow(
+                        slices,
+                        prevRowIdx,
+                        localDx,
+                      );
+                      final List<ui.LineMetrics> prevLines = target.painter
+                          .computeLineMetrics();
+                      final double targetY = prevLines.isEmpty
+                          ? math.max(
+                              0.0,
+                              target.painter.height -
+                                  target.painter.preferredLineHeight * 0.5,
+                            )
+                          : prevLines.last.baseline;
+                      next = _offsetInSliceAt(target, localDx, targetY);
+                      result = SelectionResult.end;
+                    } else {
+                      next = 0;
+                      result = SelectionResult.previous;
+                    }
+                  }
                 } else {
-                  final int? other = isEnd ? _start : _end;
-                  targetOffset = (other != null && globalOff < other)
-                      ? slice.startOffset
-                      : slice.endOffset;
+                  if (currentLine + 1 < lines.length) {
+                    next = _offsetInSliceAt(
+                      slice,
+                      localDx,
+                      lines[currentLine + 1].baseline,
+                    );
+                    result = SelectionResult.end;
+                  } else {
+                    int nextRowIdx = -1;
+                    for (int k = sliceIdx + 1; k < slices.length; k++) {
+                      if (slices[k].top > slice.top) {
+                        nextRowIdx = k;
+                        break;
+                      }
+                    }
+                    if (nextRowIdx != -1) {
+                      final _SelectableSlice target = _closestSliceOnRow(
+                        slices,
+                        nextRowIdx,
+                        localDx,
+                      );
+                      final List<ui.LineMetrics> nextLines = target.painter
+                          .computeLineMetrics();
+                      final double targetY = nextLines.isEmpty
+                          ? math.min(
+                              target.painter.height,
+                              target.painter.preferredLineHeight * 0.5,
+                            )
+                          : nextLines.first.baseline;
+                      next = _offsetInSliceAt(target, localDx, targetY);
+                      result = SelectionResult.end;
+                    } else {
+                      next = len;
+                      result = SelectionResult.next;
+                    }
+                  }
                 }
-              case TextGranularity.character:
-              case TextGranularity.line:
-              case TextGranularity.document:
-                targetOffset = globalOff.clamp(0, len);
             }
-        }
-        if (isEnd) {
-          _end = targetOffset;
-          _start ??= targetOffset;
-        } else {
-          _start = targetOffset;
-          _end ??= targetOffset;
-        }
-        result = edgeResult;
-      case SelectionEventType.granularlyExtendSelection:
-        final GranularlyExtendSelectionEvent ext =
-            event as GranularlyExtendSelectionEvent;
-        final int current =
-            (ext.isEnd ? _end : _start) ?? (ext.forward ? 0 : len);
-        final int next = (ext.forward ? current + 1 : current - 1).clamp(
-          0,
-          len,
-        );
-        if (ext.isEnd) {
-          _end = next;
-          _start ??= next;
-        } else {
-          _start = next;
-          _end ??= next;
-        }
-        result = (ext.forward && next == len)
-            ? SelectionResult.next
-            : (!ext.forward && next == 0)
-            ? SelectionResult.previous
-            : SelectionResult.end;
-      case SelectionEventType.directionallyExtendSelection:
-        final DirectionallyExtendSelectionEvent ext =
-            event as DirectionallyExtendSelectionEvent;
-        final bool forward =
-            ext.direction == SelectionExtendDirection.forward ||
-            ext.direction == SelectionExtendDirection.nextLine;
-        final int current = (ext.isEnd ? _end : _start) ?? 0;
-        final int next = (forward ? len : 0);
-        if (ext.isEnd) {
-          _end = next;
-          _start ??= next;
-        } else {
-          _start = next;
-          _end ??= next;
-        }
-        result = next == current ? SelectionResult.none : SelectionResult.end;
+            if (ext.isEnd) {
+              _end = next;
+              _start ??= next;
+            } else {
+              _start = next;
+              _end ??= next;
+            }
+          }
+      }
     }
 
     if (prevStart != _start || prevEnd != _end) {

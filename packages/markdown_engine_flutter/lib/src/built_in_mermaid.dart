@@ -9,6 +9,7 @@ import 'package:pele_dart/pele_dart.dart' as pele;
 import 'package:vector_graphics/vector_graphics_compat.dart';
 
 import 'built_in_mermaid_worker.dart';
+import 'fast_text.dart' show MarkdownRichText;
 import 'inline_renderer.dart' show MarkdownInteractiveAction;
 import 'theme.dart';
 
@@ -958,12 +959,12 @@ final class _BuiltInMermaidDiagramState extends State<BuiltInMermaidDiagram> {
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.all(12.0),
-                child: Text(trimmed, style: theme.codeTextStyle()),
+                child: MarkdownRichText(trimmed, style: theme.codeTextStyle()),
               )
             else
               Padding(
                 padding: const EdgeInsets.all(12.0),
-                child: Text(
+                child: MarkdownRichText(
                   'Waiting for diagram definition...',
                   style: TextStyle(
                     color: theme.muted,
@@ -1072,7 +1073,7 @@ final class _BuiltInMermaidDiagramState extends State<BuiltInMermaidDiagram> {
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.all(12.0),
-                child: Text(trimmed, style: theme.codeTextStyle()),
+                child: MarkdownRichText(trimmed, style: theme.codeTextStyle()),
               ),
             SelectionContainer.disabled(
               child: Container(
