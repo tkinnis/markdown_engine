@@ -12,7 +12,7 @@
   - [Reference Sync](/doc/REFERENCE_SYNC.md)
   - [Releasing](/doc/RELEASING.md)
 
-- Packages
+- Packages & Apps
   - [markdown_engine README](/packages/markdown_engine/README.md)
   - [markdown_engine Changelog](/packages/markdown_engine/CHANGELOG.md)
   - [markdown_engine_flutter README](/packages/markdown_engine_flutter/README.md)

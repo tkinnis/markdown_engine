@@ -8,9 +8,9 @@ Before opening an issue or submitting a pull request, review the architectural i
 
 ## 1. Core Architectural Invariants
 
-1. **Pure-Dart SDK Boundary**: Everything under `packages/markdown_engine/lib/` must use standard pure-Dart libraries (`dart:core`, `dart:collection`, `dart:convert`, `dart:math`, `dart:typed_data`) with `dependencies:` restricted strictly to `meta: ^1.16.0`. Never import `flutter`, `dart:ui`, `dart:io`, `dart:html`, or `dart:js*` inside the core package.
-2. **Dart `^3.8.0` Compatibility**: Keep both `packages/markdown_engine` and `packages/markdown_engine_flutter` compatible with Dart `^3.8.0` and Flutter `>=3.32.0`. Never use Dart 3.12+ private named-parameter shorthands (`this._field`); use explicit initializer lists (with `// ignore: prefer_initializing_formals` where needed).
-3. **Flutter `3.50+` Import Scoping**: Inside `packages/markdown_engine_flutter/lib/`, import `package:flutter/widgets.dart` and scope any `package:flutter/material.dart` imports with explicit `show` clauses and `// ignore: deprecated_member_use`.
+1. **Pure-Dart SDK Boundary**: Everything under `packages/markdown_engine/lib/` may import only pure-Dart standard core libraries (core, collection, convert, math, typed_data) with package dependencies restricted strictly to `meta: ^1.16.0`. Never import Flutter, `dart:ui`, `dart:io`, `dart:html`, or `dart:js*` inside the core package.
+2. **Split SDK Constraints**: Keep `packages/markdown_engine` compatible with Dart ^3.8.0 (never use Dart 3.12+ `this._field` private named-parameter shorthands; use explicit initializer lists with `// ignore: prefer_initializing_formals` where needed). Target Dart ^3.13.0 and Flutter >=3.47.0 for `packages/markdown_engine_flutter`, its example app, and `studio/`.
+3. **Flutter >=3.47.0 Import Scoping**: Inside `packages/markdown_engine_flutter/lib/`, target Flutter >=3.47.0 (verified through Flutter 3.50+), import `package:flutter/widgets.dart` first, and scope any `package:flutter/material.dart` imports with explicit `show` clauses and `// ignore: deprecated_member_use`.
 4. **CommonMark & GFM Spec Parity**: Core syntax and GFM extensions target the pinned `CommonMark 0.31.2` and `github/cmark-gfm 0.29.0.gfm.13` fixtures vendored in `corpus/spec/` and tracked in [`REFERENCE.md`](REFERENCE.md).
 5. **Lockstep Package Versioning**: `packages/markdown_engine` and `packages/markdown_engine_flutter` share identical versions across both `pubspec.yaml` files, both changelogs, and the core dependency constraint, verified by `tool/check_versions.dart`.
 
@@ -20,7 +20,7 @@ Before opening an issue or submitting a pull request, review the architectural i
 
 ### Prerequisites
 
-* **Flutter & Dart SDK**: Flutter `>=3.32.0` with Dart `^3.8.0` for `packages/markdown_engine` and `packages/markdown_engine_flutter` (full `pub` workspace resolution including `studio/` requires Flutter `>=3.47.0` and Dart `^3.13.0`).
+* **Flutter & Dart SDK**: Flutter >=3.47.0 with Dart ^3.13.0 for `packages/markdown_engine_flutter`, its example app, `studio/`, and full workspace resolution; `packages/markdown_engine` maintains Dart ^3.8.0 compatibility.
 
 ### Installing Dependencies
 
@@ -57,7 +57,7 @@ dart analyze --fatal-infos
 ```bash
 dart run tool/check_versions.dart
 dart run tool/sync_reference.dart --verify
-dart run tool/verify_spec.dart
+dart run tool/verify_spec.dart --strict
 dart run tool/benchmark_suite.dart --check-regressions
 ```
 

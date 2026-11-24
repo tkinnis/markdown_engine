@@ -31,12 +31,17 @@ This document is the **single source of truth** for the upstream CommonMark and 
 
 ### CommonMark `0.31.2` (`652` Examples)
 
-The official CommonMark `0.31.2` JSON test suite covers tabs, thematic breaks, ATX and setext headings, indented and fenced code blocks, HTML blocks, link reference definitions, paragraphs, blank lines, block quotes, list items and lists, backslash escapes, entity and numeric character references, code spans, emphasis and strong emphasis, links, images, autolinks, raw HTML, hard and soft line breaks, and textual content.
+The official CommonMark 0.31.2 JSON test suite covers:
+
+* **Leaf Blocks**: Tabs, thematic breaks, ATX and setext headings, indented and fenced code blocks, HTML blocks, paragraphs, and blank lines.
+* **Container Blocks**: Block quotes, list items, and ordered or bullet lists.
+* **Inlines**: Backslash escapes, entity and numeric character references, code spans, emphasis and strong emphasis, links, images, autolinks, raw HTML, hard and soft line breaks, and textual content.
+* **References**: Link reference definitions and reference-link resolution across all 652 official examples.
 
 ### GitHub Flavored Markdown `0.29.0.gfm.13`
 
-* **`test/spec.txt` (`672` examples)**: `648` core CommonMark `0.29` examples, `22` inline GFM extension examples (`8` `table`, `2` `strikethrough`, `11` `autolink`, `1` `tagfilter`), and `2` `disabled` task-list examples.
-* **`test/extensions.txt` (`30` examples)**: Dedicated GFM extension and interoperability suite covering tables, strikethrough, autolinks (including `1` `<IGNORE>` crash-regression fixture), HTML `tagfilter`, footnotes, and task lists.
+* **`test/spec.txt` (672 examples)**: 648 core CommonMark 0.29 examples, 22 inline GFM extension examples (8 `table`, 2 `strikethrough`, 11 `autolink`, 1 `tagfilter`), and 2 `disabled` task-list examples.
+* **`test/extensions.txt` (30 examples)**: Dedicated GFM extension and interoperability suite covering tables, strikethrough, autolinks (including 1 `<IGNORE>` crash-regression fixture), HTML `tagfilter`, footnotes, and task lists.
 
 ### Additional Corpus & Engine Suites
 

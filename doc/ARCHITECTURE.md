@@ -7,7 +7,7 @@
 ## 1. Scope & Design Goals
 
 * **Strict Pure-Dart Core Boundary**: Everything under `packages/markdown_engine/lib/` depends exclusively on `package:meta` (`^1.16.0`) and never imports `package:flutter`, `dart:ui`, `dart:io`, `dart:html`, or `dart:js*`. `MarkdownEngine` executes synchronously on caller strings with zero filesystem, network, or global mutable state.
-* **Specification-Driven Parity**: Core parsing targets exact HTML compliance with vendored CommonMark `0.31.2` (`652` examples) and `github/cmark-gfm 0.29.0.gfm.13` (`672` spec + `30` extension examples) fixtures in `corpus/spec/`, verified by `tool/verify_spec.dart` and summarized in [`doc/COVERAGE.md`](COVERAGE.md).
+* **Specification-Driven Parity**: Core parsing targets exact HTML compliance with vendored CommonMark 0.31.2 (652 examples) and `github/cmark-gfm` 0.29.0.gfm.13 (672 spec + 30 extension examples) fixtures in `corpus/spec/`, verified by `tool/verify_spec.dart` and summarized in [`doc/COVERAGE.md`](COVERAGE.md).
 * **Dart 3 Sealed AST**: All 18 block node types extend `sealed class MarkdownBlockNode` and all 20 inline node types extend `sealed class MarkdownInlineNode`, providing exhaustive `switch` checks, structural value equality, and UTF-16 `SourceSpan` tracking.
 * **Incremental & Streaming First**: `IncrementalMarkdownParser` and `StreamingMarkdownController` avoid quadratic reparses in live editors and token feeds while guaranteeing exact parity with full `MarkdownEngine.parse`.
 * **Defense in Depth**: Configurable `MarkdownBudgets`, `MarkdownUrlPolicy` URI allowlisting, GFM `tagfilter`, and deep raw HTML sanitization (`sanitizeHtml: true`) bound untrusted Markdown deterministically.
@@ -40,13 +40,13 @@ flowchart LR
 ### Phase 1: Line-by-Line Container Stack & Post-Processing
 
 * **Zero-Allocation Line Indexing**: `_splitLineRanges` indexes normalized line slices into a flat `Int32List` without allocating per-line `String` objects, scanning lines via a reusable `_LineCursor`.
-* **Container Stack & Cold Openers**: Maintains an open-container stack (`_DocOpenBlock`, blockquotes, lists, list items, footnote definitions, code fences, HTML blocks 1–7, `$$...$$` and `\[...\]` display math, GFM pipe tables, ATX/setext headings, thematic breaks, and paragraphs), isolating cold openers (`_tryOpenFencedCode`, `_tryOpenFootnoteDef`, `_tryOpenListItem`, `_appendLiteralTipLine`, `_buildRareBlock`) off hot loops.
+* **Container Stack & Cold Openers**: Maintains an open-container stack across blockquotes, lists, footnote definitions, code fences, HTML blocks 1–7, display math, GFM pipe tables, headings, thematic breaks, and paragraphs while isolating cold openers (such as `_tryOpenFencedCode` and `_buildRareBlock`) off hot loops.
 * **Definitions & Structured Post-Processing**: Extracts leading link reference definitions into a normalized first-wins table (`Unicode` case-folded, whitespace-collapsed) when paragraphs finalize, then transforms `alerts`, `definitionLists`, `detailsBlocks`, `figureBlocks`, and `alignedBlocks` during Phase 1 finalization so Phase 2 resolves their inlines uniformly.
 
 ### Phase 2: Delimiter Stack & Cross-Reference Resolution
 
 * **Fast-Path Inline Scanning**: Uses a cached 128-byte structural ASCII lookup table (`_getStructuralLut`), single-backtick `indexOf` code-span fast paths, reusable resolvers (`ReusableBlockInlineResolver`), and single-pass linear text coalescing (`_coalesceTextNodes`).
-* **Delimiter Stack & Entities**: Resolves `*`/`_`, `~`/`~~`, `==`, `~`, and `^` delimiters via CommonMark flanking rules backed by `unicode.dart`, alongside HTML5 named/numeric entities (`entities.dart`), links, images, CommonMark/GFM autolinks, inline math (`$...$`, `\(...\)`), `<kbd>`, `<abbr>`, `<picture>`, emoji shortcodes (`emoji.dart`), and smart punctuation.
+* **Delimiter Stack & Entities**: Resolves emphasis, strikethrough, highlight, subscript, and superscript delimiters via CommonMark flanking rules backed by `unicode.dart`, alongside HTML5 named/numeric entities (`entities.dart`), links, images, CommonMark/GFM autolinks, inline math, inline HTML elements, emoji shortcodes, and smart punctuation.
 * **Footnotes, Slugs & Lazy Document State**: Queues footnote citations (`[^label]`) iteratively in first-reference order (preventing cyclic recursion) to append `FootnoteSectionNode`, computes deduplicated slugs via `HeadingSlugGenerator` (`slugs.dart`), and defers `source`, `outline`, and `remoteImageAddresses` on `MarkdownDocument` via `_DocumentLazyState` until accessed.
 
 ---
@@ -63,8 +63,8 @@ flowchart TD
   Inline --> ExtI["GFM & Extended Inlines: Strikethrough, Highlight, Subscript, Superscript, MathInline, FootnoteRef, KbdInline, AbbrInline, AnchorInline, PictureInline, InlineBreak"]
 ```
 
-* **18 `MarkdownBlockNode` Subtypes**: `FrontmatterNode`, `HeadingNode`, `ParagraphNode`, `CodeBlockNode`, `BlockQuoteNode`, `AlertNode`, `ListNode`, `ListItemNode`, `TableNode`, `ThematicBreakNode`, `HtmlBlockNode`, `DetailsBlockNode`, `AlignedBlockNode`, `FigureBlockNode`, `MathBlockNode`, `DefinitionListNode`, `FootnoteDefinitionNode`, and `FootnoteSectionNode`.
-* **20 `MarkdownInlineNode` Subtypes**: `TextNode`, `SoftBreakNode`, `HardBreakNode`, `CodeSpanNode`, `EmphasisNode`, `StrongNode`, `StrikethroughNode`, `HighlightNode`, `SubscriptNode`, `SuperscriptNode`, `LinkNode`, `ImageNode`, `MathInlineNode`, `FootnoteRefNode`, `KbdInlineNode`, `AbbrInlineNode`, `AnchorInlineNode`, `PictureInlineNode`, `InlineBreakNode`, and `RawHtmlInlineNode`.
+* **18 `MarkdownBlockNode` Subtypes**: Covers core CommonMark blocks (headings, paragraphs, code blocks, blockquotes, lists, list items, thematic breaks, raw HTML blocks) plus GFM pipe tables, GitHub alerts, frontmatter, display math, definition lists, `<details>`, aligned containers, `<figure>`, and footnotes; see the [API Manual](API_MANUAL.md#5-sealed-ast-reference-and-supporting-types) for the full subtype table.
+* **20 `MarkdownInlineNode` Subtypes**: Covers core CommonMark inlines (text, soft/hard breaks, code spans, emphasis, strong, links, images, raw HTML) plus GFM strikethrough, highlight, subscript/superscript, inline math, footnote refs, `<kbd>`, `<abbr>`, anchors, `<picture>`, and inline `<br>` breaks; see the [API Manual](API_MANUAL.md#5-sealed-ast-reference-and-supporting-types) for the full subtype table.
 * **Pooled `blockId` Identity**: Every `MarkdownBlockNode` carries a deterministic `blockId` string drawn from precomputed `_precomputedBlockIds` (`b-0`..`b-4095`) to avoid hot string interpolation and keep UI widget state, selection anchors, and scroll positions stable across incremental updates.
 
 ---
@@ -77,15 +77,20 @@ Untrusted Markdown introduces three threat classes: executable URI schemes, raw 
 
 When `MarkdownOptions.sanitizeUrls` is enabled (the default across all presets), links, images, `<picture>` sources, and sanitized HTML URI attributes pass through `MarkdownUrlPolicy`:
 
-* **Obfuscation Stripping & ASCII Fast Path**: Strips ASCII control characters (`<= 0x20`, `0x7F`), Unicode whitespace, and zero-width characters (`stripControlAndWhitespaceForUrl`), decodes HTML5 entities before scheme inspection, and fast-paths clean `http://`, `https://`, and `#fragment` URIs inside `MarkdownUrlPolicy.isAllowed`.
-* **Strict vs. Blocklist Constructors**: `MarkdownUrlPolicy.strict()` (default on `MarkdownOptions()`) allows only `http`, `https`, and `mailto` plus relative/fragment URLs while rejecting protocol-relative (`//`, `\\`, `/\`, `\/`) and userinfo (`user:pass@host`) URLs; `MarkdownUrlPolicy()` blocks `javascript`, `vbscript`, and `data` via `defaultBlockedSchemes`.
-* **Custom Policy Controls**: Supports custom `allowedSchemes`, case-insensitive `allowedHosts` (stripping ports and IPv6 brackets), `allowRelative` / `allowFragments` toggles, and `allowSafeImageDataUrls` (permitting base64 raster `png`/`jpeg`/`jpg`/`gif`/`webp` while keeping SVG and HTML `data:` URIs blocked).
+* **Obfuscation Stripping & ASCII Fast Path**: Strips ASCII control characters (`<= 0x20`, `0x7F`), Unicode whitespace, and zero-width characters (`stripControlAndWhitespaceForUrl`), decodes HTML5 entities before scheme inspection, and fast-paths clean HTTP/HTTPS and `#fragment` URIs inside `MarkdownUrlPolicy.isAllowed`.
+* **Strict vs. Blocklist Constructors**: `MarkdownUrlPolicy.strict()` (default on `MarkdownOptions()`) allows explicit HTTP, HTTPS, and mailto schemes plus relative and fragment URLs while rejecting protocol-relative and userinfo authority forms; `MarkdownUrlPolicy()` enforces `defaultBlockedSchemes` (`javascript`, `vbscript`, `data`).
+* **Custom Policy Controls**: Supports custom `allowedSchemes` and case-insensitive `allowedHosts` (stripping ports and IPv6 brackets), relative/fragment toggles, and `allowSafeImageDataUrls` for base64 raster images while keeping SVG and HTML data URIs blocked.
 
 ### GFM Tagfilter & Linear HTML5 Sanitizer
 
-* **GFM `tagfilter` (`gfmTagFilter: true`)**: Escapes the opening `<` of `<title>`, `<textarea>`, `<style>`, `<xmp>`, `<iframe>`, `<noembed>`, `<noframes>`, `<script>`, and `<plaintext>` tags to `&lt;` per the GFM `0.29` specification.
-* **Linear-Time State-Machine HTML5 Sanitizer (`sanitizeHtml: true`)**: `sanitizeRawHtml()` runs a zero-backtracking state-machine tokenizer and allowlist sanitizer handling slash-separated attributes (`<img/src=x/...>`), `<` inside quoted attributes, and entity decoding before `urlPolicy.isAllowed` and CSS `url(...)` checks.
-* **Active Content Stripping**: Strips dangerous elements (`<script>`, `<style>`, `<noscript>`, `<template>`, `<iframe>`, `<object>`, `<embed>`, `<applet>`, `<base>`, `<link>`, `<meta>`, `<title>`, `<textarea>`, `<xmp>`, `<noembed>`, `<noframes>`, `<plaintext>`, `<svg>`, `<math>`, `<form>`, `<frame>`, `<frameset>`), `on*` handlers, `srcdoc`, and unsafe URI attributes (`href`, `src`, `srcset`, `background`, `cite`, `ping`, `longdesc`, `poster`, `action`, `formaction`, `xlink:href`).
+* **GFM `tagfilter` (`gfmTagFilter: true`)**: Escapes the opening `<` of disallowed GFM raw HTML tags (such as script, style, iframe, title, and textarea) to `&lt;` per the GFM 0.29 specification.
+* **Linear-Time HTML5 Sanitizer (`sanitizeHtml: true`)**: `sanitizeRawHtml()` runs a zero-backtracking state-machine allowlist tokenizer handling slash-separated attributes, unescaped `<` inside quotes, and HTML5 entity decoding before URL and CSS checks:
+
+| Sanitization Category | Targets Neutralized or Validated (`sanitizeHtml: true`) |
+| :--- | :--- |
+| **Stripped Elements** | Raw-text and container subtrees (script, style, iframe, svg, math, object, applet, template, form, noscript, title, textarea, xmp, noembed, noframes, frameset, plaintext) plus non-allowlisted tags (embed, base, link, meta, frame). |
+| **Stripped Attributes** | Inline `on*` event handlers, `srcdoc`, `http-equiv`, `formaction`, `dynsrc`, `lowsrc`, `xmlns`, and unsafe CSS `style` values (`url(...)`, `expression(...)`). |
+| **Validated URI Attributes** | Checks `href`, `src`, `srcset`, `ping`, and media/form URI attributes (such as action, poster, cite, background, longdesc, and `xlink:href`) against `urlPolicy.isAllowed`. |
 
 ### Resource & Complexity Budgets (`MarkdownBudgets`)
 
@@ -151,7 +156,15 @@ flowchart LR
 ### 6.1 Layer 1 — Parse, Streaming Modes & Isolate Offload
 
 * **Cached Widget Parsing (`MarkdownView`)**: Parses `data` once in widget state, applies `IncrementalMarkdownParser` automatically inside `didUpdateWidget` on compatible edits (preserving stateful `<details>` and copy widgets), and performs zero re-parses on Light/Dark theme toggles. `MarkdownView.document` skips parsing entirely.
-* **Hybrid Streaming Modes (`MarkdownView.streaming`)**: Subscribes to `StreamingMarkdownController` push listeners without `Timer.periodic` polling and selects dynamically among four layouts: `canvasFull` (full-document `MarkdownStreamingCanvasLeaf`), `hybridCanvasTail` (frozen settled-prefix `SliverMarkdownDocument` sliced at `settledPrefixBlockCount` plus trailing `MarkdownStreamingSliverAdapter` + `MarkdownStreamingCanvasLeaf`), `hybridWidgetTail` (settled prefix sliver plus slot-isolated trailing `SliverMarkdownDocument` while active blocks use rich/custom builders), and `widgetFull`.
+* **Push-Based Streaming Dispatch (`MarkdownView.streaming`)**: Subscribes to `StreamingMarkdownController` push listeners without `Timer.periodic` polling and selects dynamically among four layout modes:
+
+| Stream Mode | Layout Strategy |
+| :--- | :--- |
+| `canvasFull` | Renders eligible simple-prose streams directly on `MarkdownStreamingCanvasLeaf`. |
+| `hybridCanvasTail` | Splits a frozen settled-prefix `SliverMarkdownDocument` (at `settledPrefixBlockCount`) above a trailing `MarkdownStreamingSliverAdapter` + `MarkdownStreamingCanvasLeaf`. |
+| `hybridWidgetTail` | Pairs a settled prefix sliver with a slot-isolated trailing `SliverMarkdownDocument` while active blocks invoke rich or custom builders. |
+| `widgetFull` | Renders the full document inside `SliverMarkdownDocument` (or a non-scrolling `Column`) on fallback or post-`finish()` handoff. |
+
 * **Background Reader (`MarkdownDocumentReader`)**: Implements `ValueListenable<MarkdownDocument>`, parses short strings synchronously, offloads inputs `>= syncThreshold` (`4096`) to `Isolate.run` with in-flight deduplication and latest-wins coalescing, and falls back synchronously on `IsolateSpawnException`.
 
 ### 6.2 Layer 2 — Theme Tokens & Reactive Adapter Derivation
@@ -162,19 +175,19 @@ flowchart LR
 
 ### 6.3 Layer 3 — Virtualized Slivers, Fast Prose & Selection
 
-* **Virtualized Sliver Layout (`SliverMarkdownDocument`)**: Stateful sliver backed by `RenderSliverList`, `SliverChildBuilderDelegate` keyed by `ValueKey<String>(block.blockId)` with `idToIndex` lookup, `Float64List` extent estimation, single-frame batched leading-child scroll-offset corrections (capped after `3` consecutive cycles), `addAutomaticKeepAlives: true`, and child memoization in `_MarkdownTopLevelBlockWidgetState` / `_MarkdownInlineTextState`.
-* **Fast Leaf RenderBoxes & Streaming Canvas**: Eligible prose, code blocks, and table cells bypass heavy wrapper trees via `FastMarkdownText`, `MarkdownParagraphLeaf` (`RenderMarkdownParagraph`), `MarkdownHorizontalOverflowBox` (`RenderHorizontalOverflowBox`), and `buildFastSimpleInlineSpan`. `RenderMarkdownStreamingCanvas` maintains `O(tail)` incremental sync, dry-sync paint tracking, visible-viewport prefix `ui.Picture` reuse, and cross-sliver `Selectable` support.
-* **Release-Safe Selection (`MarkdownRichText`)**: Guards `SelectionArea` behind `MaterialLocalizations` (falling back to `SelectableRegion` in `WidgetsApp`), backs `MarkdownRichText` with `_SafeRenderParagraph` tracking explicit layout readiness (never relying on `debugNeedsLayout` in profile/release), excludes UI chrome via `SelectionContainer.disabled`, and exports full `toPlainText()` on `Cmd+A` / Select All.
+* **Virtualized Sliver Layout (`SliverMarkdownDocument`)**: Stateful sliver backed by `RenderSliverList` keyed by `blockId` with `Float64List` extent estimation, batched leading-child scroll-offset corrections (capped after 3 cycles), keep-alives, and top-level block memoization.
+* **Fast Leaf RenderBoxes & Streaming Canvas**: Eligible prose, code blocks, and table cells bypass heavy wrapper trees via `FastMarkdownText`, `MarkdownParagraphLeaf`, and `MarkdownHorizontalOverflowBox`. `RenderMarkdownStreamingCanvas` maintains `O(tail)` incremental sync, visible-viewport prefix `ui.Picture` reuse, and cross-sliver selection.
+* **Release-Safe Selection (`MarkdownRichText`)**: Guards `SelectionArea` behind `MaterialLocalizations` (falling back to `SelectableRegion` in widgets-only apps), tracks explicit layout readiness in `_SafeRenderParagraph` across debug/profile/release builds, excludes UI chrome, and exports full plain text on Cmd+A.
 * **Navigation & Accessibility (`MarkdownController`)**: Tracks owner-scoped `ScrollController` attachments, isolates `readingPlaceNotifier` from document rebuilds via `RenderAbstractViewport` metrics, performs frame-synchronized `scrollToAnchor` convergence, and wires `Semantics` alongside keyboard `FocusableActionDetector` controls.
 
 ### 6.4 Built-In Math, Mermaid Worker Pool & Native HTML Rendering
 
 | Subsystem | Module(s) | Architecture & Caching Behavior |
 | :--- | :--- | :--- |
-| **Built-In TeX Math** | `built_in_math.dart` (`tex_math_flutter`) | `BuiltInMathCache` stores `(font.signature, displayMode, latex)` `DisplayList`, spoken text, and error entries under a `1,024`-entry / `8 MiB` LRU budget, serving synchronous `TexMath.displayList` once `TexMathFontBundle.cachedMathFont` is warm. |
-| **Built-In Mermaid & Worker Pool** | `built_in_mermaid.dart`, `built_in_mermaid_worker.dart` (`_io` / `_stub`) | `BuiltInMermaidCache` caches `(paletteKey, trimmedCode)` `vector_graphics` payloads under a `128`-entry / `16 MiB` LRU budget; `PersistentMermaidWorker` keeps `1` pre-warmed primary `Isolate` and lazily scales up to `maxMermaidConcurrentWorkers` auxiliary burst isolates (`15`s idle teardown, `TransferableTypedData` replies, web `compute()` fallback). |
-| **Native HTML Block & Table Renderer** | `html_block_renderer.dart`, `inline_renderer.dart`, `block_renderer.dart` | `parseHtmlBlockFragment` tokenizes HTML fragments in linear time (`HtmlBlockEntry`) into native AST blocks (`<table>` with `<caption>`/`colspan`/`thead`/`tbody`/`tfoot`, `<dl>`, `<details>`, `<figure>`, `<center>`, `<div align>`, headings, lists, block-wrapping `<a id>`) within depth/row/column bounds, while `inline_renderer.dart` handles `<mark>`, `<sub>`, `<sup>`, `<abbr>`, `<kbd>`, `<u>`, `<small>`, `<q>`, `<code>`, `<picture>`, and `<img>`. |
-| **Image & Link Security** | `delegates.dart`, `inline_renderer.dart`, `block_renderer.dart` | Enforces `MarkdownUrlPolicy` on interactive taps and `<picture>`/`<img>` sources, gates remote images via `MarkdownImagePolicy`, caches decoded `data:image/` payloads, and recycles/post-frame-disposes `TapGestureRecognizer`s. |
+| **Built-In TeX Math** | `built_in_math.dart` (`tex_math_flutter`) | `BuiltInMathCache` stores `(font.signature, displayMode, latex)` `DisplayList`, spoken text, and error entries under a 1,024-entry / 8 MiB LRU budget, serving synchronous `TexMath.displayList` once the bundled font is warm. |
+| **Built-In Mermaid & Worker Pool** | `built_in_mermaid.dart`, `built_in_mermaid_worker.dart` (`_io` / `_stub`) | `BuiltInMermaidCache` caches compiled `vector_graphics` payloads under a 128-entry / 16 MiB LRU budget; `PersistentMermaidWorker` keeps 1 pre-warmed primary `Isolate` and lazily scales up to `maxMermaidConcurrentWorkers` burst isolates (15s idle teardown, web `compute()` fallback). |
+| **Native HTML Block & Table Renderer** | `html_block_renderer.dart`, `inline_renderer.dart`, `block_renderer.dart` | `parseHtmlBlockFragment` tokenizes HTML fragments in linear time into native AST blocks (tables with captions/headers/footers/colspan, description lists, `<details>`, `<figure>`, aligned blocks, headings, lists, and block-wrapping anchors) within bounds, while `inline_renderer.dart` renders inline HTML formatting, `<picture>`, and `<img>`. |
+| **Image & Link Security** | `delegates.dart`, `inline_renderer.dart`, `block_renderer.dart` | Enforces `MarkdownUrlPolicy` on interactive taps and `<picture>`/`<img>` sources, gates remote images via `MarkdownImagePolicy`, caches decoded data-URI images, and disposes gesture recognizers post-frame. |
 
 ---
 

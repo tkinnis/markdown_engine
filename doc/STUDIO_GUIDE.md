@@ -1,6 +1,6 @@
-# Comparison Studio Guide
+# Markdown Studio Guide
 
-**`markdown_engine_studio`** (`studio/`) is a macOS Flutter inspection and streaming workbench for exercising **`markdown_engine`** and **`markdown_engine_flutter`**. Test built-in presets, Light/Dark theme switching, live LLM chunk streaming, outline jumps, link auditing, and AST/HTML/plain-text inspection in one desktop app.
+**`markdown_engine Studio`** (`studio/`) is a macOS Flutter inspection and streaming workbench for **`markdown_engine`** and **`markdown_engine_flutter`**. Test built-in presets, Light/Dark theme switching, live LLM chunk streaming, outline jumps, link auditing, and AST/HTML/plain-text inspection in one desktop app.
 
 ---
 
@@ -19,22 +19,44 @@ flowchart LR
 
 | Module | Role |
 | :--- | :--- |
-| `studio/lib/main.dart` | Root `MarkdownStudioApp` coordinating presets, `MarkdownBuiltInRenderers.warmUp()`, Light/Dark theme switching, `MarkdownController` telemetry, streaming playback, CLI flags (`--preset`, `--dark`, `--streaming`, `--anchor`, `--scroll`), and link banners. |
-| `studio/lib/studio_presets.dart` | Defines `StudioPresetId` and the six `studioPresets`: `showcase`, `comprehensiveGuide`, `kitchenSink`, `alertsAndHtml`, `security`, and `stress500`. |
+| `studio/lib/main.dart` | Root `MarkdownStudioApp` coordinating presets, `MarkdownBuiltInRenderers.warmUp()`, Light/Dark themes, `MarkdownController` telemetry, streaming playback, CLI launch flags, and link banners. |
+| `studio/lib/studio_presets.dart` | Defines `StudioPresetId` and the six `studioPresets` entries. |
 | `studio/lib/studio_streaming_pane.dart` | Implements `StudioStreamingPane` with Play, Pause, Step, Finish, and Reset controls, chunk speed slider (`20..400 ms`), `settledBlockCount`, and parse microsecond telemetry. |
 | `studio/lib/studio_outline_panel.dart` | Implements `StudioOutlinePanel`, following `MarkdownController.readingPlaceNotifier` without scroll-frame rebuilds and jumping to headings via `controller.scrollToAnchor`. |
-| `studio/lib/studio_builders.dart` | Supplies `buildStudioDelegates` (using built-in math and Mermaid rendering plus syntax-highlighted `buildStudioCodeBlock` blocks) and memoized `auditDocumentLinks` / `StudioLinkAudit` metrics. |
-| `studio/lib/studio_inspector.dart` | Implements `StudioInspectorPane` with `StudioInspectorTab` tabs for an expandable AST and `SourceSpan` tree, memoized `toHtml()`, and memoized `toPlainText()` with copy actions. |
-| `studio/lib/profile_benchmark_main.dart` | Headless macOS `--profile` `FrameTiming` benchmark measuring 500-section scrolling and 60Hz streaming (`dart run tool/run_macos_profile_benchmark.dart`). |
+| `studio/lib/studio_builders.dart` | Supplies `buildStudioDelegates` (built-in math and Mermaid rendering plus syntax-highlighted code blocks) and memoized `auditDocumentLinks` metrics. |
+| `studio/lib/studio_inspector.dart` | Implements `StudioInspectorPane` with tabs for an expandable AST and `SourceSpan` tree, memoized `toHtml()`, and memoized `toPlainText()` with copy actions. |
+| `studio/lib/profile_benchmark_main.dart` | Headless macOS `--profile` `FrameTiming` benchmark measuring 500-section scrolling and 60Hz streaming via `tool/run_macos_profile_benchmark.dart`. |
+
+### CLI Launch Flags
+
+`MarkdownStudioApp.fromArgs` accepts optional command-line launch flags when running `studio`:
+
+* `--preset=<id>`: Select an initial preset (`showcase`, `comprehensiveGuide`, `kitchenSink`, `alertsAndHtml`, `security`, or `stress500`, matched case-insensitively).
+* `--dark`: Start the workbench in dark mode.
+* `--streaming`: Start in LLM Streaming Simulator mode.
+* `--stream-finish`: Apply all streaming chunks immediately on startup.
+* `--stream-steps=<n>`: Apply `n` initial streaming chunks on startup.
+* `--scroll=<px>`: Set an initial vertical scroll offset in logical pixels.
+* `--anchor=<slug>`: Scroll to a matching heading or anchor slug on startup.
 
 ---
 
 ## 2. Key Interactive Workflows
 
-* **Preset Sample Selector**: Switch between `CommonMark & GFM Showcase` (`showcase`), `Comprehensive Markdown Guide` (`StudioPresetId.comprehensiveGuide`, loaded from `assets/comprehensive_markdown_guide.md`), `Kitchen Sink (Visual Parity)`, `Alerts, Frontmatter & HTML`, `Security & Sanitization`, and `500-Section Virtualization Stress`.
+* **Preset Sample Selector**: Switch between six built-in sample documents targeting parser features, security rules, and sliver virtualization:
+
+| Preset Label | `--preset` ID | Scope |
+| :--- | :--- | :--- |
+| **CommonMark & GFM Showcase** | `showcase` | Tables, task lists, footnotes, OpenType TeX math, and vector Mermaid diagrams. |
+| **Comprehensive Markdown Guide** | `comprehensiveGuide` | Full Markdown syntax guide, all 33 Mermaid diagram families, and LaTeX math gallery. |
+| **Kitchen Sink (Visual Parity)** | `kitchenSink` | Every AST block and inline node alongside CJK/RTL text and security checks. |
+| **Alerts, Frontmatter & HTML** | `alertsAndHtml` | YAML frontmatter, all five GitHub alerts, `<details>`, `<figure>`, `<kbd>`, and `<abbr>`. |
+| **Security & Sanitization** | `security` | `MarkdownUrlPolicy` scheme filtering, HTML sanitization, and remote image gating. |
+| **500-Section Virtualization Stress** | `stress500` | 1,500+ top-level blocks rendered lazily via `SliverMarkdownDocument`. |
+
 * **Zero-Reparse Theme Toggle**: Flip Light and Dark modes while watching the `Parses: <controller.parseCount>` chip stay constant to confirm zero redundant AST reparses.
 * **LLM Streaming Simulator**: Toggle **Streaming Mode** to step or play chunks (`20..400 ms/chunk`) through `MarkdownView.streaming`, observing `settledBlockCount` grow while per-chunk latency stays low.
-* **Math, Mermaid, Images & Link Audit**: Preview native OpenType math and Mermaid diagrams alongside `MarkdownImagePolicy.ask` consent controls, live `StudioLinkAudit` allowed/blocked counts, and link-tap snackbars.
+* **Math, Mermaid, Images & Link Audit**: Preview native OpenType math and Mermaid diagrams alongside `MarkdownImagePolicy.ask` consent controls, live allowed/blocked link counts, and link-tap snackbars.
 * **AST, HTML & Plain-Text Inspector**: Inspect the expandable AST with exact `blockId` and `SourceSpan` line/offset ranges, raw `document.toHtml()` output, and `document.toPlainText()` previews.
 
 ---

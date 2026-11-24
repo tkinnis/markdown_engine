@@ -1,6 +1,6 @@
 # Release Guide
 
-`packages/markdown_engine` and `packages/markdown_engine_flutter` share strict **lockstep semantic versioning** (`X.Y.Z` or `X.Y.Z-pre`). Every release updates both packages together, passes every workspace quality gate, tags `vX.Y.Z` (or `vX.Y.Z-pre`), and publishes `markdown_engine` to pub.dev before `markdown_engine_flutter`.
+`markdown_engine` and `markdown_engine_flutter` share strict **lockstep semantic versioning** (X.Y.Z or X.Y.Z-pre). Every release updates both packages together, passes every workspace quality gate, creates a matching `vX.Y.Z` tag, and publishes `markdown_engine` to pub.dev before `markdown_engine_flutter`.
 
 ---
 
@@ -13,7 +13,7 @@
 * `packages/markdown_engine_flutter/pubspec.yaml`: `dependencies.markdown_engine: ^X.Y.Z`
 * `packages/markdown_engine/CHANGELOG.md`: top heading `## X.Y.Z`
 * `packages/markdown_engine_flutter/CHANGELOG.md`: top heading `## X.Y.Z`
-* `pubspec.yaml`, `studio/pubspec.yaml`, and `packages/markdown_engine_flutter/example/pubspec.yaml`: internal `markdown_engine` and `markdown_engine_flutter` dependencies pinned to `any`
+* Root, Studio, and example pubspecs: internal `markdown_engine` and `markdown_engine_flutter` dependencies pinned to `any`
 
 This keeps every `markdown_engine_flutter` release bound to the matching `^X.Y.Z` release of `markdown_engine` without skew. [`REFERENCE.md`](../REFERENCE.md), package READMEs, and `publish_to: none` workspace pubspecs avoid duplicating release version numbers.
 
@@ -23,9 +23,9 @@ This keeps every `markdown_engine_flutter` release bound to the matching `^X.Y.Z
 
 ### Step 1: Bump Lockstep Version Metadata
 
-1. Update `version:` in both `packages/markdown_engine/pubspec.yaml` and `packages/markdown_engine_flutter/pubspec.yaml` to `X.Y.Z`.
-2. Update `markdown_engine: ^X.Y.Z` under `dependencies:` in `packages/markdown_engine_flutter/pubspec.yaml` (keep `any` in `pubspec.yaml`, `studio/pubspec.yaml`, and `packages/markdown_engine_flutter/example/pubspec.yaml`).
-3. Prepend a `## X.Y.Z` release section to [`packages/markdown_engine/CHANGELOG.md`](../packages/markdown_engine/CHANGELOG.md) and [`packages/markdown_engine_flutter/CHANGELOG.md`](../packages/markdown_engine_flutter/CHANGELOG.md) summarizing user-visible changes.
+1. Update the lockstep `version:` field in both package pubspecs to `X.Y.Z`.
+2. Update `markdown_engine: ^X.Y.Z` in `packages/markdown_engine_flutter/pubspec.yaml` (keeping `any` in the root, Studio, and example pubspecs).
+3. Prepend a matching release section to [`packages/markdown_engine/CHANGELOG.md`](../packages/markdown_engine/CHANGELOG.md) and [`packages/markdown_engine_flutter/CHANGELOG.md`](../packages/markdown_engine_flutter/CHANGELOG.md) summarizing user-visible changes.
 4. Run `flutter pub get` at the repository root to refresh workspace resolution.
 
 ### Step 2: Run All Verification Gates

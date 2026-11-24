@@ -8,7 +8,8 @@
 
 * **Zero DOM, WebView, or Script Execution**: Core parser and exporter code under `packages/markdown_engine/lib/` depends strictly on `package:meta` with no Flutter, `dart:ui`, `dart:io`, `dart:html`, or `dart:js*` imports.
 * **Input & Structural Resource Budgets (`MarkdownOptions`)**: Configurable limits bound maximum input UTF-16 length (`maxInputLength`) and maximum block/inline nesting depth (`maxNestingDepth`) alongside table dimension, link-reference, and output caps so pathological inputs cannot trigger stack overflows or quadratic parser blowups.
-* **Safe HTML & URL Sanitization**: Link and image destinations reject dangerous schemes (`javascript:`, `vbscript:`, `data:text/html`, and control-character obfuscated schemes) when URL sanitization is enabled, while GFM `tagfilter` and HTML sanitizer options neutralize unsafe raw HTML elements (`<script>`, `<style>`, `<iframe>`, `<xmp>`, `<textarea>`, `<title>`, and inline event attributes).
+* **URL Sanitization**: Link and image destinations reject dangerous schemes (`javascript:`, `vbscript:`, `data:text/html`) and control-character obfuscation when URL sanitization is enabled.
+* **HTML Filtering & Sanitization**: GFM `tagfilter` and the linear-time HTML sanitizer (`sanitizeHtml: true`) neutralize unsafe raw HTML elements (`<script>`, `<style>`, `<iframe>`) and inline event attributes.
 
 | Guard / Subsystem | Default Target | Protected Resource |
 | :--- | :--- | :--- |
@@ -19,11 +20,11 @@
 
 ---
 
-## Comparison Studio & CLI Tooling Security
+## Markdown Studio & CLI Tooling Security
 
-`studio/` and `tool/` are local developer tools outside the publishable `markdown_engine` and `markdown_engine_flutter` packages:
+`studio/` (`markdown_engine Studio`) and `tool/` are local developer tools outside the publishable `markdown_engine` and `markdown_engine_flutter` packages:
 
-* **Studio (`studio/`)**: Runs locally as a macOS Flutter desktop workbench inspecting `markdown_engine` and `markdown_engine_flutter` outputs against vendored corpus fixtures.
+* **Markdown Studio (`studio/`)**: Runs locally as a macOS Flutter desktop workbench (`markdown_engine Studio`) inspecting `markdown_engine` and `markdown_engine_flutter` outputs against vendored corpus fixtures.
 * **Spec & Benchmark Tooling (`tool/`)**: Executes offline against vendored spec files in `corpus/spec/` whose SHA-256 digests are verified against [`REFERENCE.md`](REFERENCE.md).
 
 ---

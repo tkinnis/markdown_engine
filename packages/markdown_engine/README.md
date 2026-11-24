@@ -16,7 +16,7 @@ If you are building a Flutter application and want ready-made Markdown widgets, 
 
 ## Quick Start
 
-Configure `MarkdownEngine` with `MarkdownOptions()` (all 23 extensions enabled out of the box), or pass `.commonMark()` or `.gfm()` for strict spec compliance, then parse synchronously into an immutable `MarkdownDocument`:
+Configure `MarkdownEngine` with `MarkdownOptions()` (all 23 extensions enabled out of the box), or pass `.commonMark()` or `.gfm()` for strict specification defaults, then parse synchronously into an immutable `MarkdownDocument`:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -44,6 +44,14 @@ Pure-Dart **CommonMark 0.31.2** and **GFM** with ==highlight==, H~2~O, x^2^, and
   print(document.toPlainText());
 }
 ```
+
+## Key Features
+
+* **Two-Phase Spec Parity**: Achieves 100.0% compliance against vendored CommonMark 0.31.2 (652/652) and GFM 0.29.0.gfm.13 (670/670 spec + 30/30 extension) test suites.
+* **23 Opt-Out Extensions & Strict Presets**: Enables tables, alerts, frontmatter, math, definition lists, footnotes, and extended inline syntax by default on `MarkdownOptions()`, with strict `.commonMark()` and `.gfm()` presets.
+* **Immutable Dart 3 Sealed AST**: Produces 18 `MarkdownBlockNode` and 20 `MarkdownInlineNode` subtypes with `SourceSpan` ranges, structural equality, and lazy document metadata.
+* **Incremental & Streaming Engines**: `IncrementalMarkdownParser` reuses unchanged blocks in live editors, while `StreamingMarkdownController` freezes settled prefix blocks across token feeds.
+* **Defense-in-Depth Hardening**: Guards untrusted inputs with `MarkdownUrlPolicy.strict()`, GFM `tagfilter`, a linear-time HTML5 sanitizer, and deterministic `MarkdownBudgets` limits.
 
 ## Incremental Editing & Streaming
 
@@ -118,8 +126,14 @@ const MarkdownOptions hardenedOptions = MarkdownOptions.gfm(
 );
 ```
 
-* **`MarkdownUrlPolicy`**: Defaults to `MarkdownUrlPolicy.strict()` on `MarkdownOptions()`, allowing `http`, `https`, `mailto`, relative paths, and `#fragments` while rejecting `javascript:`, `vbscript:`, unsafe `data:`, protocol-relative `//`, userinfo `@`, and obfuscated URIs.
-* **GFM `tagfilter` & HTML Sanitizer**: Escapes disallowed GFM tags by default (`gfmTagFilter: true`), and when `sanitizeHtml: true` strips active HTML elements, event handlers (`on*`), `srcdoc`, and unsafe URI attributes using a linear-time state machine.
+* **`MarkdownUrlPolicy`**: Defaults to `MarkdownUrlPolicy.strict()` on `MarkdownOptions()`, enforcing allowlist and obfuscation checks across link, image, and HTML URI attributes:
+
+| Policy Rule | Default Behavior (`MarkdownUrlPolicy.strict()`) |
+| :--- | :--- |
+| **Allowed** | Explicit `http`, `https`, and `mailto` schemes, scheme-less relative paths, and `#fragment` links. |
+| **Blocked** | Executable or unsafe schemes (`javascript:`, `vbscript:`, `data:`), protocol-relative (`//`), userinfo (`@`), and control-character obfuscation. |
+
+* **GFM `tagfilter` & HTML Sanitizer**: Escapes disallowed GFM tags by default (`gfmTagFilter: true`), and when `sanitizeHtml: true` strips active HTML elements, inline event handlers, `srcdoc`, and unsafe URI attributes using a linear-time state machine.
 * **`MarkdownBudgets`**: Caps document size, nesting depth, AST block count, table dimensions, raw HTML size, token count, and output bytes:
 
 | Budget Field | Default Limit | Protected Resource |
@@ -139,11 +153,11 @@ const MarkdownOptions hardenedOptions = MarkdownOptions.gfm(
 | :--- | :--- |
 | `MarkdownEngine` | Stateless entry point exposing `parse`, `renderToHtml`, and `toPlainText`. |
 | `MarkdownOptions` | Configures presets (`.commonMark()`, `.gfm()`, `.extended()`), 23 individually toggleable extensions, sanitization flags, `budgets`, and `urlPolicy`. |
-| `MarkdownDocument` | Immutable parsed output exposing `blocks`, `frontmatter`, `footnotes`, `linkDefinitions`, `abbreviations`, `outline`, `remoteImageAddresses`, `toHtml()`, `toPlainText()`, and `toJson()`. |
+| `MarkdownDocument` | Immutable parsed output exposing `blocks`, lazy document metadata (frontmatter, outline, footnotes, links, abbreviations, remote images), and HTML, plain-text, and JSON exporters. |
 | `HtmlRenderer` | Renders `List<MarkdownBlockNode>` to CommonMark/GFM HTML while enforcing sanitization and output budgets. |
 | `IncrementalMarkdownParser` | Reuses unchanged prefix and suffix AST blocks across live edits with preserved `blockId` identity and `IncrementalParseResult` reuse metrics. |
 | `StreamingMarkdownController` | Accumulates streamed chunks with frozen `settledBlocks`, `settledPrefixBlockCount` alignment, push listeners, `replaceText()`, and full-parity `finish()`. |
-| `MarkdownBlockNode` / `MarkdownInlineNode` | Sealed Dart 3 AST hierarchies (`18` block subtypes and `20` inline subtypes) with `SourceSpan`, `blockId`, `toPlainText()`, and `shiftSpan()`. |
+| `MarkdownBlockNode` / `MarkdownInlineNode` | Sealed Dart 3 AST hierarchies (18 block subtypes and 20 inline subtypes) with `SourceSpan`, `blockId`, `toPlainText()`, and `shiftSpan()`. |
 | `HeadingSlugGenerator` / `slugifyHeadingText` | Generates deterministic GitHub-style heading anchor slugs with collision deduplication. |
 
 ## Companion Packages
@@ -154,7 +168,7 @@ const MarkdownOptions hardenedOptions = MarkdownOptions.gfm(
 
 ## Specification Parity & Native AOT Performance
 
-Verified against the vendored CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.gfm.13` test suites:
+Verified against the vendored CommonMark 0.31.2 and `github/cmark-gfm` 0.29.0.gfm.13 test suites:
 
 | Suite | Passed | Failed | Disabled | Total | Pass Rate |
 | :--- | ---: | ---: | ---: | ---: | ---: |
@@ -162,15 +176,15 @@ Verified against the vendored CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.g
 | `gfm_spec` (`0.29.0.gfm.13`) | 670 | 0 | 2 | 672 | **100.0%** |
 | `gfm_extensions` (`0.29.0.gfm.13`) | 30 | 0 | 0 | 30 | **100.0%** |
 
-Native Dart AOT (`tool/compare/bin/compare_parsers_aot.dart`) measurements on Apple M4 (`arm64`, macOS `15.6`, Dart `3.13.5`) under `MarkdownOptions.gfm()`:
+Native Dart AOT measurements on Apple M4 (`arm64`, macOS 15.6, Dart 3.13.5) under `MarkdownOptions.gfm()` (see the full [Benchmarks report](https://github.com/tkinnis/markdown_engine/blob/main/doc/BENCHMARKS.md) for methodology, head-to-head comparisons, and CI ceilings):
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) |
 | :--- | ---: | ---: | ---: | ---: |
-| `small_doc_parse_and_html` | 937 B (18 lines) | 8.67 us | **8.52 us** | 104.91 MB/s |
-| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 277.29 us | **277.56 us** | 86.74 MB/s |
-| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 1.313 ms | **1.290 ms** | 127.91 MB/s |
-| `incremental_single_paragraph_edit` | 168.9 KB (`1,457/1,458` reused, **87.38x**) | 15.22 us | **14.76 us** | 11176.53 MB/s |
-| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (`43.00 us` total, 14/15 settled) | 0.87 us | **0.86 us** | 47.77 MB/s |
+| `small_doc_parse_and_html` | 937 B (18 lines) | 8.67 us | **8.52 us** | 104.91 MiB/s |
+| `medium_doc_parse_and_html` | 24.7 KB (479 lines) | 277.29 us | **277.56 us** | 86.74 MiB/s |
+| `large_doc_5000_lines_parse` | 168.9 KB (4,996 lines) | 1.313 ms | **1.290 ms** | 127.91 MiB/s |
+| `incremental_single_paragraph_edit` | 168.9 KB (1,457/1,458 reused, **87.38x**) | 15.22 us | **14.76 us** | 11176.53 MiB/s |
+| `streaming_llm_50_chunks_per_chunk` | 2.1 KB / 50 chunks (43.00 us total, 14/15 settled) | 0.87 us | **0.86 us** | 47.77 MiB/s |
 
 ## License & Additional Resources
 

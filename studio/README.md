@@ -1,10 +1,16 @@
-# markdown_engine_studio
+# markdown_engine Studio
 
-macOS Flutter inspection and streaming workbench for **`markdown_engine`** and **`markdown_engine_flutter`**.
+**Markdown Studio** (`studio/`) is a macOS Flutter inspection and streaming workbench (`markdown_engine Studio`) for **`markdown_engine`** and **`markdown_engine_flutter`**.
 
 ## Features
 
-* **Preset Sample Selector**: Switch among `CommonMark & GFM Showcase`, `Comprehensive Markdown Guide` (`StudioPresetId.comprehensiveGuide`, loaded from `assets/comprehensive_markdown_guide.md`), `Kitchen Sink`, `Alerts, Frontmatter & HTML`, `Security & Sanitization`, and `500-Section Virtualization Stress`.
+* **Preset Sample Selector**: Switch across six built-in presets covering CommonMark/GFM, math, and virtualization stress tests:
+  * **CommonMark & GFM Showcase** (`showcase`)
+  * **Comprehensive Markdown Guide** (`comprehensiveGuide`)
+  * **Kitchen Sink (Visual Parity)** (`kitchenSink`)
+  * **Alerts, Frontmatter & HTML** (`alertsAndHtml`)
+  * **Security & Sanitization** (`security`)
+  * **500-Section Virtualization Stress** (`stress500`)
 * **Zero-Reparse Theme Switching**: Toggle Light and Dark `MarkdownThemeData` palettes from the toolbar while monitoring `controller.parseCount` to confirm zero redundant parses.
 * **Live Editor & Streaming Simulator**: Edit Markdown live on the left pane or switch to **Streaming Mode** for Play, Pause, Step, Finish, and Reset controls with chunk timing and `settledBlockCount` telemetry.
 * **Virtualized Preview & Outline Jump**: Render documents with `MarkdownView` and `MarkdownView.streaming`, navigate headings via `controller.scrollToAnchor`, test custom builders, and audit `MarkdownUrlPolicy` link filtering.
@@ -20,4 +26,4 @@ flutter pub get
 (cd studio && flutter run -d macos)
 ```
 
-See the [Comparison Studio Guide](../doc/STUDIO_GUIDE.md) for workbench architecture and accompanying CLI verification tools.
+See the [Markdown Studio Guide](../doc/STUDIO_GUIDE.md) for workbench architecture, CLI launch flags, and accompanying CLI verification tools.
