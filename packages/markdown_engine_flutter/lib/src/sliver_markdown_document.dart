@@ -1,10 +1,48 @@
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart';
 
 import 'block_renderer.dart';
 import 'controller.dart';
 import 'delegates.dart';
+import 'fast_text.dart';
 import 'theme.dart';
+
+/// Package-internal scope supplying lazy streaming normalized-source,
+/// active-stream checks, and per-block listenables to [SliverMarkdownDocument]
+/// without triggering full sliver rebuilds on mid-block token appends.
+final class MarkdownStreamingHostScope extends InheritedWidget {
+  /// Creates a [MarkdownStreamingHostScope].
+  const MarkdownStreamingHostScope({
+    super.key,
+    required this.normalizedSourceProvider,
+    required this.isStreamActiveProvider,
+    this.slotListenableFor,
+    required super.child,
+  });
+
+  /// Returns active normalized streaming source when streaming is unfinished.
+  final String? Function() normalizedSourceProvider;
+
+  /// Returns whether the stream is currently active (unfinished).
+  final bool Function() isStreamActiveProvider;
+
+  /// Optional provider returning a per-block listenable keyed by `blockId`.
+  final ValueListenable<MarkdownBlockNode> Function(MarkdownBlockNode block)?
+  slotListenableFor;
+
+  /// Retrieves the closest [MarkdownStreamingHostScope] without registering
+  /// an inherited dependency (callbacks are stable across the view's lifetime).
+  static MarkdownStreamingHostScope? readOnly(BuildContext context) {
+    return context.getInheritedWidgetOfExactType<MarkdownStreamingHostScope>();
+  }
+
+  @override
+  bool updateShouldNotify(MarkdownStreamingHostScope oldWidget) =>
+      normalizedSourceProvider != oldWidget.normalizedSourceProvider ||
+      isStreamActiveProvider != oldWidget.isStreamActiveProvider ||
+      slotListenableFor != oldWidget.slotListenableFor;
+}
 
 /// Virtualized sliver rendering top-level blocks of a [MarkdownDocument] on
 /// demand via [SliverChildBuilderDelegate], keyed by
@@ -102,6 +140,9 @@ final class SliverMarkdownDocument extends StatefulWidget {
     if (showFrontmatter || slice.isEmpty) {
       return slice;
     }
+    if (document.frontmatter == null && slice.first is! FrontmatterNode) {
+      return slice;
+    }
     if (slice.first is! FrontmatterNode &&
         !slice.any((MarkdownBlockNode b) => b is FrontmatterNode)) {
       return slice;
@@ -117,7 +158,9 @@ final class SliverMarkdownDocument extends StatefulWidget {
 
 final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   late List<MarkdownBlockNode> _visibleBlocks;
-  late Map<String, int> _idToIndex;
+  Map<String, int>? _idToIndex;
+  MarkdownThemeData? _ambientTheme;
+  MarkdownRenderEnvironment? _ambientEnvironment;
 
   Widget? _cachedSliver;
   MarkdownBlockRenderContext? _cachedRenderContext;
@@ -125,6 +168,12 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   bool? _cachedTrailingBlockSpacing;
   bool? _cachedKeepAlives;
   bool? _cachedRepaintBoundaries;
+
+  MarkdownBlockRenderContext? _blockCacheContext;
+  final List<MarkdownBlockNode?> _cachedBlockNodes = <MarkdownBlockNode?>[];
+  final List<Widget?> _cachedInnerWidgets = <Widget?>[];
+  final List<Widget?> _cachedTopWidgets = <Widget?>[];
+  final List<bool> _cachedHasBottomSpacing = <bool>[];
 
   @override
   void initState() {
@@ -135,6 +184,8 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _ambientTheme = widget.theme == null ? MarkdownTheme.of(context) : null;
+    _ambientEnvironment = MarkdownRenderEnvironment.resolve(context);
     _cachedSliver = null;
   }
 
@@ -154,11 +205,14 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
           );
       if (!_blockListsIdentical(_visibleBlocks, nextBlocks)) {
         _visibleBlocks = nextBlocks;
-        _idToIndex = <String, int>{
-          for (int i = 0; i < _visibleBlocks.length; i++)
-            _visibleBlocks[i].blockId: i,
-        };
+        _idToIndex = null;
         _cachedSliver = null;
+        if (_cachedBlockNodes.length > _visibleBlocks.length) {
+          _cachedBlockNodes.length = _visibleBlocks.length;
+          _cachedInnerWidgets.length = _visibleBlocks.length;
+          _cachedTopWidgets.length = _visibleBlocks.length;
+          _cachedHasBottomSpacing.length = _visibleBlocks.length;
+        }
       }
     }
   }
@@ -166,7 +220,15 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
   @override
   void dispose() {
     _cachedSliver = null;
+    _clearPerBlockCache();
     super.dispose();
+  }
+
+  void _clearPerBlockCache() {
+    _cachedBlockNodes.clear();
+    _cachedInnerWidgets.clear();
+    _cachedTopWidgets.clear();
+    _cachedHasBottomSpacing.clear();
   }
 
   void _rebuildIndexCache() {
@@ -176,11 +238,9 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
       startBlockIndex: widget.startBlockIndex,
       endBlockIndex: widget.endBlockIndex,
     );
-    _idToIndex = <String, int>{
-      for (int i = 0; i < _visibleBlocks.length; i++)
-        _visibleBlocks[i].blockId: i,
-    };
+    _idToIndex = null;
     _cachedSliver = null;
+    _clearPerBlockCache();
   }
 
   static bool _blockListsIdentical(
@@ -209,10 +269,14 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
     }
 
     final MarkdownThemeData resolvedTheme =
-        widget.theme ?? MarkdownTheme.of(context);
+        widget.theme ?? (_ambientTheme ??= MarkdownTheme.of(context));
+    final MarkdownRenderEnvironment env = _ambientEnvironment ??=
+        MarkdownRenderEnvironment.resolve(context);
     final MarkdownUrlPolicy resolvedPolicy = widget.delegates.resolveUrlPolicy(
       widget.document.options.urlPolicy,
     );
+    final MarkdownStreamingHostScope? streamScope =
+        MarkdownStreamingHostScope.readOnly(context);
     final MarkdownBlockRenderContext renderContext = MarkdownBlockRenderContext(
       theme: resolvedTheme,
       delegates: widget.delegates,
@@ -221,6 +285,9 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
       remoteImagesApproved: widget.remoteImagesApproved,
       onRequestLoadRemoteImages: widget.onRequestLoadRemoteImages,
       streamingNormalizedSource: widget.streamingNormalizedSource,
+      streamingNormalizedSourceProvider: streamScope?.normalizedSourceProvider,
+      environment: env,
+      resolvedBodyStyle: env.resolveTextStyle(resolvedTheme.bodyTextStyle()),
     );
 
     final Widget? cached = _cachedSliver;
@@ -233,28 +300,130 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
       return cached;
     }
 
-    final Map<String, int> idToIndex = _idToIndex;
     final bool trailingSpacing = widget.trailingBlockSpacing;
+    if (_blockCacheContext != renderContext) {
+      _clearPerBlockCache();
+      _blockCacheContext = renderContext;
+    }
+
+    final bool isStreamActive =
+        streamScope?.isStreamActiveProvider() ??
+        (widget.streamingNormalizedSource != null);
+    final ValueListenable<MarkdownBlockNode> Function(MarkdownBlockNode block)?
+    slotListenableFor = streamScope?.slotListenableFor;
+    final double blockSpacing = resolvedTheme.blockSpacing;
+
     final Widget listSliver = SliverList(
       delegate: SliverChildBuilderDelegate(
         (BuildContext itemContext, int index) {
           final MarkdownBlockNode block = blocks[index];
-          final bool isLast = index == blocks.length - 1;
-          return MarkdownTopLevelBlockWidget(
+          final bool hasBottomSpacing =
+              !(index == blocks.length - 1 && !trailingSpacing);
+          final bool isMermaidBlock =
+              block is CodeBlockNode &&
+              block.language?.toLowerCase() == 'mermaid';
+          if (slotListenableFor != null) {
+            final Widget? existingTop = index < _cachedTopWidgets.length
+                ? _cachedTopWidgets[index]
+                : null;
+            final bool mermaidStateChanged =
+                isMermaidBlock &&
+                existingTop is _StreamingBlockSlot &&
+                existingTop.isStreamActive != isStreamActive;
+            if (!mermaidStateChanged &&
+                index < _cachedBlockNodes.length &&
+                _cachedBlockNodes[index]?.blockId == block.blockId &&
+                existingTop != null &&
+                _cachedHasBottomSpacing[index] == hasBottomSpacing) {
+              return existingTop;
+            }
+            final Widget slotWidget = _StreamingBlockSlot(
+              key: ValueKey<String>(block.blockId),
+              blockListenable: slotListenableFor(block),
+              renderContext: renderContext,
+              bottomSpacing: hasBottomSpacing ? blockSpacing : 0.0,
+              isStreamActive: isStreamActive,
+            );
+            while (_cachedBlockNodes.length <= index) {
+              _cachedBlockNodes.add(null);
+              _cachedInnerWidgets.add(null);
+              _cachedTopWidgets.add(null);
+              _cachedHasBottomSpacing.add(false);
+            }
+            _cachedBlockNodes[index] = block;
+            _cachedTopWidgets[index] = slotWidget;
+            _cachedHasBottomSpacing[index] = hasBottomSpacing;
+            return slotWidget;
+          }
+
+          final bool isStreamingMermaid = isStreamActive && isMermaidBlock;
+
+          if (!isStreamingMermaid &&
+              index < _cachedBlockNodes.length &&
+              identical(_cachedBlockNodes[index], block)) {
+            final Widget? cachedTop = _cachedTopWidgets[index];
+            if (cachedTop != null &&
+                _cachedHasBottomSpacing[index] == hasBottomSpacing) {
+              return cachedTop;
+            }
+            final Widget? cachedInner = _cachedInnerWidgets[index];
+            if (cachedInner != null) {
+              final Widget rebuiltTop = buildTopLevelMarkdownBlockWidget(
+                itemContext,
+                key: ValueKey<String>(block.blockId),
+                node: block,
+                renderContext: renderContext,
+                bottomSpacing: hasBottomSpacing ? blockSpacing : 0.0,
+                prebuiltInner: cachedInner,
+              );
+              _cachedTopWidgets[index] = rebuiltTop;
+              _cachedHasBottomSpacing[index] = hasBottomSpacing;
+              return rebuiltTop;
+            }
+          }
+
+          final Widget inner = buildMarkdownBlockWidget(
+            itemContext,
+            block,
+            renderContext,
+            isTopLevel: true,
+          );
+          final Widget top = buildTopLevelMarkdownBlockWidget(
+            itemContext,
             key: ValueKey<String>(block.blockId),
             node: block,
             renderContext: renderContext,
-            bottomSpacing: (isLast && !trailingSpacing)
-                ? 0.0
-                : resolvedTheme.blockSpacing,
+            bottomSpacing: hasBottomSpacing ? blockSpacing : 0.0,
+            prebuiltInner: inner,
           );
+
+          while (_cachedBlockNodes.length <= index) {
+            _cachedBlockNodes.add(null);
+            _cachedInnerWidgets.add(null);
+            _cachedTopWidgets.add(null);
+            _cachedHasBottomSpacing.add(false);
+          }
+          if (isStreamingMermaid) {
+            _cachedBlockNodes[index] = null;
+            _cachedInnerWidgets[index] = null;
+            _cachedTopWidgets[index] = null;
+          } else {
+            _cachedBlockNodes[index] = block;
+            _cachedInnerWidgets[index] = inner;
+            _cachedTopWidgets[index] = top;
+            _cachedHasBottomSpacing[index] = hasBottomSpacing;
+          }
+          return top;
         },
         childCount: blocks.length,
         addAutomaticKeepAlives: widget.addAutomaticKeepAlives,
         addRepaintBoundaries: widget.addRepaintBoundaries,
         findChildIndexCallback: (Key key) {
           if (key is ValueKey<String>) {
-            return idToIndex[key.value];
+            final Map<String, int> map = _idToIndex ??= <String, int>{
+              for (int i = 0; i < blocks.length; i++) blocks[i].blockId: i,
+            };
+            return map[key.value];
           }
           return null;
         },
@@ -273,5 +442,104 @@ final class _SliverMarkdownDocumentState extends State<SliverMarkdownDocument> {
     _cachedKeepAlives = widget.addAutomaticKeepAlives;
     _cachedRepaintBoundaries = widget.addRepaintBoundaries;
     return built;
+  }
+}
+
+final class _StreamingBlockSlot extends StatefulWidget {
+  const _StreamingBlockSlot({
+    super.key,
+    required this.blockListenable,
+    required this.renderContext,
+    required this.bottomSpacing,
+    required this.isStreamActive,
+  });
+
+  final ValueListenable<MarkdownBlockNode> blockListenable;
+  final MarkdownBlockRenderContext renderContext;
+  final double bottomSpacing;
+  final bool isStreamActive;
+
+  @override
+  State<_StreamingBlockSlot> createState() => _StreamingBlockSlotState();
+}
+
+final class _StreamingBlockSlotState extends State<_StreamingBlockSlot> {
+  MarkdownBlockNode? _cachedNode;
+  MarkdownBlockRenderContext? _cachedRenderContext;
+  Widget? _cachedInner;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.blockListenable.addListener(_onBlockChanged);
+  }
+
+  @override
+  void didUpdateWidget(_StreamingBlockSlot oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.blockListenable, widget.blockListenable)) {
+      oldWidget.blockListenable.removeListener(_onBlockChanged);
+      widget.blockListenable.addListener(_onBlockChanged);
+      _cachedNode = null;
+      _cachedInner = null;
+    }
+    if (oldWidget.isStreamActive != widget.isStreamActive &&
+        _cachedNode is CodeBlockNode &&
+        (_cachedNode! as CodeBlockNode).language?.toLowerCase() == 'mermaid') {
+      _cachedNode = null;
+      _cachedInner = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.blockListenable.removeListener(_onBlockChanged);
+    super.dispose();
+  }
+
+  void _onBlockChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final MarkdownBlockNode node = widget.blockListenable.value;
+    final bool isStreamingMermaid =
+        widget.isStreamActive &&
+        node is CodeBlockNode &&
+        node.language?.toLowerCase() == 'mermaid';
+
+    final Widget inner;
+    if (!isStreamingMermaid &&
+        _cachedInner != null &&
+        identical(_cachedNode, node) &&
+        _cachedRenderContext == widget.renderContext) {
+      inner = _cachedInner!;
+    } else {
+      inner = buildMarkdownBlockWidget(
+        context,
+        node,
+        widget.renderContext,
+        isTopLevel: true,
+      );
+      if (isStreamingMermaid) {
+        _cachedNode = null;
+        _cachedInner = null;
+      } else {
+        _cachedNode = node;
+        _cachedRenderContext = widget.renderContext;
+        _cachedInner = inner;
+      }
+    }
+
+    return buildTopLevelMarkdownBlockWidget(
+      context,
+      node: node,
+      renderContext: widget.renderContext,
+      bottomSpacing: widget.bottomSpacing,
+      prebuiltInner: inner,
+    );
   }
 }

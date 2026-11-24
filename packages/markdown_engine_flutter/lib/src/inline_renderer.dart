@@ -13,6 +13,7 @@ import 'package:markdown_engine/markdown_engine.dart';
 import 'built_in_math.dart';
 import 'controller.dart';
 import 'delegates.dart';
+import 'fast_text.dart';
 import 'theme.dart';
 
 /// Package-internal keyboard- and pointer-accessible interactive wrapper used
@@ -195,6 +196,350 @@ final class _MarkdownAnchorTargetState extends State<MarkdownAnchorTarget> {
   Widget build(BuildContext context) => widget.child;
 }
 
+/// Returns `true` when [nodes] contains only simple text/style inline nodes
+/// with zero links, gesture recognizers, anchors, or embedded [WidgetSpan]s.
+bool canBuildFastSimpleInlines(List<MarkdownInlineNode> nodes) {
+  for (int i = 0; i < nodes.length; i++) {
+    final MarkdownInlineNode node = nodes[i];
+    switch (node) {
+      case TextNode():
+      case SoftBreakNode():
+      case HardBreakNode():
+      case InlineBreakNode():
+      case CodeSpanNode():
+        continue;
+      case EmphasisNode():
+        if (!canBuildFastSimpleInlines(node.children)) {
+          return false;
+        }
+      case StrongNode():
+        if (!canBuildFastSimpleInlines(node.children)) {
+          return false;
+        }
+      case StrikethroughNode():
+        if (!canBuildFastSimpleInlines(node.children)) {
+          return false;
+        }
+      case HighlightNode():
+        if (!canBuildFastSimpleInlines(node.children)) {
+          return false;
+        }
+      case SubscriptNode():
+      case SuperscriptNode():
+      case LinkNode():
+      case ImageNode():
+      case PictureInlineNode():
+      case MathInlineNode():
+      case FootnoteRefNode():
+      case KbdInlineNode():
+      case AbbrInlineNode():
+      case AnchorInlineNode():
+      case RawHtmlInlineNode():
+        return false;
+    }
+  }
+  return true;
+}
+
+/// Builds a pure [InlineSpan] and plain-text string for a verified-simple
+/// [nodes] list (caller must ensure [canBuildFastSimpleInlines] is `true`).
+({InlineSpan span, String plainText}) buildFastSimpleInlineSpan(
+  List<MarkdownInlineNode> nodes,
+  TextStyle effectiveStyle,
+  MarkdownThemeData theme, {
+  TextStyle? cachedCodeSpanStyle,
+}) {
+  if (nodes.isEmpty) {
+    return (span: TextSpan(text: '', style: effectiveStyle), plainText: '');
+  }
+  if (nodes.length == 1) {
+    final MarkdownInlineNode single = nodes.first;
+    switch (single) {
+      case TextNode():
+        return (
+          span: TextSpan(text: single.text, style: effectiveStyle),
+          plainText: single.text,
+        );
+      case SoftBreakNode():
+        return (
+          span: TextSpan(text: ' ', style: effectiveStyle),
+          plainText: ' ',
+        );
+      case HardBreakNode():
+      case InlineBreakNode():
+        return (
+          span: TextSpan(text: '\n', style: effectiveStyle),
+          plainText: '\n',
+        );
+      case CodeSpanNode():
+        final TextStyle codeStyle =
+            cachedCodeSpanStyle ??
+            _deriveFastCodeSpanStyle(effectiveStyle, theme);
+        return (
+          span: TextSpan(text: single.literal, style: codeStyle),
+          plainText: single.literal,
+        );
+      case StrongNode():
+        if (single.children.length == 1 && single.children.first is TextNode) {
+          final String text = (single.children.first as TextNode).text;
+          return (
+            span: TextSpan(
+              text: text,
+              style: effectiveStyle.copyWith(fontWeight: FontWeight.w700),
+            ),
+            plainText: text,
+          );
+        }
+      case EmphasisNode():
+        if (single.children.length == 1 && single.children.first is TextNode) {
+          final String text = (single.children.first as TextNode).text;
+          return (
+            span: TextSpan(
+              text: text,
+              style: effectiveStyle.copyWith(fontStyle: FontStyle.italic),
+            ),
+            plainText: text,
+          );
+        }
+      default:
+        break;
+    }
+  }
+
+  final StringBuffer plainBuffer = StringBuffer();
+  final List<InlineSpan> spans = _buildSimpleInlineChildren(
+    nodes,
+    effectiveStyle,
+    theme,
+    plainBuffer,
+    cachedCodeSpanStyle: cachedCodeSpanStyle,
+  );
+  return (
+    span: TextSpan(style: effectiveStyle, children: spans),
+    plainText: plainBuffer.toString(),
+  );
+}
+
+TextStyle _deriveFastCodeSpanStyle(TextStyle base, MarkdownThemeData theme) {
+  final double baseSize = base.fontSize ?? theme.fontSize;
+  return base.copyWith(
+    fontFamily: theme.effectiveCodeFontFamily,
+    fontFamilyFallback: MarkdownThemeData.defaultCodeFontFallback,
+    fontSize: baseSize * 0.9,
+    color: theme.effectiveCodeForeground,
+    backgroundColor: theme.codeBackground,
+  );
+}
+
+String? _trySinglePlainText(List<MarkdownInlineNode> nodes) {
+  if (nodes.length == 1) {
+    final MarkdownInlineNode single = nodes.first;
+    return switch (single) {
+      TextNode() => single.text,
+      SoftBreakNode() => ' ',
+      HardBreakNode() || InlineBreakNode() => '\n',
+      _ => null,
+    };
+  }
+  return null;
+}
+
+void _appendStyledSimpleSpan(
+  List<InlineSpan> result,
+  List<MarkdownInlineNode> children,
+  TextStyle childStyle,
+  MarkdownThemeData theme,
+  StringBuffer plainBuffer,
+) {
+  final String? singleChild = _trySinglePlainText(children);
+  if (singleChild != null) {
+    plainBuffer.write(singleChild);
+    result.add(TextSpan(text: singleChild, style: childStyle));
+    return;
+  }
+  result.add(
+    TextSpan(
+      style: childStyle,
+      children: _buildSimpleInlineChildren(
+        children,
+        childStyle,
+        theme,
+        plainBuffer,
+      ),
+    ),
+  );
+}
+
+List<InlineSpan> _buildSimpleInlineChildren(
+  List<MarkdownInlineNode> nodes,
+  TextStyle style,
+  MarkdownThemeData theme,
+  StringBuffer plainBuffer, {
+  TextStyle? cachedCodeSpanStyle,
+}) {
+  final List<InlineSpan> result = <InlineSpan>[];
+  String? singlePlain;
+  StringBuffer? runBuf;
+
+  void flushPlain() {
+    if (runBuf != null && runBuf!.isNotEmpty) {
+      final String s = runBuf.toString();
+      plainBuffer.write(s);
+      result.add(TextSpan(text: s));
+      runBuf!.clear();
+    } else if (singlePlain != null) {
+      plainBuffer.write(singlePlain);
+      result.add(TextSpan(text: singlePlain));
+      singlePlain = null;
+    }
+  }
+
+  void pushPlain(String piece) {
+    if (runBuf != null && runBuf!.isNotEmpty) {
+      runBuf!.write(piece);
+    } else if (singlePlain != null) {
+      (runBuf ??= StringBuffer())
+        ..write(singlePlain)
+        ..write(piece);
+      singlePlain = null;
+    } else {
+      singlePlain = piece;
+    }
+  }
+
+  for (int i = 0; i < nodes.length; i++) {
+    final MarkdownInlineNode node = nodes[i];
+    switch (node) {
+      case TextNode():
+        pushPlain(node.text);
+      case SoftBreakNode():
+        pushPlain(' ');
+      case HardBreakNode():
+      case InlineBreakNode():
+        pushPlain('\n');
+      case CodeSpanNode():
+        flushPlain();
+        plainBuffer.write(node.literal);
+        final TextStyle codeStyle =
+            cachedCodeSpanStyle ?? _deriveFastCodeSpanStyle(style, theme);
+        result.add(TextSpan(text: node.literal, style: codeStyle));
+      case EmphasisNode():
+        flushPlain();
+        _appendStyledSimpleSpan(
+          result,
+          node.children,
+          style.copyWith(fontStyle: FontStyle.italic),
+          theme,
+          plainBuffer,
+        );
+      case StrongNode():
+        flushPlain();
+        _appendStyledSimpleSpan(
+          result,
+          node.children,
+          style.copyWith(fontWeight: FontWeight.w700),
+          theme,
+          plainBuffer,
+        );
+      case StrikethroughNode():
+        flushPlain();
+        _appendStyledSimpleSpan(
+          result,
+          node.children,
+          style.copyWith(
+            decoration: _combineDecoration(
+              style.decoration,
+              TextDecoration.lineThrough,
+            ),
+          ),
+          theme,
+          plainBuffer,
+        );
+      case HighlightNode():
+        flushPlain();
+        _appendStyledSimpleSpan(
+          result,
+          node.children,
+          style.copyWith(backgroundColor: theme.highlightFill),
+          theme,
+          plainBuffer,
+        );
+      default:
+        break;
+    }
+  }
+  flushPlain();
+  return result;
+}
+
+/// Builds a lean [FastMarkdownText] leaf widget when [nodes] contains only
+/// simple text/style inlines, or falls back to [MarkdownInlineText].
+Widget buildFastOrRichInlineText(
+  BuildContext context, {
+  required List<MarkdownInlineNode> nodes,
+  required TextStyle baseStyle,
+  required MarkdownThemeData theme,
+  required MarkdownBuilderDelegates delegates,
+  required MarkdownUrlPolicy urlPolicy,
+  MarkdownController? controller,
+  TextAlign textAlign = TextAlign.start,
+  bool remoteImagesApproved = false,
+  VoidCallback? onRequestLoadRemoteImages,
+  MarkdownRenderEnvironment? environment,
+  TextStyle? effectiveStyleOverride,
+  EdgeInsets? contentPadding,
+  double? maxWidth,
+}) {
+  if (canBuildFastSimpleInlines(nodes)) {
+    final MarkdownRenderEnvironment env =
+        environment ?? MarkdownRenderEnvironment.resolve(context);
+    final TextStyle effectiveStyle =
+        effectiveStyleOverride ?? env.resolveTextStyle(baseStyle);
+    final ({InlineSpan span, String plainText}) built =
+        buildFastSimpleInlineSpan(nodes, effectiveStyle, theme);
+    return FastMarkdownText(
+      span: built.span,
+      plainText: built.plainText,
+      effectiveStyle: effectiveStyle,
+      resolvedTextAlign: textAlign,
+      resolvedTextDirection: env.textDirection,
+      resolvedTextScaler: env.textScaler,
+      resolvedLocale: env.locale,
+      selectionRegistrar: env.selectionRegistrar,
+      selectionColor: env.selectionColor,
+      useLeafRenderBox: true,
+      contentPadding: contentPadding,
+      maxWidth: maxWidth,
+    );
+  }
+  final Widget rich = MarkdownInlineText(
+    nodes: nodes,
+    baseStyle: baseStyle,
+    theme: theme,
+    delegates: delegates,
+    urlPolicy: urlPolicy,
+    controller: controller,
+    textAlign: textAlign,
+    remoteImagesApproved: remoteImagesApproved,
+    onRequestLoadRemoteImages: onRequestLoadRemoteImages,
+    environment: environment,
+  );
+  if (contentPadding == null && maxWidth == null) {
+    return rich;
+  }
+  Widget wrapped = rich;
+  if (contentPadding != null) {
+    wrapped = Padding(padding: contentPadding, child: wrapped);
+  }
+  if (maxWidth != null) {
+    wrapped = ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: wrapped,
+    );
+  }
+  return wrapped;
+}
+
 /// Internal rich-text widget rendering a list of [MarkdownInlineNode]s while
 /// owning and cleanly disposing all created [TapGestureRecognizer]s.
 final class MarkdownInlineText extends StatefulWidget {
@@ -210,6 +555,7 @@ final class MarkdownInlineText extends StatefulWidget {
     this.textAlign = TextAlign.start,
     this.remoteImagesApproved = false,
     this.onRequestLoadRemoteImages,
+    this.environment,
   });
 
   /// Inline AST nodes to render.
@@ -239,6 +585,9 @@ final class MarkdownInlineText extends StatefulWidget {
   /// Callback triggered when the user approves remote images in `ask` mode.
   final VoidCallback? onRequestLoadRemoteImages;
 
+  /// Optional pre-resolved ambient environment hoisted by the enclosing view.
+  final MarkdownRenderEnvironment? environment;
+
   @override
   State<MarkdownInlineText> createState() => _MarkdownInlineTextState();
 }
@@ -250,6 +599,13 @@ final class _TrackedRecognizer {
   final TapGestureRecognizer recognizer;
 }
 
+final class _InlineBuildAccumulator {
+  _InlineBuildAccumulator(this.env);
+
+  final MarkdownRenderEnvironment env;
+  bool hasWidgetSpan = false;
+}
+
 enum _InlineHtmlStyleTag { underline, small, quote, code }
 
 final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
@@ -259,7 +615,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
       };
 
-  List<_TrackedRecognizer> _recognizers = <_TrackedRecognizer>[];
+  List<_TrackedRecognizer> _recognizers = const <_TrackedRecognizer>[];
   final List<TapGestureRecognizer> _retiredRecognizers =
       <TapGestureRecognizer>[];
   bool _postFrameCleanupScheduled = false;
@@ -274,15 +630,14 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
   TextAlign? _cachedTextAlign;
   bool? _cachedRemoteImagesApproved;
   VoidCallback? _cachedOnRequestLoadRemoteImages;
-  TextScaler? _cachedTextScaler;
-  TextDirection? _cachedTextDirection;
-  bool? _cachedHasSelectionContainer;
-  bool? _cachedHasOverlay;
+  MarkdownRenderEnvironment? _cachedEnvironment;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _cachedRichText = null;
+    if (widget.environment == null) {
+      _cachedRichText = null;
+    }
   }
 
   @override
@@ -290,7 +645,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     for (final _TrackedRecognizer entry in _recognizers) {
       entry.recognizer.dispose();
     }
-    _recognizers = <_TrackedRecognizer>[];
+    _recognizers = const <_TrackedRecognizer>[];
     _disposeRetiredRecognizers();
     _cachedRichText = null;
     super.dispose();
@@ -318,11 +673,8 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
 
   @override
   Widget build(BuildContext context) {
-    final TextScaler? textScaler = MediaQuery.maybeTextScalerOf(context);
-    final TextDirection? textDirection = Directionality.maybeOf(context);
-    final bool hasSelectionContainer =
-        SelectionContainer.maybeOf(context) != null;
-    final bool hasOverlay = Overlay.maybeOf(context) != null;
+    final MarkdownRenderEnvironment env =
+        widget.environment ?? MarkdownRenderEnvironment.resolve(context);
 
     final Widget? cached = _cachedRichText;
     if (cached != null &&
@@ -335,44 +687,72 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         widget.textAlign == _cachedTextAlign &&
         widget.remoteImagesApproved == _cachedRemoteImagesApproved &&
         widget.onRequestLoadRemoteImages == _cachedOnRequestLoadRemoteImages &&
-        textScaler == _cachedTextScaler &&
-        textDirection == _cachedTextDirection &&
-        hasSelectionContainer == _cachedHasSelectionContainer &&
-        hasOverlay == _cachedHasOverlay) {
+        env == _cachedEnvironment) {
       return cached;
     }
 
-    final Map<String, List<TapGestureRecognizer>> pool =
-        <String, List<TapGestureRecognizer>>{};
-    for (final _TrackedRecognizer entry in _recognizers) {
-      pool
-          .putIfAbsent(entry.key, () => <TapGestureRecognizer>[])
-          .add(entry.recognizer);
+    Map<String, List<TapGestureRecognizer>>? pool;
+    if (_recognizers.isNotEmpty) {
+      pool = <String, List<TapGestureRecognizer>>{};
+      for (final _TrackedRecognizer entry in _recognizers) {
+        pool
+            .putIfAbsent(entry.key, () => <TapGestureRecognizer>[])
+            .add(entry.recognizer);
+      }
     }
     final List<_TrackedRecognizer> nextRecognizers = <_TrackedRecognizer>[];
+    final _InlineBuildAccumulator acc = _InlineBuildAccumulator(env);
+    final TextStyle effectiveStyle = env.resolveTextStyle(widget.baseStyle);
 
     final List<InlineSpan> spans = _buildInlines(
       context,
       widget.nodes,
-      widget.baseStyle,
+      effectiveStyle,
       linkRecognizer: null,
       onLinkTap: null,
       isLink: false,
       linkUrl: null,
       recognizerPool: pool,
       nextRecognizers: nextRecognizers,
+      acc: acc,
     );
 
-    for (final List<TapGestureRecognizer> unused in pool.values) {
-      _retiredRecognizers.addAll(unused);
+    if (pool != null) {
+      for (final List<TapGestureRecognizer> unused in pool.values) {
+        _retiredRecognizers.addAll(unused);
+      }
     }
-    _recognizers = nextRecognizers;
+    _recognizers = nextRecognizers.isEmpty
+        ? const <_TrackedRecognizer>[]
+        : nextRecognizers;
     _scheduleRetiredCleanup();
 
-    final Widget built = Text.rich(
-      TextSpan(style: widget.baseStyle, children: spans),
-      textAlign: widget.textAlign,
-    );
+    final Widget built;
+    if (!acc.hasWidgetSpan) {
+      final TextSpan rootSpan = env.applySpacingOverrides(
+        TextSpan(style: effectiveStyle, children: spans),
+      );
+      built = FastMarkdownText(
+        span: rootSpan,
+        plainText: rootSpan.toPlainText(includeSemanticsLabels: false),
+        effectiveStyle: effectiveStyle,
+        resolvedTextAlign: widget.textAlign,
+        resolvedTextDirection: env.textDirection,
+        resolvedTextScaler: env.textScaler,
+        resolvedLocale: env.locale,
+        selectionRegistrar: env.selectionRegistrar,
+        selectionColor: env.selectionColor,
+        useLeafRenderBox: nextRecognizers.isEmpty,
+      );
+    } else {
+      built = Text.rich(
+        TextSpan(style: widget.baseStyle, children: spans),
+        textAlign: widget.textAlign,
+        textDirection: env.textDirection,
+        textScaler: env.textScaler,
+        locale: env.locale,
+      );
+    }
     _cachedRichText = built;
     _cachedNodes = widget.nodes;
     _cachedBaseStyle = widget.baseStyle;
@@ -383,20 +763,17 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     _cachedTextAlign = widget.textAlign;
     _cachedRemoteImagesApproved = widget.remoteImagesApproved;
     _cachedOnRequestLoadRemoteImages = widget.onRequestLoadRemoteImages;
-    _cachedTextScaler = textScaler;
-    _cachedTextDirection = textDirection;
-    _cachedHasSelectionContainer = hasSelectionContainer;
-    _cachedHasOverlay = hasOverlay;
+    _cachedEnvironment = env;
     return built;
   }
 
   TapGestureRecognizer _acquireRecognizer(
     String key,
     VoidCallback onTap,
-    Map<String, List<TapGestureRecognizer>> pool,
+    Map<String, List<TapGestureRecognizer>>? pool,
     List<_TrackedRecognizer> nextRecognizers,
   ) {
-    final List<TapGestureRecognizer>? bucket = pool[key];
+    final List<TapGestureRecognizer>? bucket = pool?[key];
     final TapGestureRecognizer recognizer =
         (bucket != null && bucket.isNotEmpty)
         ? bucket.removeAt(0)
@@ -414,8 +791,9 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required VoidCallback? onLinkTap,
     required bool isLink,
     required Uri? linkUrl,
-    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
+    required _InlineBuildAccumulator acc,
   }) {
     if (nodes.isEmpty) {
       return const <InlineSpan>[];
@@ -469,6 +847,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           case _RawHtmlDirectiveKind.anchor:
             final String? anchorId = directive.anchorId;
             if (anchorId != null && anchorId.isNotEmpty) {
+              acc.hasWidgetSpan = true;
               result.add(
                 WidgetSpan(
                   alignment: PlaceholderAlignment.middle,
@@ -499,6 +878,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           linkUrl: linkUrl,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
+          acc: acc,
         ),
       );
     }
@@ -562,8 +942,9 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required VoidCallback? onLinkTap,
     required bool isLink,
     required Uri? linkUrl,
-    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
+    required _InlineBuildAccumulator acc,
   }) {
     final MarkdownThemeData theme = widget.theme;
     final MarkdownBuilderDelegates delegates = widget.delegates;
@@ -620,6 +1001,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             linkUrl: linkUrl,
             recognizerPool: recognizerPool,
             nextRecognizers: nextRecognizers,
+            acc: acc,
           ),
         );
       case StrongNode():
@@ -638,6 +1020,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             linkUrl: linkUrl,
             recognizerPool: recognizerPool,
             nextRecognizers: nextRecognizers,
+            acc: acc,
           ),
         );
       case StrikethroughNode():
@@ -659,6 +1042,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             linkUrl: linkUrl,
             recognizerPool: recognizerPool,
             nextRecognizers: nextRecognizers,
+            acc: acc,
           ),
         );
       case HighlightNode():
@@ -677,9 +1061,11 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             linkUrl: linkUrl,
             recognizerPool: recognizerPool,
             nextRecognizers: nextRecognizers,
+            acc: acc,
           ),
         );
       case SubscriptNode():
+        acc.hasWidgetSpan = true;
         return _buildScriptSpan(
           context,
           node.children,
@@ -690,8 +1076,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           linkUrl: linkUrl,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
+          acc: acc,
         );
       case SuperscriptNode():
+        acc.hasWidgetSpan = true;
         return _buildScriptSpan(
           context,
           node.children,
@@ -702,6 +1090,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           linkUrl: linkUrl,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
+          acc: acc,
         );
       case LinkNode():
         return _buildLinkSpan(
@@ -710,8 +1099,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           style,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
+          acc: acc,
         );
       case ImageNode():
+        acc.hasWidgetSpan = true;
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: _wrapWidgetWithLink(
@@ -730,6 +1121,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           ),
         );
       case PictureInlineNode():
+        acc.hasWidgetSpan = true;
         final String chosen = theme.brightness == Brightness.dark
             ? (node.darkSource.isNotEmpty ? node.darkSource : node.lightSource)
             : (node.lightSource.isNotEmpty
@@ -760,8 +1152,18 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
       case MathInlineNode():
         final MarkdownMathInlineBuilder? builder = delegates.mathInlineBuilder;
         if (builder != null) {
-          return builder(context, node, style, linkRecognizer);
+          final InlineSpan custom = builder(
+            context,
+            node,
+            style,
+            linkRecognizer,
+          );
+          if (custom is WidgetSpan) {
+            acc.hasWidgetSpan = true;
+          }
+          return custom;
         }
+        acc.hasWidgetSpan = true;
         if (delegates.enableBuiltInMath) {
           final Widget builtInMath = buildBuiltInInlineMathWidget(
             context: context,
@@ -771,6 +1173,8 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             delegates: delegates,
             urlPolicy: widget.urlPolicy,
             isInsideLink: isLink,
+            hasAncestorSelection: acc.env.selectionRegistrar != null,
+            textScaler: acc.env.textScaler,
           );
           return WidgetSpan(
             alignment: PlaceholderAlignment.baseline,
@@ -817,8 +1221,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           ),
         );
       case FootnoteRefNode():
+        acc.hasWidgetSpan = true;
         return _buildFootnoteRefSpan(node, style);
       case KbdInlineNode():
+        acc.hasWidgetSpan = true;
         final double baseSize = style.fontSize ?? theme.fontSize;
         final TextStyle kbdStyle = style.copyWith(
           fontFamily: theme.effectiveCodeFontFamily,
@@ -839,6 +1245,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           linkUrl: null,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
+          acc: acc,
         );
         final Widget keycap = Semantics(
           label: 'Key ${node.toPlainText()}',
@@ -869,6 +1276,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           ),
         );
       case AbbrInlineNode():
+        acc.hasWidgetSpan = true;
         final TextStyle abbrStyle = style.copyWith(
           decoration: _combineDecoration(
             style.decoration,
@@ -887,11 +1295,12 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           linkUrl: null,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
+          acc: acc,
         );
         Widget labelWidget = Text.rich(
           TextSpan(style: abbrStyle, children: abbrChildren),
         );
-        if (Overlay.maybeOf(context) != null) {
+        if (acc.env.hasOverlay) {
           labelWidget = Tooltip(
             message: node.title,
             excludeFromSemantics: true,
@@ -915,6 +1324,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           ),
         );
       case AnchorInlineNode():
+        acc.hasWidgetSpan = true;
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: ExcludeSemantics(
@@ -928,6 +1338,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
       case RawHtmlInlineNode():
         final ImageNode? rawImg = tryParseHtmlImageTag(node.html);
         if (rawImg != null) {
+          acc.hasWidgetSpan = true;
           return WidgetSpan(
             alignment: PlaceholderAlignment.middle,
             child: _wrapWidgetWithLink(
@@ -958,8 +1369,9 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required VoidCallback? onLinkTap,
     required bool isLink,
     required Uri? linkUrl,
-    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
+    required _InlineBuildAccumulator acc,
   }) {
     final double baseSize = style.fontSize ?? widget.theme.fontSize;
     final TextStyle scriptStyle = style.copyWith(
@@ -976,6 +1388,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
       linkUrl: null,
       recognizerPool: recognizerPool,
       nextRecognizers: nextRecognizers,
+      acc: acc,
     );
     final double dy = isSuperscript ? -baseSize * 0.3 : baseSize * 0.2;
     final Widget scriptWidget = Transform.translate(
@@ -998,8 +1411,9 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     BuildContext context,
     LinkNode node,
     TextStyle style, {
-    required Map<String, List<TapGestureRecognizer>> recognizerPool,
+    required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
+    required _InlineBuildAccumulator acc,
   }) {
     final String destination = node.destination.trim();
     final MarkdownUrlPolicy policy = widget.urlPolicy;
@@ -1019,6 +1433,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           linkUrl: null,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
+          acc: acc,
         ),
       );
     }
@@ -1089,6 +1504,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         linkUrl: parsedUri,
         recognizerPool: recognizerPool,
         nextRecognizers: nextRecognizers,
+        acc: acc,
       ),
     );
   }

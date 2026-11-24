@@ -19,6 +19,9 @@ final class HeadingSlugGenerator {
   /// Clears all recorded heading slug counts.
   void reset() => _counts.clear();
 
+  /// Whether any heading slugs have been recorded.
+  bool get isNotEmpty => _counts.isNotEmpty;
+
   /// Computes a unique GitHub-style slug for heading [text].
   String generate(String text) {
     final String base = slugifyHeadingText(text);

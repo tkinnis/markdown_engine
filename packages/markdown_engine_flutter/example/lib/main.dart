@@ -66,7 +66,7 @@ flowchart LR
 > Remote images default to `MarkdownImagePolicy.block` or `ask` so untrusted Markdown never leaks network requests.
 
 > [!CAUTION]
-> Always pass `MarkdownOptions.extended()` when enabling frontmatter, alerts, `<details>`, and abbreviations (`MarkdownOptions()` already enables `math: true` by default).
+> All 23 Markdown extensions (including frontmatter, alerts, `<details>`, math, and abbreviations) are enabled out of the box on `const MarkdownOptions()`; pass `MarkdownOptions.commonMark()` or `MarkdownOptions.gfm()` when you want strict spec presets.
 
 ## GFM Table & Task List
 

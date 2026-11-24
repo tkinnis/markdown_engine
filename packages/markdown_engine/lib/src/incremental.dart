@@ -431,6 +431,7 @@ final class IncrementalMarkdownParser {
       baseOffset: dirtyNewStart,
       baseLine: dirtyStartLine,
       idPrefix: dirtyIdPrefix,
+      alreadyNormalized: true,
     );
 
     if (dirtyPhase1.linkDefinitions.isNotEmpty ||
@@ -449,6 +450,7 @@ final class IncrementalMarkdownParser {
       abbreviations: prevDoc.abbreviations,
       normalizedSource: dirtyPhase1.normalizedSource,
       idPrefix: dirtyPhase1.idPrefix,
+      hasHeading: dirtyPhase1.hasHeading,
     );
     final Phase2Result dirtyPhase2 = parseInlines(
       resolvedSlicePhase1,
@@ -502,16 +504,18 @@ final class IncrementalMarkdownParser {
         oldMiddleHadHeading || containsHeadingInBlocks(dirtyBlocks);
 
     final List<MarkdownBlockNode> finalBlocks;
-    final List<MarkdownOutlineItem> outline;
+    final List<MarkdownOutlineItem>? outline;
     if (!headingsChanged) {
       finalBlocks = wrapFixedUnmodifiableList(combined);
-      outline = _shiftUnchangedOutline(
-        rawDocumentOutline(prevDoc),
-        dirtyOldStart: dirtyOldStart,
-        dirtyOldEnd: dirtyOldEnd,
-        offsetDelta: offsetDelta,
-        lineDelta: lineDelta,
-      );
+      outline = hasResolvedDocumentOutline(prevDoc)
+          ? _shiftUnchangedOutline(
+              rawDocumentOutline(prevDoc),
+              dirtyOldStart: dirtyOldStart,
+              dirtyOldEnd: dirtyOldEnd,
+              offsetDelta: offsetDelta,
+              lineDelta: lineDelta,
+            )
+          : null;
     } else if (effective.headingSlugs) {
       final ({
         List<MarkdownBlockNode> blocks,
@@ -522,29 +526,38 @@ final class IncrementalMarkdownParser {
       outline = freezeList(rebuilt.outline);
     } else {
       finalBlocks = wrapFixedUnmodifiableList(combined);
-      outline = freezeList(
-        collectOutlineFromBlocks(combined, options: effective),
-      );
+      outline = null;
     }
 
-    final List<String> prevRemoteImages = rawDocumentRemoteImages(prevDoc);
-    final List<String> remoteImages;
-    if (prevRemoteImages.isEmpty && dirtyPhase2.remoteImageAddresses.isEmpty) {
-      remoteImages = const <String>[];
+    final List<String>? remoteImages;
+    if (!hasResolvedDocumentRemoteImages(prevDoc)) {
+      remoteImages = null;
     } else {
-      final List<String> oldMiddleImages = suffixStartIdx > prefixCount
-          ? collectRemoteImagesFromBlocks(
-              prevBlocks.sublist(prefixCount, suffixStartIdx),
-            )
-          : const <String>[];
-      if (oldMiddleImages.isEmpty && dirtyPhase2.remoteImageAddresses.isEmpty) {
-        remoteImages = prevRemoteImages;
+      final List<String> prevRemoteImages = rawDocumentRemoteImages(prevDoc);
+      final List<String> dirtyImages = collectRemoteImagesFromBlocks(
+        dirtyBlocks,
+        options: effective,
+      );
+      if (prevRemoteImages.isEmpty && dirtyImages.isEmpty) {
+        remoteImages = const <String>[];
       } else {
-        remoteImages = freezeList(collectRemoteImagesFromBlocks(finalBlocks));
+        final List<String> oldMiddleImages = suffixStartIdx > prefixCount
+            ? collectRemoteImagesFromBlocks(
+                prevBlocks.sublist(prefixCount, suffixStartIdx),
+                options: effective,
+              )
+            : const <String>[];
+        if (oldMiddleImages.isEmpty && dirtyImages.isEmpty) {
+          remoteImages = prevRemoteImages;
+        } else {
+          remoteImages = freezeFreshList(
+            collectRemoteImagesFromBlocks(finalBlocks, options: effective),
+          );
+        }
       }
     }
 
-    final MarkdownDocument resultDoc = MarkdownDocument(
+    final MarkdownDocument resultDoc = createFrozenDocument(
       source: newSource,
       options: effective,
       blocks: finalBlocks,

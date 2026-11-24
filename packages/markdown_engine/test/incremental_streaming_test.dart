@@ -394,5 +394,165 @@ Tail paragraph.
         expect(ids.length, res.document.blocks.length);
       },
     );
+
+    test(
+      'streaming preserves lazy snapshots and parity across mid-paragraph fast-path edge cases',
+      () {
+        const MarkdownEngine defaultEngine = MarkdownEngine();
+        final StreamingMarkdownController ctrl = StreamingMarkdownController(
+          engine: defaultEngine,
+        );
+
+        final MarkdownDocument snap1 = ctrl.append('# Title\n\nFirst ');
+        final MarkdownDocument snap2 = ctrl.append(
+          'paragraph with a = b and Note: 12:30 and ![img](https://example.com/a.png)',
+        );
+        final MarkdownDocument snap3 = ctrl.append('   ');
+        final MarkdownDocument snap4 = ctrl.append(
+          'continued **bold** text.\n\nIntro line\nNext line ',
+        );
+        final MarkdownDocument snap5 = ctrl.append('with more words');
+        ctrl.append('\n\nCol1 | Col2\n| --- | --- |\n| a | b |\n\n[ref]: /x');
+
+        // Verify historical snapshots remain completely immutable after later appends & reset.
+        expect(snap1.source, '# Title\n\nFirst ');
+        expect(
+          snap1.outline.map((MarkdownOutlineItem o) => o.slug).toList(),
+          <String>['title'],
+        );
+        expect((snap1.blocks.first as HeadingNode).slug, 'title');
+        expect(snap2.remoteImageAddresses, <String>[
+          'https://example.com/a.png',
+        ]);
+        expect(snap3.toHtml(), defaultEngine.renderToHtml(snap3.source));
+        expect(snap4.toHtml(), defaultEngine.renderToHtml(snap4.source));
+        expect(snap5.toHtml(), defaultEngine.renderToHtml(snap5.source));
+
+        final MarkdownDocument beforeReset = ctrl.finish();
+        final String beforeResetSource = beforeReset.source;
+        expect(
+          beforeReset.toHtml(),
+          defaultEngine.renderToHtml(beforeResetSource),
+        );
+
+        ctrl.reset();
+        expect(snap2.source, isNotEmpty);
+        expect(snap2.blocks.length, 2);
+
+        // Edge-case transitions from mid-paragraph fast path into blocks/defs.
+        final List<List<String>> cases = <List<String>>[
+          <String>['Title ', 'here', '\n===', ''],
+          <String>['Header ', 'A | B', '\n| ---', ' | --- |\n| 1 | 2 |'],
+          <String>['[lbl', ']', ': https://example.com', '\n\nUse [lbl].'],
+          <String>['*[abbr', ']: Long Form', '\n\nUse abbr here.'],
+          <String>['Paragraph ', 'with *em* and `code`', ' tail   ', 'end'],
+        ];
+        for (final List<String> chunks in cases) {
+          final StreamingMarkdownController c = StreamingMarkdownController(
+            engine: defaultEngine,
+          );
+          for (final String chunk in chunks) {
+            final MarkdownDocument d = c.append(chunk);
+            expect(d.toHtml(), defaultEngine.renderToHtml(c.buffer));
+          }
+          expect(c.finish().toHtml(), defaultEngine.renderToHtml(c.buffer));
+        }
+      },
+    );
+
+    test(
+      'open fenced code streaming fast-path matches full parse across fence edge cases',
+      () {
+        const MarkdownEngine defaultEngine = MarkdownEngine();
+        final List<List<String>> fenceCases = <List<String>>[
+          <String>['  ```da', 'rt\n', '  print(1);\n', '  print(2);\n  ```'],
+          <String>['```py', 'thon\n', 'x = 1', '\ny = 2\n', '```'],
+          <String>['```dart\nline1\n', '\nline3', '\n```\n\nAfter'],
+          <String>['```dart\na = 1;\n', 'b = 2;\n```\n\nNext'],
+          <String>['~~~txt\nhello', ' world\nline2', '\n~~~'],
+          <String>['```sh\r\necho hi\r', '\necho bye\r\n```'],
+        ];
+        for (final List<String> chunks in fenceCases) {
+          final StreamingMarkdownController ctrl = StreamingMarkdownController(
+            engine: defaultEngine,
+          );
+          for (final String chunk in chunks) {
+            final MarkdownDocument snap = ctrl.append(chunk);
+            final MarkdownDocument ref = defaultEngine.parse(ctrl.buffer);
+            expect(snap.toHtml(), ref.toHtml());
+            expect(snap.blocks.length, ref.blocks.length);
+            for (int i = 0; i < ref.blocks.length; i++) {
+              expect(snap.blocks[i].span, ref.blocks[i].span);
+              if (snap.blocks[i] is CodeBlockNode &&
+                  ref.blocks[i] is CodeBlockNode) {
+                final CodeBlockNode sCode = snap.blocks[i] as CodeBlockNode;
+                final CodeBlockNode rCode = ref.blocks[i] as CodeBlockNode;
+                expect(sCode.literal, rCode.literal);
+                expect(sCode.info, rCode.info);
+                expect(sCode.language, rCode.language);
+                expect(sCode.isFenced, rCode.isFenced);
+                expect(sCode.codeUnitOffset, rCode.codeUnitOffset);
+              }
+            }
+          }
+          final MarkdownDocument done = ctrl.finish();
+          final MarkdownDocument ref = defaultEngine.parse(ctrl.buffer);
+          expect(done.toHtml(), ref.toHtml());
+          expect(done.blocks.length, ref.blocks.length);
+          for (int i = 0; i < ref.blocks.length; i++) {
+            expect(done.blocks[i].span, ref.blocks[i].span);
+          }
+        }
+      },
+    );
+
+    test(
+      'single-backtick inline fast-path matches general inline scanner on edge cases',
+      () {
+        const MarkdownEngine defaultEngine = MarkdownEngine();
+        final Map<String, String> gfmCases = <String, String>{
+          'Before `a\nb` after': '<p>Before <code>a b</code> after</p>\n',
+          'Keep spaces `   ` intact':
+              '<p>Keep spaces <code>   </code> intact</p>\n',
+          'Strip outer spaces ` foo ` cleanly':
+              '<p>Strip outer spaces <code>foo</code> cleanly</p>\n',
+          'Keep one space ` a  ` trimmed symmetrically':
+              '<p>Keep one space <code>a </code> trimmed symmetrically</p>\n',
+          'Multiple `a` and `b` spans':
+              '<p>Multiple <code>a</code> and <code>b</code> spans</p>\n',
+          "It's `a` quoted": "<p>It's <code>a</code> quoted</p>\n",
+          'Unclosed `code span': '<p>Unclosed `code span</p>\n',
+          'Mismatched `code`` span': '<p>Mismatched `code`` span</p>\n',
+          'Plain `only`': '<p>Plain <code>only</code></p>\n',
+          '`only`': '<p><code>only</code></p>\n',
+        };
+        for (final MapEntry<String, String> entry in gfmCases.entries) {
+          final String md = entry.key;
+          final String expectedGfm = entry.value;
+          final MarkdownDocument doc = defaultEngine.parse(md);
+          final MarkdownDocument gfmDoc = engine.parse(md);
+          final MarkdownDocument cmDoc = engine.parse(
+            md,
+            options: const MarkdownOptions.commonMark(),
+          );
+          expect(gfmDoc.toHtml(), expectedGfm);
+          expect(cmDoc.toHtml(), expectedGfm);
+          if (md == "It's `a` quoted") {
+            expect(doc.toHtml(), '<p>It\u2019s <code>a</code> quoted</p>\n');
+          } else {
+            expect(doc.toHtml(), expectedGfm);
+          }
+        }
+        // Verify exact budget truncation parity on single-backtick fast path.
+        const MarkdownOptions tightBudgetOpts = MarkdownOptions(
+          budgets: MarkdownBudgets(maxTokens: 1),
+        );
+        final MarkdownDocument limited = defaultEngine.parse(
+          'prefix `code` suffix',
+          options: tightBudgetOpts,
+        );
+        expect(limited.toHtml(), '<p>prefix `code` suffix</p>\n');
+      },
+    );
   });
 }

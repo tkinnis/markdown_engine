@@ -1,3 +1,6 @@
+import 'dart:collection';
+import 'dart:typed_data';
+
 import 'ast.dart';
 import 'ast_walkers.dart';
 import 'block_parser.dart';
@@ -5,7 +8,56 @@ import 'document.dart';
 import 'engine.dart';
 import 'inline_parser.dart';
 import 'options.dart';
-import 'slugs.dart';
+
+final class _PrefixedBlockList extends ListBase<MarkdownBlockNode>
+    with PackageUnmodifiableListMixin<MarkdownBlockNode> {
+  _PrefixedBlockList(this._prefix, this._prefixLength, this._suffix);
+
+  final List<MarkdownBlockNode> _prefix;
+  final int _prefixLength;
+  final List<MarkdownBlockNode> _suffix;
+
+  @override
+  bool get isEmpty => false;
+
+  @override
+  bool get isNotEmpty => true;
+
+  @override
+  int get length => _prefixLength + _suffix.length;
+
+  @override
+  MarkdownBlockNode operator [](int index) {
+    return index < _prefixLength
+        ? _prefix[index]
+        : _suffix[index - _prefixLength];
+  }
+}
+
+final Uint8List _streamBlockStarterLut = _buildStreamBlockStarterLut();
+
+Uint8List _buildStreamBlockStarterLut() {
+  final Uint8List lut = Uint8List(128);
+  lut[0x3E] = 1; // '>'
+  lut[0x23] = 1; // '#'
+  lut[0x60] = 1; // '`'
+  lut[0x7E] = 1; // '~'
+  lut[0x24] = 1; // '$'
+  lut[0x5C] = 1; // '\'
+  lut[0x3C] = 1; // '<'
+  lut[0x3D] = 1; // '='
+  lut[0x2D] = 1; // '-'
+  lut[0x7C] = 1; // '|'
+  lut[0x3A] = 1; // ':'
+  lut[0x2A] = 1; // '*'
+  lut[0x5F] = 1; // '_'
+  lut[0x5B] = 1; // '['
+  lut[0x2B] = 1; // '+'
+  for (int c = 0x30; c <= 0x39; c++) {
+    lut[c] = 1; // '0'..'9'
+  }
+  return lut;
+}
 
 /// Incremental streaming Markdown parser tailored for token-by-token feeds such
 /// as LLM completions, freezing settled top-level blocks and re-parsing only
@@ -16,50 +68,113 @@ final class StreamingMarkdownController {
     this.engine = const MarkdownEngine(),
     MarkdownOptions? options,
   }) : _options = options {
-    _currentDocument = MarkdownDocument(
+    _currentDocument = createFrozenDocument(
       source: '',
       options: effectiveOptions,
-      blocks: const <MarkdownBlockNode>[],
+      blocks: emptyFrozenBlockList,
+      outline: const <MarkdownOutlineItem>[],
+      footnotes: const <FootnoteDefinitionNode>[],
+      remoteImageAddresses: const <String>[],
       normalizedSource: '',
       html: '',
     );
   }
+
+  static const List<String> _settledIdPrefixes = <String>[
+    's0-',
+    's1-',
+    's2-',
+    's3-',
+    's4-',
+    's5-',
+    's6-',
+    's7-',
+    's8-',
+    's9-',
+    's10-',
+    's11-',
+    's12-',
+    's13-',
+    's14-',
+    's15-',
+    's16-',
+    's17-',
+    's18-',
+    's19-',
+    's20-',
+    's21-',
+    's22-',
+    's23-',
+    's24-',
+    's25-',
+    's26-',
+    's27-',
+    's28-',
+    's29-',
+    's30-',
+    's31-',
+  ];
 
   /// Engine used for parsing active slices and final reconciliation.
   final MarkdownEngine engine;
 
   final MarkdownOptions? _options;
 
-  final StringBuffer _buffer = StringBuffer();
-  final StringBuffer _settledNormalizedPrefix = StringBuffer();
-  final StringBuffer _tailBuffer = StringBuffer();
-  final List<MarkdownBlockNode> _settledBlocks = <MarkdownBlockNode>[];
-  List<MarkdownBlockNode> _activeBlocks = const <MarkdownBlockNode>[];
+  List<String> _rawChunks = <String>[];
+  int _rawLength = 0;
+  String _tail = '';
+  List<MarkdownBlockNode> _settledBlocks = <MarkdownBlockNode>[];
+  bool _settledShared = false;
+  List<MarkdownBlockNode> _settledSnapshot = emptyFrozenBlockList;
+  bool _settledSnapshotDirty = false;
+  List<MarkdownBlockNode> _activeBlocks = emptyFrozenBlockList;
   int _safeSettledCount = 0;
   int _settledOffset = 0;
   int _settledLine = 1;
   int _tailGroupId = 0;
+  String _tailIdPrefix = '';
   MarkdownFrontmatter? _frontmatter;
   bool _hasDefinitions = false;
   bool _isFinished = false;
   bool _pendingCr = false;
   bool _sawNormalization = false;
-  int _fenceChar = 0;
-  int _fenceLength = 0;
-  int _defScanLineStartInTail = 0;
-  final HeadingSlugGenerator _settledSlugs = HeadingSlugGenerator();
-  final List<MarkdownOutlineItem> _settledOutline = <MarkdownOutlineItem>[];
-  final List<String> _settledRemoteImages = <String>[];
-  final Set<String> _settledRemoteImageSet = <String>{};
+  bool _fastParaCanAppend = false;
+  int _fastParaRawStart = 0;
+  bool _fastCodeCanAppend = false;
+  int _fastCodeBodyStart = 0;
+  int _fastCodeFenceChar = 0;
+  bool _fastCodeEndedWithNl = false;
+  List<String> _settledHeadingTexts = <String>[];
   final List<void Function()> _listeners = <void Function()>[];
   bool _isDisposed = false;
   late MarkdownDocument _currentDocument;
+  MarkdownOptions? _cachedTailOptsNoFrontmatter;
+  ReusableBlockInlineResolver? _reusableBlockResolver;
 
   /// Effective [MarkdownOptions] used by this controller.
   MarkdownOptions get effectiveOptions => _options ?? engine.defaultOptions;
 
+  MarkdownOptions get _tailOptsNoFrontmatter {
+    final MarkdownOptions opts = effectiveOptions;
+    if (!opts.frontmatter) {
+      return opts;
+    }
+    return _cachedTailOptsNoFrontmatter ??= opts.copyWith(frontmatter: false);
+  }
+
+  ReusableBlockInlineResolver get _blockInlineResolver =>
+      _reusableBlockResolver ??= ReusableBlockInlineResolver(effectiveOptions);
+
   /// Raw accumulated Markdown source text received so far.
-  String get buffer => _buffer.toString();
+  String get buffer {
+    if (_rawChunks.isEmpty) {
+      return '';
+    }
+    if (_rawChunks.length == 1) {
+      return _rawChunks[0];
+    }
+    return _rawChunks.join();
+  }
 
   /// Current incremental [MarkdownDocument] snapshot.
   MarkdownDocument get currentDocument => _currentDocument;
@@ -68,12 +183,10 @@ final class StreamingMarkdownController {
   MarkdownDocument get document => _currentDocument;
 
   /// Frozen top-level blocks already finalized earlier in the stream.
-  List<MarkdownBlockNode> get settledBlocks =>
-      List<MarkdownBlockNode>.unmodifiable(_settledBlocks);
+  List<MarkdownBlockNode> get settledBlocks => _settledBlocksView();
 
   /// Trailing active blocks currently open/re-parsed on new chunks.
-  List<MarkdownBlockNode> get activeBlocks =>
-      List<MarkdownBlockNode>.unmodifiable(_activeBlocks);
+  List<MarkdownBlockNode> get activeBlocks => _activeBlocks;
 
   /// Count of settled top-level blocks currently frozen.
   int get settledBlockCount => _settledBlocks.length;
@@ -125,6 +238,7 @@ final class StreamingMarkdownController {
     _listeners.clear();
   }
 
+  @pragma('vm:never-inline')
   void _notifyListeners() {
     if (_listeners.isEmpty) {
       return;
@@ -133,6 +247,108 @@ final class StreamingMarkdownController {
     for (final void Function() listener in snapshot) {
       listener();
     }
+  }
+
+  List<MarkdownBlockNode> _settledBlocksView() {
+    if (_settledSnapshotDirty) {
+      _settledSnapshotDirty = false;
+      _settledSnapshot = _settledBlocks.isEmpty
+          ? emptyFrozenBlockList
+          : freezeFreshList(List<MarkdownBlockNode>.of(_settledBlocks));
+    }
+    return _settledSnapshot;
+  }
+
+  void _resetSettledBlocks() {
+    if (_settledShared) {
+      _settledBlocks = <MarkdownBlockNode>[];
+      _settledShared = false;
+    } else {
+      _settledBlocks.clear();
+    }
+  }
+
+  void _truncateSettledBlocks(int targetLen) {
+    if (_settledShared) {
+      _settledBlocks = _settledBlocks.sublist(0, targetLen);
+      _settledShared = false;
+    } else {
+      _settledBlocks.length = targetLen;
+    }
+  }
+
+  @pragma('vm:prefer-inline')
+  List<MarkdownBlockNode> _buildAllBlocks() {
+    final int settledLen = _settledBlocks.length;
+    if (settledLen == 0) {
+      return _activeBlocks;
+    }
+    if (_activeBlocks.isEmpty) {
+      return _settledBlocksView();
+    }
+    _settledShared = true;
+    return _PrefixedBlockList(_settledBlocks, settledLen, _activeBlocks);
+  }
+
+  @pragma('vm:never-inline')
+  static Never _throwInputLimit(int nextLen, int maxLen) {
+    throw RangeError.value(
+      nextLen,
+      'buffer.length',
+      'Input exceeds maxInputLength ($maxLen).',
+    );
+  }
+
+  bool _appendFastPara(String chunk) {
+    final String nextTail = '$_tail$chunk';
+    _tail = nextTail;
+    final int tailLen = nextTail.length;
+    final int rawStart = _fastParaRawStart;
+    final String rawText;
+    if (rawStart >= tailLen) {
+      rawText = '';
+    } else if (rawStart == 0 && nextTail.codeUnitAt(tailLen - 1) > 0x20) {
+      rawText = nextTail;
+    } else {
+      final String slice = rawStart == 0
+          ? nextTail
+          : nextTail.substring(rawStart);
+      rawText = nextTail.codeUnitAt(tailLen - 1) > 0x20
+          ? slice
+          : slice.trimRight();
+    }
+    final ParagraphNode prevPara = _activeBlocks[0] as ParagraphNode;
+    final SourceSpan newSpan = createUncheckedSpan(
+      startOffset: prevPara.span.startOffset,
+      endOffset: _settledOffset + tailLen,
+      startLine: prevPara.span.startLine,
+      endLine: prevPara.span.endLine,
+    );
+    _activeBlocks = freezeFreshList(<MarkdownBlockNode>[
+      createFrozenParagraphNode(
+        blockId: prevPara.blockId,
+        children: _blockInlineResolver.parseParagraph(rawText, newSpan),
+        span: newSpan,
+      ),
+    ]);
+    return true;
+  }
+
+  @pragma('vm:never-inline')
+  void _advanceSettledTailState(
+    String nextTail,
+    int nextSettledOffset,
+    int nextSettledLine,
+  ) {
+    _settledSnapshotDirty = true;
+    _tail = nextTail;
+    _settledOffset = nextSettledOffset;
+    _settledLine = nextSettledLine;
+    _safeSettledCount = _settledBlocks.length;
+    final int nextGroup = ++_tailGroupId;
+    _tailIdPrefix = nextGroup < _settledIdPrefixes.length
+        ? _settledIdPrefixes[nextGroup]
+        : 's$nextGroup-';
   }
 
   /// Appends [chunk] to the stream buffer and incrementally updates only the
@@ -145,24 +361,131 @@ final class StreamingMarkdownController {
       return _currentDocument;
     }
     final MarkdownOptions opts = effectiveOptions;
-    if (_buffer.length + chunk.length > opts.maxInputLength) {
-      throw RangeError.value(
-        _buffer.length + chunk.length,
-        'buffer.length',
-        'Input exceeds maxInputLength (${opts.maxInputLength}).',
-      );
+    final int nextLen = _rawLength + chunk.length;
+    if (nextLen > opts.maxInputLength) {
+      _throwInputLimit(nextLen, opts.maxInputLength);
     }
-    if (_isFinished) {
-      _isFinished = false;
-      if (_settledBlocks.length > _safeSettledCount) {
-        _settledBlocks.length = _safeSettledCount;
+    final bool wasFinished = _isFinished;
+    if (wasFinished) {
+      _reopenAfterFinish();
+    }
+    _rawChunks.add(chunk);
+    _rawLength = nextLen;
+
+    final int chunkLen = chunk.length;
+    bool hasNl = false;
+    bool needsNorm = _pendingCr;
+    if (!needsNorm) {
+      for (int i = 0; i < chunkLen; i++) {
+        final int cu = chunk.codeUnitAt(i);
+        if (cu <= 0x0D) {
+          if (cu == 0x0A) {
+            hasNl = true;
+          } else if (cu == 0x0D || cu == 0x00) {
+            needsNorm = true;
+            break;
+          }
+        }
       }
     }
-    _buffer.write(chunk);
-    _appendNormalizedChunk(chunk);
-    _reparseTail();
-    _notifyListeners();
+
+    bool publish = true;
+    bool handled = false;
+    if (!wasFinished && !needsNorm) {
+      if (_fastParaCanAppend && !hasNl) {
+        handled = _appendFastPara(chunk);
+      } else if (_fastCodeCanAppend) {
+        handled = _tryFastOpenCodeAppend(chunk);
+      }
+    }
+    if (!handled) {
+      if (_hasDefinitions) {
+        _tail = '';
+        _reparseTailColdFallback(opts);
+        publish = false;
+      } else {
+        if (!needsNorm) {
+          _tail = _tail.isEmpty ? chunk : '$_tail$chunk';
+        } else {
+          _appendNormalizedChunk(chunk);
+        }
+        publish = _reparseTail(opts);
+      }
+    }
+    if (publish) {
+      _publishTailDocument(opts);
+    }
+    if (_listeners.isNotEmpty) {
+      _notifyListeners();
+    }
     return _currentDocument;
+  }
+
+  @pragma('vm:never-inline')
+  void _reopenAfterFinish() {
+    _isFinished = false;
+    _fastParaCanAppend = false;
+    _fastCodeCanAppend = false;
+    if (_settledBlocks.length > _safeSettledCount) {
+      _truncateSettledBlocks(_safeSettledCount);
+      _settledSnapshotDirty = true;
+    }
+  }
+
+  bool _tryFastOpenCodeAppend(String chunk) {
+    final int fc = _fastCodeFenceChar;
+    final int len = chunk.length;
+    int newLines = 0;
+    bool prevNl = _fastCodeEndedWithNl;
+    for (int i = 0; i < len; i++) {
+      final int cu = chunk.codeUnitAt(i);
+      if (cu == fc || cu == 0x0D || cu == 0x00) {
+        return false;
+      }
+      if (prevNl) {
+        newLines++;
+        prevNl = false;
+      }
+      if (cu == 0x0A) {
+        prevNl = true;
+      }
+    }
+    _fastCodeEndedWithNl = prevNl;
+    final String nextTail = '$_tail$chunk';
+    _tail = nextTail;
+    final String body = nextTail.substring(_fastCodeBodyStart);
+    final String literal = body.isEmpty ? '' : (prevNl ? body : '$body\n');
+    final CodeBlockNode prevCode = _activeBlocks[0] as CodeBlockNode;
+    final SourceSpan newSpan = createUncheckedSpan(
+      startOffset: prevCode.span.startOffset,
+      endOffset: _settledOffset + nextTail.length,
+      startLine: prevCode.span.startLine,
+      endLine: prevCode.span.endLine + newLines,
+    );
+    _activeBlocks = freezeFreshList(<MarkdownBlockNode>[
+      CodeBlockNode(
+        blockId: prevCode.blockId,
+        info: prevCode.info,
+        language: prevCode.language,
+        literal: literal,
+        isFenced: true,
+        codeUnitOffset: prevCode.codeUnitOffset,
+        span: newSpan,
+      ),
+    ]);
+    return true;
+  }
+
+  void _publishTailDocument(MarkdownOptions opts) {
+    _currentDocument = createStreamingDocument(
+      sourceChunks: _rawChunks,
+      sourceChunkCount: _rawChunks.length,
+      sourceLength: _rawLength,
+      options: opts,
+      blocks: _buildAllBlocks(),
+      frontmatter: _frontmatter,
+      hasBlocks: _settledBlocks.isNotEmpty || _activeBlocks.isNotEmpty,
+    );
   }
 
   /// Replaces the entire stream text with [fullText], preserving already
@@ -176,37 +499,47 @@ final class StreamingMarkdownController {
         'Input exceeds maxInputLength (${opts.maxInputLength}).',
       );
     }
+    final String settledPrefix = _settledOffset > 0
+        ? (_sawNormalization
+              ? normalizeMarkdownSource(buffer).substring(0, _settledOffset)
+              : buffer.substring(0, _settledOffset))
+        : '';
     _isFinished = false;
     final String newNorm = normalizeMarkdownSource(fullText);
-    _buffer
-      ..clear()
-      ..write(fullText);
+    _rawChunks = fullText.isEmpty ? <String>[] : <String>[fullText];
+    _rawLength = fullText.length;
     _sawNormalization = !identical(newNorm, fullText);
     _pendingCr = false;
 
-    final String settledPrefix = _settledOffset > 0
-        ? _settledNormalizedPrefix.toString()
-        : '';
     if (_settledOffset > 0 &&
         newNorm.length >= _settledOffset &&
         newNorm.startsWith(settledPrefix)) {
       if (_settledBlocks.length > _safeSettledCount) {
-        _settledBlocks.length = _safeSettledCount;
+        _truncateSettledBlocks(_safeSettledCount);
+        _settledSnapshotDirty = true;
       }
-      final String tail = newNorm.substring(_settledOffset);
-      _tailBuffer
-        ..clear()
-        ..write(tail);
-      _defScanLineStartInTail = 0;
-      _fenceChar = 0;
-      _fenceLength = 0;
-      _scanTailForDefinitionsAndFences(tail, 0);
-      _reparseTail(fullSourceOverride: fullText, fullNormOverride: newNorm);
+      _tail = newNorm.substring(_settledOffset);
     } else {
       _clearParsingState();
-      _tailBuffer.write(newNorm);
-      _scanTailForDefinitionsAndFences(newNorm, 0);
-      _reparseTail(fullSourceOverride: fullText, fullNormOverride: newNorm);
+      _tail = newNorm;
+    }
+    if (_rawLength == 0 ||
+        _hasDefinitions ||
+        (_tail.isEmpty && _settledBlocks.isEmpty)) {
+      _reparseTailColdFallback(
+        opts,
+        fullSourceOverride: fullText,
+        fullNormOverride: newNorm,
+      );
+    } else if (_reparseTail(opts)) {
+      _currentDocument = createStreamingDocument(
+        source: fullText,
+        options: opts,
+        blocks: _buildAllBlocks(),
+        frontmatter: _frontmatter,
+        hasBlocks: _settledBlocks.isNotEmpty || _activeBlocks.isNotEmpty,
+        normalizedSource: newNorm,
+      );
     }
     _notifyListeners();
     return _currentDocument;
@@ -217,14 +550,19 @@ final class StreamingMarkdownController {
   /// possible.
   MarkdownDocument finish() {
     _isFinished = true;
+    _fastParaCanAppend = false;
+    _fastCodeCanAppend = false;
     final MarkdownOptions opts = effectiveOptions;
-    final String fullSource = _buffer.toString();
+    final String fullSource = buffer;
     if (fullSource.isEmpty) {
       _clearParsingState();
-      _currentDocument = MarkdownDocument(
+      _currentDocument = createFrozenDocument(
         source: fullSource,
         options: opts,
-        blocks: const <MarkdownBlockNode>[],
+        blocks: emptyFrozenBlockList,
+        outline: const <MarkdownOutlineItem>[],
+        footnotes: const <FootnoteDefinitionNode>[],
+        remoteImageAddresses: const <String>[],
         normalizedSource: '',
         html: '',
       );
@@ -234,10 +572,10 @@ final class StreamingMarkdownController {
 
     if (_hasDefinitions || _settledBlocks.isEmpty) {
       final MarkdownDocument finalDoc = engine.parse(fullSource, options: opts);
-      _settledBlocks
-        ..clear()
-        ..addAll(finalDoc.blocks);
-      _activeBlocks = const <MarkdownBlockNode>[];
+      _resetSettledBlocks();
+      _settledBlocks.addAll(finalDoc.blocks);
+      _settledSnapshotDirty = true;
+      _activeBlocks = emptyFrozenBlockList;
       _safeSettledCount = 0;
       _settledOffset = 0;
       _settledLine = 1;
@@ -248,19 +586,19 @@ final class StreamingMarkdownController {
     }
 
     if (_settledBlocks.length > _safeSettledCount) {
-      _settledBlocks.length = _safeSettledCount;
+      _truncateSettledBlocks(_safeSettledCount);
     }
 
-    final String tailSlice = _tailBuffer.toString();
+    final String tailSlice = _tail;
     final MarkdownOptions tailOpts = _settledOffset == 0
         ? opts
-        : opts.copyWith(frontmatter: false);
-    final Phase1Result phase1 = parseBlocks(
+        : _tailOptsNoFrontmatter;
+    final Phase1Result phase1 = parseNormalizedBlocks(
       tailSlice,
       tailOpts,
       baseOffset: _settledOffset,
       baseLine: _settledLine,
-      idPrefix: _tailGroupId == 0 ? '' : 's$_tailGroupId-',
+      idPrefix: _tailIdPrefix,
     );
 
     if (phase1.linkDefinitions.isNotEmpty ||
@@ -268,10 +606,10 @@ final class StreamingMarkdownController {
         phase1.abbreviations.isNotEmpty) {
       _hasDefinitions = true;
       final MarkdownDocument finalDoc = engine.parse(fullSource, options: opts);
-      _settledBlocks
-        ..clear()
-        ..addAll(finalDoc.blocks);
-      _activeBlocks = const <MarkdownBlockNode>[];
+      _resetSettledBlocks();
+      _settledBlocks.addAll(finalDoc.blocks);
+      _settledSnapshotDirty = true;
+      _activeBlocks = emptyFrozenBlockList;
       _safeSettledCount = 0;
       _settledOffset = 0;
       _settledLine = 1;
@@ -281,38 +619,23 @@ final class StreamingMarkdownController {
       return finalDoc;
     }
 
-    final Phase2Result phase2 = parseInlines(
+    final Phase2Result phase2 = _blockInlineResolver.parse(
       phase1,
-      tailOpts,
-      slugGenerator: _settledSlugs.clone(),
+      seedHeadingTexts: phase1.hasHeading && _settledHeadingTexts.isNotEmpty
+          ? _settledHeadingTexts
+          : null,
+      seedHeadingCount: _settledHeadingTexts.length,
     );
     _settledBlocks.addAll(phase2.blocks);
-    _activeBlocks = const <MarkdownBlockNode>[];
+    _settledSnapshotDirty = true;
+    _activeBlocks = emptyFrozenBlockList;
 
-    final List<MarkdownOutlineItem> outline;
-    if (phase2.outline.isEmpty) {
-      outline = freezeList(List<MarkdownOutlineItem>.of(_settledOutline));
-    } else {
-      outline = freezeList(<MarkdownOutlineItem>[
-        ..._settledOutline,
-        ...phase2.outline,
-      ]);
-    }
-
-    final List<String> remoteImages = _mergeRemoteImages(
-      _settledRemoteImages,
-      _settledRemoteImageSet,
-      phase2.remoteImageAddresses,
-    );
-
-    _currentDocument = MarkdownDocument(
+    _currentDocument = createFrozenDocument(
       source: fullSource,
       options: opts,
-      blocks: freezeList(List<MarkdownBlockNode>.of(_settledBlocks)),
+      blocks: _settledBlocksView(),
       frontmatter: _frontmatter,
-      outline: outline,
       footnotes: phase2.footnotes,
-      remoteImageAddresses: remoteImages,
       linkDefinitions: phase1.linkDefinitions,
       abbreviations: phase1.abbreviations,
       normalizedSource: _sawNormalization ? null : fullSource,
@@ -323,13 +646,17 @@ final class StreamingMarkdownController {
 
   /// Clears all buffered text and settled blocks back to an empty state.
   void reset() {
-    _buffer.clear();
+    _rawChunks = <String>[];
+    _rawLength = 0;
     _clearParsingState();
     _isFinished = false;
-    _currentDocument = MarkdownDocument(
+    _currentDocument = createFrozenDocument(
       source: '',
       options: effectiveOptions,
-      blocks: const <MarkdownBlockNode>[],
+      blocks: emptyFrozenBlockList,
+      outline: const <MarkdownOutlineItem>[],
+      footnotes: const <FootnoteDefinitionNode>[],
+      remoteImageAddresses: const <String>[],
       normalizedSource: '',
       html: '',
     );
@@ -337,29 +664,28 @@ final class StreamingMarkdownController {
   }
 
   void _clearParsingState() {
-    _settledNormalizedPrefix.clear();
-    _tailBuffer.clear();
-    _settledBlocks.clear();
-    _activeBlocks = const <MarkdownBlockNode>[];
+    _tail = '';
+    _resetSettledBlocks();
+    _settledSnapshot = emptyFrozenBlockList;
+    _settledSnapshotDirty = false;
+    _activeBlocks = emptyFrozenBlockList;
     _safeSettledCount = 0;
     _settledOffset = 0;
     _settledLine = 1;
     _tailGroupId = 0;
+    _tailIdPrefix = '';
     _frontmatter = null;
     _hasDefinitions = false;
     _pendingCr = false;
     _sawNormalization = false;
-    _fenceChar = 0;
-    _fenceLength = 0;
-    _defScanLineStartInTail = 0;
-    _settledSlugs.reset();
-    _settledOutline.clear();
-    _settledRemoteImages.clear();
-    _settledRemoteImageSet.clear();
+    _fastParaCanAppend = false;
+    _fastParaRawStart = 0;
+    _fastCodeCanAppend = false;
+    _settledHeadingTexts = <String>[];
   }
 
+  @pragma('vm:never-inline')
   void _appendNormalizedChunk(String chunk) {
-    final int beforeLen = _tailBuffer.length;
     int chunkStart = 0;
     if (_pendingCr) {
       _pendingCr = false;
@@ -368,18 +694,26 @@ final class StreamingMarkdownController {
       }
     }
     if (chunkStart < chunk.length) {
-      final bool hasCr = chunk.indexOf('\r', chunkStart) != -1;
-      final bool hasNul = chunk.indexOf('\x00', chunkStart) != -1;
-      if (!hasCr && !hasNul) {
-        _tailBuffer.write(
-          chunkStart == 0 ? chunk : chunk.substring(chunkStart),
-        );
+      bool needsNorm = false;
+      for (int i = chunkStart; i < chunk.length; i++) {
+        final int cu = chunk.codeUnitAt(i);
+        if (cu == 0x0D || cu == 0x00) {
+          needsNorm = true;
+          break;
+        }
+      }
+      if (!needsNorm) {
+        final String clean = chunkStart == 0
+            ? chunk
+            : chunk.substring(chunkStart);
+        _tail = _tail.isEmpty ? clean : '$_tail$clean';
       } else {
         _sawNormalization = true;
+        final StringBuffer buf = StringBuffer(_tail);
         for (int i = chunkStart; i < chunk.length; i++) {
           final int cu = chunk.codeUnitAt(i);
           if (cu == 0x0D) {
-            _tailBuffer.writeCharCode(0x0A);
+            buf.writeCharCode(0x0A);
             if (i + 1 < chunk.length) {
               if (chunk.codeUnitAt(i + 1) == 0x0A) {
                 i++;
@@ -388,398 +722,290 @@ final class StreamingMarkdownController {
               _pendingCr = true;
             }
           } else if (cu == 0x00) {
-            _tailBuffer.writeCharCode(0xFFFD);
+            buf.writeCharCode(0xFFFD);
           } else {
-            _tailBuffer.writeCharCode(cu);
+            buf.writeCharCode(cu);
           }
         }
-      }
-    }
-
-    if (!_hasDefinitions && _tailBuffer.length > beforeLen) {
-      final String tailNow = _tailBuffer.toString();
-      _scanTailForDefinitionsAndFences(tailNow, _defScanLineStartInTail);
-    }
-  }
-
-  void _scanTailForDefinitionsAndFences(String tail, int fromOffset) {
-    int lineStart = fromOffset < 0 ? 0 : fromOffset;
-    final int len = tail.length;
-    while (lineStart < len) {
-      final int nl = tail.indexOf('\n', lineStart);
-      final int lineEnd = nl == -1 ? len : nl;
-      if (nl != -1) {
-        // Update fenced code tracking on complete lines.
-        final ({int fenceChar, int fenceLen})? fence = _matchFenceLine(
-          tail,
-          lineStart,
-          lineEnd,
-        );
-        if (_fenceChar == 0) {
-          if (fence != null) {
-            _fenceChar = fence.fenceChar;
-            _fenceLength = fence.fenceLen;
-          } else if (!_hasDefinitions &&
-              lineLooksLikeDefinition(tail, lineStart, lineEnd)) {
-            _hasDefinitions = true;
-          }
-        } else {
-          if (fence != null &&
-              fence.fenceChar == _fenceChar &&
-              fence.fenceLen >= _fenceLength &&
-              _isTrailingWsOnly(tail, lineStart, lineEnd, fence)) {
-            _fenceChar = 0;
-            _fenceLength = 0;
-          }
-        }
-        lineStart = nl + 1;
-        _defScanLineStartInTail = lineStart;
-      } else {
-        // Partial last line (no '\n' yet): do not commit fence state yet, just
-        // check outside fences for an active definition line.
-        if (_fenceChar == 0 &&
-            !_hasDefinitions &&
-            lineLooksLikeDefinition(tail, lineStart, lineEnd)) {
-          _hasDefinitions = true;
-        }
-        break;
+        _tail = buf.toString();
       }
     }
   }
 
-  ({int fenceChar, int fenceLen})? _matchFenceLine(
-    String s,
-    int start,
-    int end,
-  ) {
-    int i = start;
-    int spaces = 0;
-    while (i < end && spaces < 3 && s.codeUnitAt(i) == 0x20) {
-      spaces++;
-      i++;
-    }
-    if (i >= end) {
-      return null;
-    }
-    final int ch = s.codeUnitAt(i);
-    if (ch != 0x60 && ch != 0x7E) {
-      return null;
-    }
-    int count = 0;
-    while (i < end && s.codeUnitAt(i) == ch) {
-      count++;
-      i++;
-    }
-    if (count < 3) {
-      return null;
-    }
-    if (ch == 0x60) {
-      for (int k = i; k < end; k++) {
-        if (s.codeUnitAt(k) == 0x60) {
-          return null;
-        }
-      }
-    }
-    return (fenceChar: ch, fenceLen: count);
-  }
-
-  bool _isTrailingWsOnly(
-    String s,
-    int start,
-    int end,
-    ({int fenceChar, int fenceLen}) fence,
-  ) {
-    int i = start;
-    int spaces = 0;
-    while (i < end && spaces < 3 && s.codeUnitAt(i) == 0x20) {
-      spaces++;
-      i++;
-    }
-    while (i < end && s.codeUnitAt(i) == fence.fenceChar) {
-      i++;
-    }
-    while (i < end) {
-      final int cu = s.codeUnitAt(i);
-      if (cu != 0x20 && cu != 0x09) {
-        return false;
-      }
-      i++;
-    }
-    return true;
-  }
-
-  void _reparseTail({String? fullSourceOverride, String? fullNormOverride}) {
-    final MarkdownOptions opts = effectiveOptions;
-    final String fullSource = fullSourceOverride ?? _buffer.toString();
-    if (_buffer.isEmpty) {
-      _activeBlocks = const <MarkdownBlockNode>[];
-      _currentDocument = MarkdownDocument(
-        source: fullSource,
-        options: opts,
-        blocks: const <MarkdownBlockNode>[],
-        normalizedSource: '',
-        html: '',
-      );
-      return;
-    }
-
-    if (_hasDefinitions) {
-      final MarkdownDocument doc = engine.parse(fullSource, options: opts);
-      _settledBlocks.clear();
-      _safeSettledCount = 0;
-      _activeBlocks = doc.blocks;
-      _settledOffset = 0;
-      _settledLine = 1;
-      _frontmatter = doc.frontmatter;
-      _settledNormalizedPrefix.clear();
-      _settledSlugs.reset();
-      _settledOutline.clear();
-      _settledRemoteImages.clear();
-      _settledRemoteImageSet.clear();
-      _currentDocument = doc;
-      return;
-    }
-
-    final String tailSlice = _tailBuffer.toString();
+  bool _reparseTail(MarkdownOptions opts) {
+    final String tailSlice = _tail;
     if (tailSlice.isEmpty && _settledBlocks.isEmpty) {
-      _activeBlocks = const <MarkdownBlockNode>[];
-      _currentDocument = MarkdownDocument(
-        source: fullSource,
-        options: opts,
-        blocks: const <MarkdownBlockNode>[],
-        normalizedSource:
-            fullNormOverride ?? (_sawNormalization ? null : fullSource),
-        html: '',
-      );
-      return;
+      _reparseTailColdFallback(opts);
+      return false;
     }
 
-    final MarkdownOptions tailOpts = _settledOffset == 0
-        ? opts
-        : opts.copyWith(frontmatter: false);
-    final Phase1Result phase1 = parseBlocks(
+    final Phase1Result phase1 = parseNormalizedBlocks(
       tailSlice,
-      tailOpts,
+      _settledOffset == 0 ? opts : _tailOptsNoFrontmatter,
       baseOffset: _settledOffset,
       baseLine: _settledLine,
-      idPrefix: _tailGroupId == 0 ? '' : 's$_tailGroupId-',
+      idPrefix: _tailIdPrefix,
     );
 
     if (phase1.linkDefinitions.isNotEmpty ||
         phase1.footnoteDefinitions.isNotEmpty ||
         phase1.abbreviations.isNotEmpty) {
       _hasDefinitions = true;
-      final MarkdownDocument doc = engine.parse(fullSource, options: opts);
-      _settledBlocks.clear();
-      _safeSettledCount = 0;
-      _activeBlocks = doc.blocks;
-      _settledOffset = 0;
-      _settledLine = 1;
-      _frontmatter = doc.frontmatter;
-      _settledNormalizedPrefix.clear();
-      _settledSlugs.reset();
-      _settledOutline.clear();
-      _settledRemoteImages.clear();
-      _settledRemoteImageSet.clear();
-      _currentDocument = doc;
-      return;
+      _reparseTailColdFallback(opts);
+      return false;
     }
 
     if (_settledOffset == 0 && phase1.frontmatter != null) {
       _frontmatter = phase1.frontmatter!.frontmatter;
     }
 
-    final Phase2Result phase2 = parseInlines(
+    final bool trackHeadings = opts.headingSlugs && phase1.hasHeading;
+    final Phase2Result phase2 = _blockInlineResolver.parse(
       phase1,
-      tailOpts,
-      slugGenerator: _settledSlugs.clone(),
+      seedHeadingTexts: trackHeadings && _settledHeadingTexts.isNotEmpty
+          ? _settledHeadingTexts
+          : null,
+      seedHeadingCount: _settledHeadingTexts.length,
     );
     final List<MarkdownBlockNode> tailBlocks = phase2.blocks;
 
-    // Settle leading blocks in `tailBlocks` that are guaranteed immutable by
-    // having a blank-line boundary and a subsequent block following them.
+    if (tailBlocks.length > 1) {
+      _settleLeadingTailBlocks(
+        tailBlocks,
+        tailSlice,
+        opts,
+        tailHadHeading: trackHeadings,
+      );
+    } else {
+      _activeBlocks = tailBlocks;
+    }
+
+    _fastParaCanAppend = false;
+    _fastCodeCanAppend = false;
+    if (!_pendingCr && _activeBlocks.length == 1) {
+      final MarkdownBlockNode onlyBlock = _activeBlocks[0];
+      if (onlyBlock is ParagraphNode || onlyBlock is CodeBlockNode) {
+        _updateFastTailEligibility(phase1);
+      }
+    }
+    return true;
+  }
+
+  @pragma('vm:never-inline')
+  void _updateFastTailEligibility(Phase1Result phase1) {
+    final MarkdownBlockNode onlyBlock = _activeBlocks[0];
+    final String tail = _tail;
+    final int tailLen = tail.length;
+    if (onlyBlock is ParagraphNode &&
+        tailLen > 0 &&
+        tail.codeUnitAt(tailLen - 1) != 0x0A &&
+        onlyBlock.span.endOffset == _settledOffset + tailLen) {
+      final int localStart = onlyBlock.span.startOffset - _settledOffset;
+      if (localStart >= 0 &&
+          localStart < tailLen &&
+          tail.lastIndexOf('\n') < localStart) {
+        _updateFastParaStarter(tail, localStart, tailLen);
+      }
+    } else if (onlyBlock is CodeBlockNode &&
+        onlyBlock.isFenced &&
+        tailLen > 0 &&
+        onlyBlock.span.endOffset == _settledOffset + tailLen &&
+        phase1.blocks.isNotEmpty) {
+      final RawBlock lastRaw = phase1.blocks.last;
+      if (lastRaw is RawCodeBlock &&
+          lastRaw.blockId == onlyBlock.blockId &&
+          lastRaw.isFenced &&
+          !lastRaw.isClosed &&
+          lastRaw.fenceIndent == 0) {
+        final int localBodyStart = onlyBlock.codeUnitOffset - _settledOffset;
+        if (localBodyStart > 0 &&
+            localBodyStart <= tailLen &&
+            tail.codeUnitAt(localBodyStart - 1) == 0x0A) {
+          _fastCodeCanAppend = true;
+          _fastCodeBodyStart = localBodyStart;
+          _fastCodeFenceChar = lastRaw.fenceChar;
+          _fastCodeEndedWithNl = tail.codeUnitAt(tailLen - 1) == 0x0A;
+        }
+      }
+    }
+  }
+
+  void _updateFastParaStarter(String tail, int localStart, int tailLen) {
+    int firstNonSpace = localStart;
+    while (firstNonSpace < tailLen &&
+        (tail.codeUnitAt(firstNonSpace) == 0x20 ||
+            tail.codeUnitAt(firstNonSpace) == 0x09)) {
+      firstNonSpace++;
+    }
+    if (firstNonSpace >= tailLen) {
+      return;
+    }
+    final int firstCu = tail.codeUnitAt(firstNonSpace);
+    if (firstCu >= 128 || _streamBlockStarterLut[firstCu] == 0) {
+      _fastParaRawStart = firstNonSpace;
+      _fastParaCanAppend = true;
+    } else if (firstCu == 0x60 || firstCu == 0x7E) {
+      int p = firstNonSpace + 1;
+      final int limit = firstNonSpace + 3 < tailLen
+          ? firstNonSpace + 3
+          : tailLen;
+      while (p < limit && tail.codeUnitAt(p) == firstCu) {
+        p++;
+      }
+      if (p < limit) {
+        _fastParaRawStart = firstNonSpace;
+        _fastParaCanAppend = true;
+      }
+    }
+  }
+
+  void _settleLeadingTailBlocks(
+    List<MarkdownBlockNode> tailBlocks,
+    String tailSlice,
+    MarkdownOptions opts, {
+    required bool tailHadHeading,
+  }) {
     int newlySettled = 0;
-    int nextSettledOffset = _settledOffset;
+    final int baseOff = _settledOffset;
+    final int tailLen = tailSlice.length;
+    int nextSettledOffset = baseOff;
     int nextSettledLine = _settledLine;
     while (newlySettled + 1 < tailBlocks.length) {
       final MarkdownBlockNode candidate = tailBlocks[newlySettled];
       final MarkdownBlockNode nextBlock = tailBlocks[newlySettled + 1];
-      if (!_canSettleBlock(candidate, nextBlock, tailSlice, opts)) {
-        break;
+      int localEnd = candidate.span.endOffset - baseOff;
+      final int localNextStart = nextBlock.span.startOffset - baseOff;
+      if (candidate is! FrontmatterNode) {
+        if (localEnd <= 0 ||
+            localEnd >= localNextStart ||
+            localEnd >= tailLen ||
+            tailSlice.codeUnitAt(localEnd - 1) != 0x0A ||
+            tailSlice.codeUnitAt(localEnd) != 0x0A) {
+          break;
+        }
+        if ((candidate is ListNode && nextBlock is ListNode) ||
+            ((candidate is HtmlBlockNode || candidate is DefinitionListNode) &&
+                _mustDeferBoundary(candidate, opts))) {
+          break;
+        }
       }
       _settledBlocks.add(candidate);
-      collectSettledBlockOutlineAndSlugs(
-        candidate,
-        opts,
-        _settledSlugs,
-        _settledOutline,
-      );
-      collectRemoteImagesInto(
-        <MarkdownBlockNode>[candidate],
-        _settledRemoteImages,
-        _settledRemoteImageSet,
-      );
+      if (tailHadHeading) {
+        _recordSettledBlockHeadings(candidate, opts);
+      }
       newlySettled++;
-      int newStart = candidate.span.endOffset;
       int newLine = candidate.span.endLine + 1;
-      final int localEndMax = nextBlock.span.startOffset - _settledOffset;
-      while (newStart - _settledOffset < localEndMax &&
-          newStart - _settledOffset < tailSlice.length &&
-          tailSlice.codeUnitAt(newStart - _settledOffset) == 0x0A) {
-        newStart++;
+      final int nlLimit = localNextStart < tailLen ? localNextStart : tailLen;
+      while (localEnd < nlLimit && tailSlice.codeUnitAt(localEnd) == 0x0A) {
+        localEnd++;
         newLine++;
       }
-      nextSettledOffset = newStart;
+      nextSettledOffset = baseOff + localEnd;
       nextSettledLine = newLine;
     }
 
-    Phase2Result activeResult = phase2;
     if (newlySettled > 0) {
-      final int consumed = nextSettledOffset - _settledOffset;
-      String remaining = '';
-      if (consumed > 0 && consumed <= tailSlice.length) {
-        _settledNormalizedPrefix.write(tailSlice.substring(0, consumed));
-        remaining = tailSlice.substring(consumed);
-        _tailBuffer
-          ..clear()
-          ..write(remaining);
-        _defScanLineStartInTail = _defScanLineStartInTail > consumed
-            ? _defScanLineStartInTail - consumed
-            : 0;
-      } else {
-        remaining = _tailBuffer.toString();
-      }
-      _settledOffset = nextSettledOffset;
-      _settledLine = nextSettledLine;
-      _safeSettledCount = _settledBlocks.length;
-      _tailGroupId++;
-      if (remaining.isNotEmpty) {
-        final MarkdownOptions activeOpts = _settledOffset == 0
-            ? opts
-            : opts.copyWith(frontmatter: false);
-        final Phase1Result freshTailP1 = parseBlocks(
-          remaining,
-          activeOpts,
-          baseOffset: _settledOffset,
-          baseLine: _settledLine,
-          idPrefix: 's$_tailGroupId-',
-        );
-        activeResult = parseInlines(
-          freshTailP1,
-          activeOpts,
-          slugGenerator: _settledSlugs.clone(),
-        );
-        _activeBlocks = activeResult.blocks;
-      } else {
-        _activeBlocks = const <MarkdownBlockNode>[];
-      }
+      final int consumed = nextSettledOffset - baseOff;
+      _advanceSettledTailState(
+        consumed > 0 && consumed <= tailLen
+            ? tailSlice.substring(consumed)
+            : _tail,
+        nextSettledOffset,
+        nextSettledLine,
+      );
+      _activeBlocks = tailBlocks.length - newlySettled == 1
+          ? freezeFreshList(<MarkdownBlockNode>[tailBlocks[newlySettled]])
+          : freezeFreshList(tailBlocks.sublist(newlySettled));
     } else {
-      _activeBlocks = tailBlocks.sublist(newlySettled);
+      _activeBlocks = tailBlocks;
     }
-
-    final List<MarkdownBlockNode> allBlocks = freezeList(<MarkdownBlockNode>[
-      ..._settledBlocks,
-      ..._activeBlocks,
-    ]);
-
-    final List<MarkdownOutlineItem> outline;
-    if (activeResult.outline.isEmpty) {
-      outline = _settledOutline.isEmpty
-          ? const <MarkdownOutlineItem>[]
-          : freezeList(List<MarkdownOutlineItem>.of(_settledOutline));
-    } else if (_settledOutline.isEmpty) {
-      outline = activeResult.outline;
-    } else {
-      final int firstActiveStart = _activeBlocks.isEmpty
-          ? _settledOffset
-          : _activeBlocks.first.span.startOffset;
-      outline = freezeList(<MarkdownOutlineItem>[
-        ..._settledOutline,
-        for (final MarkdownOutlineItem item in activeResult.outline)
-          if (item.span.startOffset >= firstActiveStart) item,
-      ]);
-    }
-
-    final List<String> remoteImages = _activeBlocks.isEmpty
-        ? freezeList(List<String>.of(_settledRemoteImages))
-        : (activeResult.remoteImageAddresses.isEmpty
-              ? freezeList(List<String>.of(_settledRemoteImages))
-              : _mergeRemoteImages(
-                  _settledRemoteImages,
-                  _settledRemoteImageSet,
-                  collectRemoteImagesFromBlocks(_activeBlocks),
-                ));
-
-    _currentDocument = MarkdownDocument(
-      source: fullSource,
-      options: opts,
-      blocks: allBlocks,
-      frontmatter: _frontmatter,
-      outline: outline,
-      footnotes: activeResult.footnotes,
-      remoteImageAddresses: remoteImages,
-      linkDefinitions: phase1.linkDefinitions,
-      abbreviations: phase1.abbreviations,
-      normalizedSource:
-          fullNormOverride ?? (_sawNormalization ? null : fullSource),
-    );
   }
 
-  List<String> _mergeRemoteImages(
-    List<String> settled,
-    Set<String> settledSet,
-    List<String> tailImages,
-  ) {
-    if (tailImages.isEmpty) {
-      return settled.isEmpty
-          ? const <String>[]
-          : freezeList(List<String>.of(settled));
-    }
-    if (settled.isEmpty) {
-      return freezeList(tailImages);
-    }
-    final List<String> merged = List<String>.of(settled);
-    for (final String url in tailImages) {
-      if (!settledSet.contains(url) && !merged.contains(url)) {
-        merged.add(url);
-      }
-    }
-    return freezeList(merged);
-  }
-
-  bool _canSettleBlock(
+  @pragma('vm:never-inline')
+  static bool _mustDeferBoundary(
     MarkdownBlockNode candidate,
-    MarkdownBlockNode next,
-    String tailSlice,
     MarkdownOptions opts,
   ) {
-    if (candidate is FrontmatterNode) {
-      return true;
+    if (candidate is HtmlBlockNode) {
+      return opts.detailsBlocks || opts.figureBlocks || opts.alignedBlocks;
     }
-    final int localEnd = candidate.span.endOffset - _settledOffset;
-    final int localNextStart = next.span.startOffset - _settledOffset;
-    if (localEnd <= 0 || localEnd >= localNextStart) {
-      return false;
+    return opts.definitionLists && candidate is DefinitionListNode;
+  }
+
+  @pragma('vm:never-inline')
+  void _recordSettledBlockHeadings(
+    MarkdownBlockNode candidate,
+    MarkdownOptions opts,
+  ) {
+    if (candidate is HeadingNode) {
+      if (opts.headingSlugs &&
+          !(opts.explicitHeadingIds && candidate.explicitId != null)) {
+        _settledHeadingTexts.add(candidate.text);
+      }
+    } else if (candidate is! ParagraphNode &&
+        candidate is! CodeBlockNode &&
+        candidate is! TableNode &&
+        candidate is! ThematicBreakNode &&
+        candidate is! FrontmatterNode &&
+        blockContainsHeading(candidate)) {
+      collectSettledHeadingTexts(candidate, opts, _settledHeadingTexts);
     }
-    if (localEnd >= tailSlice.length ||
-        tailSlice.codeUnitAt(localEnd - 1) != 0x0A ||
-        tailSlice.codeUnitAt(localEnd) != 0x0A) {
-      return false;
+  }
+
+  @pragma('vm:never-inline')
+  void _reparseTailColdFallback(
+    MarkdownOptions opts, {
+    String? fullSourceOverride,
+    String? fullNormOverride,
+  }) {
+    if (_rawLength == 0) {
+      _activeBlocks = emptyFrozenBlockList;
+      _fastParaCanAppend = false;
+      _fastCodeCanAppend = false;
+      _currentDocument = createFrozenDocument(
+        source: '',
+        options: opts,
+        blocks: emptyFrozenBlockList,
+        outline: const <MarkdownOutlineItem>[],
+        footnotes: const <FootnoteDefinitionNode>[],
+        remoteImageAddresses: const <String>[],
+        normalizedSource: '',
+        html: '',
+      );
+      return;
     }
-    // Lists followed by blank lines could still receive another item if
-    // `next` is a list; settle only once a non-list block follows.
-    if (candidate is ListNode && next is ListNode) {
-      return false;
+    if (_hasDefinitions) {
+      final String fullSource = fullSourceOverride ?? buffer;
+      final MarkdownDocument doc = engine.parse(fullSource, options: opts);
+      _resetSettledBlocks();
+      _settledSnapshot = emptyFrozenBlockList;
+      _settledSnapshotDirty = false;
+      _safeSettledCount = 0;
+      _activeBlocks = doc.blocks;
+      _settledOffset = 0;
+      _settledLine = 1;
+      _frontmatter = doc.frontmatter;
+      _settledHeadingTexts = <String>[];
+      _fastParaCanAppend = false;
+      _fastCodeCanAppend = false;
+      _currentDocument = doc;
+      return;
     }
-    // Never freeze HTML/Details/Figure/Aligned containers prematurely if
-    // extended container blocks are enabled and could merge with adjacent HTML.
-    if (isPotentialHtmlContainerBoundary(candidate, opts)) {
-      return false;
-    }
-    // Definition lists can absorb subsequent `: ` paragraphs.
-    if (opts.definitionLists && candidate is DefinitionListNode) {
-      return false;
-    }
-    return true;
+    _activeBlocks = emptyFrozenBlockList;
+    _fastParaCanAppend = false;
+    _fastCodeCanAppend = false;
+    _currentDocument = createFrozenDocument(
+      source: fullSourceOverride,
+      sourceChunks: fullSourceOverride == null ? _rawChunks : null,
+      sourceChunkCount: fullSourceOverride == null ? _rawChunks.length : 0,
+      sourceLength: fullSourceOverride == null ? _rawLength : 0,
+      options: opts,
+      blocks: emptyFrozenBlockList,
+      outline: const <MarkdownOutlineItem>[],
+      footnotes: const <FootnoteDefinitionNode>[],
+      remoteImageAddresses: const <String>[],
+      normalizedSource: fullNormOverride,
+      html: '',
+    );
   }
 }

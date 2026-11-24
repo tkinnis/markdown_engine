@@ -16,6 +16,7 @@ import 'package:vector_graphics/vector_graphics.dart' show VectorGraphic;
 
 void main() {
   setUp(() {
+    MarkdownBuiltInRenderers.resetCacheDefaults();
     MarkdownBuiltInRenderers.clearCaches();
     MarkdownBuiltInRenderers.debugForceAsyncMermaidInTests = false;
   });
@@ -663,13 +664,16 @@ End of document.
         expect(find.text('Settled paragraph body.'), findsOneWidget);
         expect(find.text('Tail'), findsOneWidget);
 
-        // Capture exact widget instance of the settled paragraph RichText.
+        // Capture exact widget and render object instances of the settled paragraph.
         final Widget settledParagraphBefore = tester.widget(
           find.byWidgetPredicate(
             (Widget w) =>
-                w is RichText &&
-                w.text.toPlainText() == 'Settled paragraph body.',
+                w is Text &&
+                w.textSpan?.toPlainText() == 'Settled paragraph body.',
           ),
+        );
+        final RenderObject settledRenderBefore = tester.renderObject(
+          find.text('Settled paragraph body.'),
         );
 
         // Append multiple token chunks to the active tail paragraph.
@@ -689,14 +693,18 @@ End of document.
         final Widget settledParagraphAfter = tester.widget(
           find.byWidgetPredicate(
             (Widget w) =>
-                w is RichText &&
-                w.text.toPlainText() == 'Settled paragraph body.',
+                w is Text &&
+                w.textSpan?.toPlainText() == 'Settled paragraph body.',
           ),
+        );
+        final RenderObject settledRenderAfter = tester.renderObject(
+          find.text('Settled paragraph body.'),
         );
         expect(
           identical(settledParagraphBefore, settledParagraphAfter),
           isTrue,
         );
+        expect(identical(settledRenderBefore, settledRenderAfter), isTrue);
         expect(
           find.text('Tail token1 token2 token3 token4 token5.'),
           findsOneWidget,
@@ -782,14 +790,16 @@ End of document.
 
         expect(find.text("Tom & Jerry <tag> \u2014 'ok'"), findsOneWidget);
 
-        final RichText inlinePara = tester.widget<RichText>(
+        final Text inlinePara = tester.widget<Text>(
           find.byWidgetPredicate(
             (Widget w) =>
-                w is RichText && w.text.toPlainText().contains('myWidget()'),
+                w is Text &&
+                w.textSpan != null &&
+                w.textSpan!.toPlainText().contains('myWidget()'),
           ),
         );
         TextStyle? codeStyle;
-        inlinePara.text.visitChildren((InlineSpan span) {
+        inlinePara.textSpan!.visitChildren((InlineSpan span) {
           if (span is TextSpan && span.text == 'myWidget()') {
             codeStyle = span.style;
             return false;
@@ -797,11 +807,242 @@ End of document.
           return true;
         });
         final MarkdownThemeData resolvedTheme = MarkdownTheme.of(
-          tester.element(find.byType(RichText).first),
+          tester.element(find.byType(Text).first),
         );
         expect(codeStyle, isNotNull);
         expect(codeStyle!.fontFamily, resolvedTheme.effectiveCodeFontFamily);
         expect(codeStyle!.backgroundColor, resolvedTheme.codeBackground);
+      },
+    );
+  });
+
+  group('Dual entry+byte LRU cache budgets', () {
+    test('exposes default capacities, validation, and resetCacheDefaults', () {
+      addTearDown(MarkdownBuiltInRenderers.resetCacheDefaults);
+
+      expect(MarkdownBuiltInRenderers.mathMaxEntries, 1024);
+      expect(MarkdownBuiltInRenderers.mathMaxBytes, 8 * 1024 * 1024);
+      expect(MarkdownBuiltInRenderers.mermaidMaxEntries, 128);
+      expect(MarkdownBuiltInRenderers.mermaidMaxBytes, 16 * 1024 * 1024);
+      expect(MarkdownBuiltInRenderers.mathCacheBytes, 0);
+      expect(MarkdownBuiltInRenderers.mermaidCacheBytes, 0);
+
+      MarkdownBuiltInRenderers.configureCaches(
+        mathMaxEntries: 42,
+        mathMaxBytes: 16384,
+        mermaidMaxEntries: 12,
+        mermaidMaxBytes: 65536,
+      );
+      expect(MarkdownBuiltInRenderers.mathMaxEntries, 42);
+      expect(MarkdownBuiltInRenderers.mathMaxBytes, 16384);
+      expect(MarkdownBuiltInRenderers.mermaidMaxEntries, 12);
+      expect(MarkdownBuiltInRenderers.mermaidMaxBytes, 65536);
+
+      // Zero / negative values throw RangeError without mutating existing bounds.
+      expect(
+        () => MarkdownBuiltInRenderers.configureCaches(mathMaxEntries: 0),
+        throwsRangeError,
+      );
+      expect(
+        () => MarkdownBuiltInRenderers.configureCaches(mathMaxBytes: -1),
+        throwsRangeError,
+      );
+      expect(
+        () => MarkdownBuiltInRenderers.configureCaches(mermaidMaxEntries: 0),
+        throwsRangeError,
+      );
+      expect(
+        () => MarkdownBuiltInRenderers.configureCaches(mermaidMaxBytes: -128),
+        throwsRangeError,
+      );
+      expect(MarkdownBuiltInRenderers.mathMaxEntries, 42);
+      expect(MarkdownBuiltInRenderers.mathMaxBytes, 16384);
+      expect(MarkdownBuiltInRenderers.mermaidMaxEntries, 12);
+      expect(MarkdownBuiltInRenderers.mermaidMaxBytes, 65536);
+
+      MarkdownBuiltInRenderers.resetCacheDefaults();
+      expect(MarkdownBuiltInRenderers.mathMaxEntries, 1024);
+      expect(MarkdownBuiltInRenderers.mathMaxBytes, 8 * 1024 * 1024);
+      expect(MarkdownBuiltInRenderers.mermaidMaxEntries, 128);
+      expect(MarkdownBuiltInRenderers.mermaidMaxBytes, 16 * 1024 * 1024);
+    });
+
+    testWidgets(
+      'math cache enforces entry cap, LRU hit promotion, byte cap, and clean byte accounting',
+      (WidgetTester tester) async {
+        addTearDown(MarkdownBuiltInRenderers.resetCacheDefaults);
+        await MarkdownBuiltInRenderers.warmUp();
+
+        Future<void> renderMarkdown(String source) async {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(body: MarkdownView(source, scrollable: false)),
+            ),
+          );
+          await tester.pump();
+        }
+
+        // Entry-count LRU eviction & hit promotion.
+        MarkdownBuiltInRenderers.configureCaches(
+          mathMaxEntries: 2,
+          mathMaxBytes: 4 * 1024 * 1024,
+        );
+        await renderMarkdown(r'$a$ and $b$');
+        expect(MarkdownBuiltInRenderers.mathCacheLength, 2);
+        expect(MarkdownBuiltInRenderers.mathLayoutCount, 2);
+        final int twoEntryBytes = MarkdownBuiltInRenderers.mathCacheBytes;
+        expect(twoEntryBytes, greaterThan(0));
+
+        // Promote $a$ by accessing it again (hit).
+        await renderMarkdown(r'$a$');
+        expect(MarkdownBuiltInRenderers.mathCacheHitCount, 1);
+        expect(MarkdownBuiltInRenderers.mathCacheBytes, twoEntryBytes);
+
+        // Insert $c$ -> $b$ (oldest unused) must be evicted while $a$ stays hot.
+        await renderMarkdown(r'$c$');
+        expect(MarkdownBuiltInRenderers.mathCacheLength, 2);
+        expect(MarkdownBuiltInRenderers.mathLayoutCount, 3);
+        expect(MarkdownBuiltInRenderers.mathCacheBytes, greaterThan(0));
+        expect(
+          MarkdownBuiltInRenderers.mathCacheBytes,
+          lessThanOrEqualTo(MarkdownBuiltInRenderers.mathMaxBytes),
+        );
+
+        await renderMarkdown(r'$a$');
+        expect(MarkdownBuiltInRenderers.mathCacheHitCount, 2);
+        expect(MarkdownBuiltInRenderers.mathLayoutCount, 3);
+
+        // Inserting $b$ again is a miss because it was evicted.
+        await renderMarkdown(r'$b$');
+        expect(MarkdownBuiltInRenderers.mathLayoutCount, 4);
+
+        // Runtime shrink by entry count evicts LRU entries immediately.
+        MarkdownBuiltInRenderers.configureCaches(mathMaxEntries: 1);
+        expect(MarkdownBuiltInRenderers.mathCacheLength, 1);
+        final int oneEntryBytes = MarkdownBuiltInRenderers.mathCacheBytes;
+        expect(oneEntryBytes, greaterThan(0));
+
+        // Byte-budget eviction under generous entry limit (100 entries).
+        MarkdownBuiltInRenderers.clearCaches();
+        MarkdownBuiltInRenderers.configureCaches(
+          mathMaxEntries: 100,
+          mathMaxBytes: 4 * 1024 * 1024,
+        );
+        await renderMarkdown(r'$$\frac{x_1 + x_2}{y_1 + y_2}$$');
+        final int bytesExpr1 = MarkdownBuiltInRenderers.mathCacheBytes;
+        await renderMarkdown(r'$$\sqrt{a^2 + b^2 + c^2}$$');
+        final int bytesBoth = MarkdownBuiltInRenderers.mathCacheBytes;
+        final int bytesExpr2 = bytesBoth - bytesExpr1;
+        expect(bytesExpr1, greaterThan(0));
+        expect(bytesExpr2, greaterThan(0));
+
+        // Re-render expr 1 so expr 1 becomes most recently used and expr 2 oldest.
+        await renderMarkdown(r'$$\frac{x_1 + x_2}{y_1 + y_2}$$');
+        expect(MarkdownBuiltInRenderers.mathCacheHitCount, 1);
+
+        // Shrink byte budget below two entries -> evicts expr 2, retains expr 1.
+        final int tightMathBudget = bytesExpr1 + bytesExpr2 - 1;
+        MarkdownBuiltInRenderers.configureCaches(mathMaxBytes: tightMathBudget);
+        expect(MarkdownBuiltInRenderers.mathCacheLength, 1);
+        expect(MarkdownBuiltInRenderers.mathCacheBytes, bytesExpr1);
+
+        // Error entry byte accounting & eviction on tight byte cap.
+        await renderMarkdown(r'$\invalidunknowncommand$');
+        expect(
+          MarkdownBuiltInRenderers.mathCacheBytes,
+          lessThanOrEqualTo(tightMathBudget),
+        );
+
+        // Oversized entry exceeding maxBytes must not be inserted or breach budget.
+        MarkdownBuiltInRenderers.configureCaches(mathMaxBytes: 1);
+        expect(MarkdownBuiltInRenderers.mathCacheLength, 0);
+        expect(MarkdownBuiltInRenderers.mathCacheBytes, 0);
+        await renderMarkdown(r'$$a + b + c$$');
+        expect(MarkdownBuiltInRenderers.mathCacheLength, 0);
+        expect(MarkdownBuiltInRenderers.mathCacheBytes, 0);
+
+        MarkdownBuiltInRenderers.clearCaches();
+        expect(MarkdownBuiltInRenderers.mathCacheBytes, 0);
+        expect(MarkdownBuiltInRenderers.mathCacheLength, 0);
+      },
+    );
+
+    testWidgets(
+      'mermaid cache enforces entry cap, LRU hit promotion, byte cap, and clean byte accounting',
+      (WidgetTester tester) async {
+        addTearDown(MarkdownBuiltInRenderers.resetCacheDefaults);
+        await MarkdownBuiltInRenderers.warmUp();
+
+        Future<void> renderDiagram(String source) async {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(body: MarkdownView(source, scrollable: false)),
+            ),
+          );
+          await tester.pumpAndSettle();
+        }
+
+        // Entry-count LRU eviction & hit promotion.
+        MarkdownBuiltInRenderers.configureCaches(
+          mermaidMaxEntries: 2,
+          mermaidMaxBytes: 16 * 1024 * 1024,
+        );
+        await renderDiagram('```mermaid\nflowchart LR\n  A --> B\n```');
+        final int diagram1Bytes = MarkdownBuiltInRenderers.mermaidCacheBytes;
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 1);
+        expect(MarkdownBuiltInRenderers.mermaidRenderCount, 1);
+        expect(diagram1Bytes, greaterThan(128));
+
+        await renderDiagram('```mermaid\nflowchart LR\n  C --> D\n```');
+        final int twoDiagramBytes = MarkdownBuiltInRenderers.mermaidCacheBytes;
+        final int diagram2Bytes = twoDiagramBytes - diagram1Bytes;
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 2);
+        expect(MarkdownBuiltInRenderers.mermaidRenderCount, 2);
+        expect(diagram2Bytes, greaterThan(128));
+
+        // Promote diagram 1 via cache hit.
+        await renderDiagram('```mermaid\nflowchart LR\n  A --> B\n```');
+        expect(MarkdownBuiltInRenderers.mermaidCacheHitCount, greaterThan(0));
+        expect(MarkdownBuiltInRenderers.mermaidCacheBytes, twoDiagramBytes);
+
+        // Insert diagram 3 -> evicts diagram 2 (LRU), keeps diagram 1.
+        await renderDiagram('```mermaid\nflowchart LR\n  E --> F\n```');
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 2);
+        expect(MarkdownBuiltInRenderers.mermaidRenderCount, 3);
+        final int bytesWith1And3 = MarkdownBuiltInRenderers.mermaidCacheBytes;
+        final int diagram3Bytes = bytesWith1And3 - diagram1Bytes;
+        expect(diagram3Bytes, greaterThan(128));
+
+        final int rendersBeforeHit =
+            MarkdownBuiltInRenderers.mermaidRenderCount;
+        await renderDiagram('```mermaid\nflowchart LR\n  A --> B\n```');
+        expect(MarkdownBuiltInRenderers.mermaidRenderCount, rendersBeforeHit);
+
+        // Shrink byte budget below sum of retained entries -> evicts diagram 3 (LRU).
+        MarkdownBuiltInRenderers.configureCaches(
+          mermaidMaxEntries: 64,
+          mermaidMaxBytes: diagram1Bytes + diagram3Bytes - 1,
+        );
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 1);
+        expect(MarkdownBuiltInRenderers.mermaidCacheBytes, diagram1Bytes);
+
+        // Oversized entry exceeding maxBytes must not be inserted or breach budget.
+        MarkdownBuiltInRenderers.configureCaches(mermaidMaxBytes: 32);
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 0);
+        expect(MarkdownBuiltInRenderers.mermaidCacheBytes, 0);
+        await renderDiagram('```mermaid\nflowchart LR\n  G --> H\n```');
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 0);
+        expect(MarkdownBuiltInRenderers.mermaidCacheBytes, 0);
+
+        // Invalid Mermaid diagram failure entry accounts non-zero bytes and clears cleanly.
+        MarkdownBuiltInRenderers.resetCacheDefaults();
+        await renderDiagram('```mermaid\ninvalid syntax @@@\n```');
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 1);
+        expect(MarkdownBuiltInRenderers.mermaidCacheBytes, greaterThan(128));
+
+        MarkdownBuiltInRenderers.clearCaches();
+        expect(MarkdownBuiltInRenderers.mermaidCacheLength, 0);
+        expect(MarkdownBuiltInRenderers.mermaidCacheBytes, 0);
       },
     );
   });

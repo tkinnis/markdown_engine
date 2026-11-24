@@ -1,17 +1,153 @@
 import 'dart:collection';
+import 'dart:math' as math;
 
 import 'package:meta/meta.dart';
 
+import 'slugs.dart';
+
+/// Package-internal mixin making a [ListBase] strictly unmodifiable across all
+/// mutating operations (including `sort`, `shuffle`, and `clear`).
+mixin PackageUnmodifiableListMixin<T> on ListBase<T> {
+  static Never _unsupported() =>
+      throw UnsupportedError('Cannot modify an unmodifiable list');
+
+  @override
+  void operator []=(int index, T value) => _unsupported();
+
+  @override
+  set length(int newLength) => _unsupported();
+
+  @override
+  void add(T element) => _unsupported();
+
+  @override
+  void addAll(Iterable<T> iterable) => _unsupported();
+
+  @override
+  void clear() => _unsupported();
+
+  @override
+  void fillRange(int start, int end, [T? fill]) => _unsupported();
+
+  @override
+  void insert(int index, T element) => _unsupported();
+
+  @override
+  void insertAll(int index, Iterable<T> iterable) => _unsupported();
+
+  @override
+  bool remove(Object? element) => _unsupported();
+
+  @override
+  T removeAt(int index) => _unsupported();
+
+  @override
+  T removeLast() => _unsupported();
+
+  @override
+  void removeRange(int start, int end) => _unsupported();
+
+  @override
+  void removeWhere(bool Function(T element) test) => _unsupported();
+
+  @override
+  void replaceRange(int start, int end, Iterable<T> newContents) =>
+      _unsupported();
+
+  @override
+  void retainWhere(bool Function(T element) test) => _unsupported();
+
+  @override
+  void setAll(int index, Iterable<T> iterable) => _unsupported();
+
+  @override
+  void setRange(
+    int start,
+    int end,
+    Iterable<T> iterable, [
+    int skipCount = 0,
+  ]) => _unsupported();
+
+  @override
+  void shuffle([math.Random? random]) => _unsupported();
+
+  @override
+  void sort([int Function(T a, T b)? compare]) => _unsupported();
+}
+
+/// Compact single-element unmodifiable [List] avoiding both a growable array
+/// allocation and an [UnmodifiableListView] wrapper.
+final class _SingletonList<T> extends ListBase<T>
+    with PackageUnmodifiableListMixin<T> {
+  const _SingletonList(this._element);
+
+  final T _element;
+
+  @override
+  int get length => 1;
+
+  @override
+  T get first => _element;
+
+  @override
+  T get last => _element;
+
+  @override
+  T get single => _element;
+
+  @override
+  bool get isEmpty => false;
+
+  @override
+  bool get isNotEmpty => true;
+
+  @override
+  T operator [](int index) {
+    if (index != 0) {
+      throw RangeError.index(index, this, 'index', null, 1);
+    }
+    return _element;
+  }
+}
+
 /// Returns an unmodifiable view of [list] in O(1), avoiding redundant wrapping
-/// when [list] is already empty or an [UnmodifiableListView].
+/// when [list] is already empty, a [_SingletonList], or an [UnmodifiableListView].
 List<T> freezeList<T>(List<T> list) {
   if (list.isEmpty) {
     return const <Never>[];
   }
-  if (list is UnmodifiableListView<T>) {
+  if (list is _SingletonList<T> || list is UnmodifiableListView<T>) {
     return list;
   }
-  return UnmodifiableListView<T>(List<T>.of(list, growable: false));
+  if (list.length == 1) {
+    return _SingletonList<T>(list[0]);
+  }
+  return List<T>.unmodifiable(list);
+}
+
+/// Returns a single-element unmodifiable [List] containing [element] in one
+/// small allocation.
+List<T> freezeSingleton<T>(T element) => freezeFreshList<T>(<T>[element]);
+
+/// Shared empty unmodifiable block list preserving a uniform backing list type.
+final List<MarkdownBlockNode> emptyFrozenBlockList =
+    UnmodifiableListView<MarkdownBlockNode>(<MarkdownBlockNode>[]);
+
+/// Shared empty unmodifiable inline list preserving a uniform backing list type.
+final List<MarkdownInlineNode> emptyFrozenInlineList =
+    UnmodifiableListView<MarkdownInlineNode>(<MarkdownInlineNode>[]);
+
+/// Shared empty unmodifiable table cell list preserving a uniform backing list type.
+final List<TableCellNode> emptyFrozenTableCellList =
+    UnmodifiableListView<TableCellNode>(<TableCellNode>[]);
+
+/// Freezes a freshly created, non-escaped [list] into an immutable [List] with
+/// minimal allocation overhead.
+List<T> freezeFreshList<T>(List<T> list) {
+  if (list.isEmpty) {
+    return const <Never>[];
+  }
+  return UnmodifiableListView<T>(list);
 }
 
 /// Wraps an already-fixed-length, non-escaped [fixedList] directly in an
@@ -20,8 +156,11 @@ List<T> wrapFixedUnmodifiableList<T>(List<T> fixedList) {
   if (fixedList.isEmpty) {
     return const <Never>[];
   }
-  if (fixedList is UnmodifiableListView<T>) {
+  if (fixedList is _SingletonList<T> || fixedList is UnmodifiableListView<T>) {
     return fixedList;
+  }
+  if (fixedList.length == 1) {
+    return _SingletonList<T>(fixedList[0]);
   }
   return UnmodifiableListView<T>(fixedList);
 }
@@ -41,7 +180,7 @@ List<T> _asUnmodifiableListView<T>(List<T> list) {
   if (list.isEmpty) {
     return const <Never>[];
   }
-  if (list is UnmodifiableListView<T>) {
+  if (list is _SingletonList<T> || list is UnmodifiableListView<T>) {
     return list;
   }
   return UnmodifiableListView<T>(list);
@@ -55,6 +194,72 @@ Map<K, V> _asUnmodifiableMapView<K, V>(Map<K, V> map) {
     return map;
   }
   return UnmodifiableMapView<K, V>(map);
+}
+
+/// Shared lazy batch computing deduplicated heading anchor slugs only when
+/// `HeadingNode.slug` or `MarkdownDocument.outline` is actually accessed.
+final class HeadingSlugBatch {
+  /// Creates a [HeadingSlugBatch], optionally seeded with `initialGenerator`
+  /// or a prefix of previously settled heading texts.
+  HeadingSlugBatch([
+    this._initialGenerator,
+    List<String>? seedHeadingTexts,
+    this._seedHeadingCount = 0,
+  ]) : _seedHeadingTexts = seedHeadingTexts ?? _emptySeedTexts;
+
+  static final List<String> _emptySeedTexts = <String>[];
+
+  HeadingSlugGenerator? _initialGenerator;
+  List<String> _seedHeadingTexts;
+  final int _seedHeadingCount;
+  final List<_LazyHeadingSlug> _entries = <_LazyHeadingSlug>[];
+  bool _resolved = false;
+
+  _LazyHeadingSlug _register(String text) {
+    final _LazyHeadingSlug entry = _LazyHeadingSlug(this, text);
+    _entries.add(entry);
+    return entry;
+  }
+
+  /// Resolves all registered heading slugs in document order once.
+  void resolveAll() {
+    if (_resolved) {
+      return;
+    }
+    _resolved = true;
+    final HeadingSlugGenerator gen =
+        _initialGenerator ?? HeadingSlugGenerator();
+    final List<String> seedTexts = _seedHeadingTexts;
+    if (_seedHeadingCount > 0 && seedTexts.isNotEmpty) {
+      for (int i = 0; i < _seedHeadingCount; i++) {
+        gen.generate(seedTexts[i]);
+      }
+      _seedHeadingTexts = _emptySeedTexts;
+    }
+    for (int i = 0; i < _entries.length; i++) {
+      final _LazyHeadingSlug entry = _entries[i];
+      entry._slug = gen.generate(entry._text);
+    }
+    _entries.clear();
+    _initialGenerator = null;
+  }
+}
+
+final class _LazyHeadingSlug {
+  _LazyHeadingSlug(this._batch, this._text);
+
+  final HeadingSlugBatch _batch;
+  final String _text;
+  String? _slug;
+
+  String get value {
+    final String? cached = _slug;
+    if (cached != null) {
+      return cached;
+    }
+    _batch.resolveAll();
+    return _slug!;
+  }
 }
 
 /// UTF-16 source offset and 1-based line span for a parsed AST node.
@@ -71,8 +276,15 @@ final class SourceSpan {
        assert(startLine >= 0, 'startLine must be non-negative'),
        assert(endLine >= startLine, 'endLine must be >= startLine');
 
+  const SourceSpan._unchecked({
+    required this.startOffset,
+    required this.endOffset,
+    required this.startLine,
+    required this.endLine,
+  });
+
   /// Empty synthetic span at offset `0`, line `0`.
-  static const SourceSpan zero = SourceSpan(
+  static const SourceSpan zero = SourceSpan._unchecked(
     startOffset: 0,
     endOffset: 0,
     startLine: 0,
@@ -297,7 +509,17 @@ final class TableCellNode {
     // ignore: prefer_initializing_formals
   }) : _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const TableCellNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required this.alignment,
+    required this.span,
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const TableCellNode._shifted({
     required List<MarkdownInlineNode> children,
@@ -307,18 +529,20 @@ final class TableCellNode {
     required int childLineDelta,
   }) : _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<MarkdownInlineNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Parsed inline children within this cell.
   List<MarkdownInlineNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownInlineNode>(
+    return freezeFreshList(
       _shiftInlines(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -384,7 +608,18 @@ final class DefinitionGroup {
   }) : _term = term,
        _definitions = definitions,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const DefinitionGroup._frozen({
+    required List<MarkdownInlineNode> term,
+    required List<List<MarkdownBlockNode>> definitions,
+    required this.span,
+  }) : _term = term,
+       _definitions = definitions,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const DefinitionGroup._shifted({
     required List<MarkdownInlineNode> term,
@@ -395,19 +630,21 @@ final class DefinitionGroup {
   }) : _term = term,
        _definitions = definitions,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<MarkdownInlineNode> _term;
   final List<List<MarkdownBlockNode>> _definitions;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Inline nodes comprising the defined term (`<dt>`).
   List<MarkdownInlineNode> get term {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_term);
+      return _frozen ? _term : _asUnmodifiableListView(_term);
     }
-    return UnmodifiableListView<MarkdownInlineNode>(
+    return freezeFreshList(
       _shiftInlines(_term, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -415,15 +652,14 @@ final class DefinitionGroup {
   /// Block sequences for each `: ...` definition (`<dd>`) belonging to [term].
   List<List<MarkdownBlockNode>> get definitions {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_definitions);
+      return _frozen ? _definitions : _asUnmodifiableListView(_definitions);
     }
-    return UnmodifiableListView<List<MarkdownBlockNode>>(
+    return List<List<MarkdownBlockNode>>.unmodifiable(
       _definitions
           .map(
-            (List<MarkdownBlockNode> d) =>
-                UnmodifiableListView<MarkdownBlockNode>(
-                  _shiftBlocks(d, _childOffsetDelta, _childLineDelta),
-                ),
+            (List<MarkdownBlockNode> d) => freezeFreshList(
+              _shiftBlocks(d, _childOffsetDelta, _childLineDelta),
+            ),
           )
           .toList(growable: false),
     );
@@ -570,30 +806,54 @@ final class HeadingNode extends MarkdownBlockNode {
     required super.blockId,
     required this.level,
     required this.text,
-    this.slug,
+    String? slug,
     this.explicitId,
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     this.isSetext = false,
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children,
+  }) : _slug = slug,
+       _lazySlug = null,
+       _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const HeadingNode._frozen({
+    required super.blockId,
+    required this.level,
+    required this.text,
+    String? slug,
+    _LazyHeadingSlug? lazySlug,
+    required this.explicitId,
+    required List<MarkdownInlineNode> children,
+    required this.isSetext,
+    required super.span,
+  }) : _slug = slug,
+       _lazySlug = lazySlug,
+       _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const HeadingNode._shifted({
     required super.blockId,
     required this.level,
     required this.text,
-    required this.slug,
+    required String? slug,
+    required _LazyHeadingSlug? lazySlug,
     required this.explicitId,
     required List<MarkdownInlineNode> children,
     required this.isSetext,
     required super.span,
     required int childOffsetDelta,
     required int childLineDelta,
-  }) : _children = children,
+  }) : _slug = slug,
+       _lazySlug = lazySlug,
+       _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   /// Heading level (`1` through `6`).
   final int level;
@@ -601,8 +861,11 @@ final class HeadingNode extends MarkdownBlockNode {
   /// Plain-text content of this heading.
   final String text;
 
+  final String? _slug;
+  final _LazyHeadingSlug? _lazySlug;
+
   /// Computed GitHub-style slug (or [explicitId]) when enabled.
-  final String? slug;
+  String? get slug => _slug ?? _lazySlug?.value;
 
   /// Explicit `{#id}` anchor attribute if present.
   final String? explicitId;
@@ -610,13 +873,14 @@ final class HeadingNode extends MarkdownBlockNode {
   final List<MarkdownInlineNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Parsed inline children within the heading.
   List<MarkdownInlineNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownInlineNode>(
+    return freezeFreshList(
       _shiftInlines(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -636,7 +900,8 @@ final class HeadingNode extends MarkdownBlockNode {
       blockId: blockId,
       level: level,
       text: text,
-      slug: slug,
+      slug: _slug,
+      lazySlug: _lazySlug,
       explicitId: explicitId,
       children: _children,
       isSetext: isSetext,
@@ -695,7 +960,17 @@ final class ParagraphNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const ParagraphNode._frozen({
+    required super.blockId,
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const ParagraphNode._shifted({
     required super.blockId,
@@ -705,18 +980,20 @@ final class ParagraphNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<MarkdownInlineNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Parsed inline children within this paragraph.
   List<MarkdownInlineNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownInlineNode>(
+    return freezeFreshList(
       _shiftInlines(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -846,7 +1123,17 @@ final class BlockQuoteNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const BlockQuoteNode._frozen({
+    required super.blockId,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const BlockQuoteNode._shifted({
     required super.blockId,
@@ -856,18 +1143,20 @@ final class BlockQuoteNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<MarkdownBlockNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Nested blocks inside this blockquote.
   List<MarkdownBlockNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownBlockNode>(
+    return freezeFreshList(
       _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -926,7 +1215,19 @@ final class AlertNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const AlertNode._frozen({
+    required super.blockId,
+    required this.kind,
+    required this.title,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const AlertNode._shifted({
     required super.blockId,
@@ -938,7 +1239,8 @@ final class AlertNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   /// Alert severity/kind.
   final AlertKind kind;
@@ -950,13 +1252,14 @@ final class AlertNode extends MarkdownBlockNode {
   final List<MarkdownBlockNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Nested body blocks inside the alert.
   List<MarkdownBlockNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownBlockNode>(
+    return freezeFreshList(
       _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -1024,7 +1327,21 @@ final class ListNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _items = items,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const ListNode._frozen({
+    required super.blockId,
+    required this.ordered,
+    required this.start,
+    required this.tight,
+    required this.delimiter,
+    required List<ListItemNode> items,
+    required super.span,
+  }) : _items = items,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const ListNode._shifted({
     required super.blockId,
@@ -1038,7 +1355,8 @@ final class ListNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _items = items,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   /// Whether this is an ordered list (`<ol>`) rather than a bullet list (`<ul>`).
   final bool ordered;
@@ -1055,13 +1373,14 @@ final class ListNode extends MarkdownBlockNode {
   final List<ListItemNode> _items;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Ordered items belonging to this list.
   List<ListItemNode> get items {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_items);
+      return _frozen ? _items : _asUnmodifiableListView(_items);
     }
-    return UnmodifiableListView<ListItemNode>(
+    return freezeFreshList(
       _items
           .map(
             (ListItemNode item) =>
@@ -1135,27 +1454,44 @@ final class ListItemNode extends MarkdownBlockNode {
   /// Creates a [ListItemNode].
   const ListItemNode({
     required super.blockId,
-    this.taskState,
+    bool? taskState,
     List<MarkdownBlockNode> children = const <MarkdownBlockNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children,
+  }) : _taskStateCode = taskState == null ? -1 : (taskState ? 1 : 0),
+       _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const ListItemNode._frozen({
+    required super.blockId,
+    required bool? taskState,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+  }) : _taskStateCode = taskState == null ? -1 : (taskState ? 1 : 0),
+       _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const ListItemNode._shifted({
     required super.blockId,
-    required this.taskState,
+    required bool? taskState,
     required List<MarkdownBlockNode> children,
     required super.span,
     required int childOffsetDelta,
     required int childLineDelta,
-  }) : _children = children,
+  }) : _taskStateCode = taskState == null ? -1 : (taskState ? 1 : 0),
+       _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
+
+  final int _taskStateCode;
 
   /// GFM task checkbox state (`true` checked, `false` unchecked, `null` normal).
-  final bool? taskState;
+  bool? get taskState => _taskStateCode < 0 ? null : _taskStateCode != 0;
 
   /// Alias for [taskState] indicating whether a task item is checked.
   bool? get isChecked => taskState;
@@ -1166,13 +1502,14 @@ final class ListItemNode extends MarkdownBlockNode {
   final List<MarkdownBlockNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Nested blocks inside this list item.
   List<MarkdownBlockNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownBlockNode>(
+    return freezeFreshList(
       _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -1235,7 +1572,21 @@ final class TableNode extends MarkdownBlockNode {
        _headers = headers,
        _rows = rows,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const TableNode._frozen({
+    required super.blockId,
+    required List<TableAlignment> alignments,
+    required List<TableCellNode> headers,
+    required List<List<TableCellNode>> rows,
+    required super.span,
+  }) : _alignments = alignments,
+       _headers = headers,
+       _rows = rows,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const TableNode._shifted({
     required super.blockId,
@@ -1249,23 +1600,26 @@ final class TableNode extends MarkdownBlockNode {
        _headers = headers,
        _rows = rows,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<TableAlignment> _alignments;
   final List<TableCellNode> _headers;
   final List<List<TableCellNode>> _rows;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Column alignment specifications from the delimiter row.
-  List<TableAlignment> get alignments => _asUnmodifiableListView(_alignments);
+  List<TableAlignment> get alignments =>
+      _frozen ? _alignments : _asUnmodifiableListView(_alignments);
 
   /// Header cells (`<thead><tr><th>`).
   List<TableCellNode> get headers {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_headers);
+      return _frozen ? _headers : _asUnmodifiableListView(_headers);
     }
-    return UnmodifiableListView<TableCellNode>(
+    return freezeFreshList(
       _headers
           .map(
             (TableCellNode c) =>
@@ -1278,6 +1632,9 @@ final class TableNode extends MarkdownBlockNode {
   /// Body rows (`<tbody><tr><td>`).
   List<List<TableCellNode>> get rows {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
+      if (_frozen) {
+        return _rows;
+      }
       if (_rows.isEmpty) {
         return const <List<TableCellNode>>[];
       }
@@ -1290,10 +1647,10 @@ final class TableNode extends MarkdownBlockNode {
             .toList(growable: false),
       );
     }
-    return UnmodifiableListView<List<TableCellNode>>(
+    return List<List<TableCellNode>>.unmodifiable(
       _rows
           .map(
-            (List<TableCellNode> r) => UnmodifiableListView<TableCellNode>(
+            (List<TableCellNode> r) => freezeFreshList(
               r
                   .map(
                     (TableCellNode c) =>
@@ -1465,7 +1822,21 @@ final class DetailsBlockNode extends MarkdownBlockNode {
   }) : _summaryInlines = summaryInlines,
        _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const DetailsBlockNode._frozen({
+    required super.blockId,
+    required this.summary,
+    required List<MarkdownInlineNode> summaryInlines,
+    required this.initiallyOpen,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+  }) : _summaryInlines = summaryInlines,
+       _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const DetailsBlockNode._shifted({
     required super.blockId,
@@ -1479,7 +1850,8 @@ final class DetailsBlockNode extends MarkdownBlockNode {
   }) : _summaryInlines = summaryInlines,
        _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   /// Plain-text summary heading.
   final String summary;
@@ -1489,9 +1861,11 @@ final class DetailsBlockNode extends MarkdownBlockNode {
   /// Parsed inline nodes for the summary line.
   List<MarkdownInlineNode> get summaryInlines {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_summaryInlines);
+      return _frozen
+          ? _summaryInlines
+          : _asUnmodifiableListView(_summaryInlines);
     }
-    return UnmodifiableListView<MarkdownInlineNode>(
+    return freezeFreshList(
       _shiftInlines(_summaryInlines, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -1502,13 +1876,14 @@ final class DetailsBlockNode extends MarkdownBlockNode {
   final List<MarkdownBlockNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Nested body blocks inside `<details>`.
   List<MarkdownBlockNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownBlockNode>(
+    return freezeFreshList(
       _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -1582,7 +1957,18 @@ final class AlignedBlockNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const AlignedBlockNode._frozen({
+    required super.blockId,
+    required this.alignment,
+    required List<MarkdownBlockNode> children,
+    required super.span,
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const AlignedBlockNode._shifted({
     required super.blockId,
@@ -1593,7 +1979,8 @@ final class AlignedBlockNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   /// Alignment applied to the contained blocks.
   final TableAlignment alignment;
@@ -1601,13 +1988,14 @@ final class AlignedBlockNode extends MarkdownBlockNode {
   final List<MarkdownBlockNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Contained block nodes.
   List<MarkdownBlockNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownBlockNode>(
+    return freezeFreshList(
       _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -1669,7 +2057,20 @@ final class FigureBlockNode extends MarkdownBlockNode {
   }) : _children = children,
        _captionInlines = captionInlines,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const FigureBlockNode._frozen({
+    required super.blockId,
+    required List<MarkdownBlockNode> children,
+    required this.caption,
+    required List<MarkdownInlineNode> captionInlines,
+    required super.span,
+  }) : _children = children,
+       _captionInlines = captionInlines,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const FigureBlockNode._shifted({
     required super.blockId,
@@ -1682,16 +2083,17 @@ final class FigureBlockNode extends MarkdownBlockNode {
   }) : _children = children,
        _captionInlines = captionInlines,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<MarkdownBlockNode> _children;
 
   /// Body blocks inside the figure.
   List<MarkdownBlockNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownBlockNode>(
+    return freezeFreshList(
       _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -1702,13 +2104,16 @@ final class FigureBlockNode extends MarkdownBlockNode {
   final List<MarkdownInlineNode> _captionInlines;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Parsed inline nodes for `<figcaption>`.
   List<MarkdownInlineNode> get captionInlines {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_captionInlines);
+      return _frozen
+          ? _captionInlines
+          : _asUnmodifiableListView(_captionInlines);
     }
-    return UnmodifiableListView<MarkdownInlineNode>(
+    return freezeFreshList(
       _shiftInlines(_captionInlines, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -1821,7 +2226,17 @@ final class DefinitionListNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _groups = groups,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const DefinitionListNode._frozen({
+    required super.blockId,
+    required List<DefinitionGroup> groups,
+    required super.span,
+  }) : _groups = groups,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const DefinitionListNode._shifted({
     required super.blockId,
@@ -1831,18 +2246,20 @@ final class DefinitionListNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _groups = groups,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<DefinitionGroup> _groups;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Term/definition groups in this definition list.
   List<DefinitionGroup> get groups {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_groups);
+      return _frozen ? _groups : _asUnmodifiableListView(_groups);
     }
-    return UnmodifiableListView<DefinitionGroup>(
+    return freezeFreshList(
       _groups
           .map(
             (DefinitionGroup g) =>
@@ -1908,7 +2325,20 @@ final class FootnoteDefinitionNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _children = children,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const FootnoteDefinitionNode._frozen({
+    required super.blockId,
+    required this.label,
+    required this.index,
+    required List<MarkdownBlockNode> children,
+    required this.referenceCount,
+    required super.span,
+  }) : _children = children,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const FootnoteDefinitionNode._shifted({
     required super.blockId,
@@ -1921,7 +2351,8 @@ final class FootnoteDefinitionNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _children = children,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   /// Raw footnote identifier label.
   final String label;
@@ -1935,13 +2366,14 @@ final class FootnoteDefinitionNode extends MarkdownBlockNode {
   final List<MarkdownBlockNode> _children;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Body blocks inside this footnote definition.
   List<MarkdownBlockNode> get children {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_children);
+      return _frozen ? _children : _asUnmodifiableListView(_children);
     }
-    return UnmodifiableListView<MarkdownBlockNode>(
+    return freezeFreshList(
       _shiftBlocks(_children, _childOffsetDelta, _childLineDelta),
     );
   }
@@ -2011,7 +2443,17 @@ final class FootnoteSectionNode extends MarkdownBlockNode {
     // ignore: prefer_initializing_formals
   }) : _definitions = definitions,
        _childOffsetDelta = 0,
-       _childLineDelta = 0;
+       _childLineDelta = 0,
+       _frozen = false;
+
+  const FootnoteSectionNode._frozen({
+    required super.blockId,
+    required List<FootnoteDefinitionNode> definitions,
+    required super.span,
+  }) : _definitions = definitions,
+       _childOffsetDelta = 0,
+       _childLineDelta = 0,
+       _frozen = true;
 
   const FootnoteSectionNode._shifted({
     required super.blockId,
@@ -2021,18 +2463,20 @@ final class FootnoteSectionNode extends MarkdownBlockNode {
     required int childLineDelta,
   }) : _definitions = definitions,
        _childOffsetDelta = childOffsetDelta,
-       _childLineDelta = childLineDelta;
+       _childLineDelta = childLineDelta,
+       _frozen = false;
 
   final List<FootnoteDefinitionNode> _definitions;
   final int _childOffsetDelta;
   final int _childLineDelta;
+  final bool _frozen;
 
   /// Referenced footnote definitions ordered by first citation.
   List<FootnoteDefinitionNode> get definitions {
     if (_childOffsetDelta == 0 && _childLineDelta == 0) {
-      return _asUnmodifiableListView(_definitions);
+      return _frozen ? _definitions : _asUnmodifiableListView(_definitions);
     }
-    return UnmodifiableListView<FootnoteDefinitionNode>(
+    return freezeFreshList(
       _definitions
           .map(
             (FootnoteDefinitionNode d) =>
@@ -2219,12 +2663,22 @@ final class EmphasisNode extends MarkdownInlineNode {
     this.delimiter = '*',
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const EmphasisNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required this.delimiter,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Emphasized child inline nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   /// Delimiter character (`'*'` or `'_'`).
   final String delimiter;
@@ -2237,7 +2691,7 @@ final class EmphasisNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return EmphasisNode(
+    return EmphasisNode._frozen(
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       delimiter: delimiter,
       span: span.shift(offsetDelta, lineDelta),
@@ -2264,12 +2718,22 @@ final class StrongNode extends MarkdownInlineNode {
     this.delimiter = '**',
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const StrongNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required this.delimiter,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Strongly emphasized child inline nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   /// Delimiter marker (`'**'` or `'__'`).
   final String delimiter;
@@ -2282,7 +2746,7 @@ final class StrongNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return StrongNode(
+    return StrongNode._frozen(
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       delimiter: delimiter,
       span: span.shift(offsetDelta, lineDelta),
@@ -2308,12 +2772,21 @@ final class StrikethroughNode extends MarkdownInlineNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const StrikethroughNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Struck child inline nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2323,7 +2796,7 @@ final class StrikethroughNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return StrikethroughNode(
+    return StrikethroughNode._frozen(
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       span: span.shift(offsetDelta, lineDelta),
     );
@@ -2347,12 +2820,21 @@ final class HighlightNode extends MarkdownInlineNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const HighlightNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Highlighted child inline nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2362,7 +2844,7 @@ final class HighlightNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return HighlightNode(
+    return HighlightNode._frozen(
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       span: span.shift(offsetDelta, lineDelta),
     );
@@ -2386,12 +2868,21 @@ final class SubscriptNode extends MarkdownInlineNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const SubscriptNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Subscripted child inline nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2401,7 +2892,7 @@ final class SubscriptNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return SubscriptNode(
+    return SubscriptNode._frozen(
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       span: span.shift(offsetDelta, lineDelta),
     );
@@ -2425,12 +2916,21 @@ final class SuperscriptNode extends MarkdownInlineNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const SuperscriptNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Superscripted child inline nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2440,7 +2940,7 @@ final class SuperscriptNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return SuperscriptNode(
+    return SuperscriptNode._frozen(
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       span: span.shift(offsetDelta, lineDelta),
     );
@@ -2462,34 +2962,58 @@ final class LinkNode extends MarkdownInlineNode {
   /// Creates a [LinkNode].
   const LinkNode({
     required this.destination,
-    this.title,
+    String? title,
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     this.isAutolink = false,
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children,
-       _blockedDestination = false;
+  }) : _hasTitle = title != null,
+       _title = title ?? '',
+       _children = children,
+       _blockedDestination = false,
+       _frozen = false;
 
-  const LinkNode._blocked({
-    required this.title,
+  const LinkNode._frozen({
+    required this.destination,
+    required String? title,
     required List<MarkdownInlineNode> children,
     required this.isAutolink,
     required super.span,
-  }) : destination = '',
+  }) : _hasTitle = title != null,
+       _title = title ?? '',
        _children = children,
-       _blockedDestination = true;
+       _blockedDestination = false,
+       _frozen = true;
+
+  const LinkNode._blocked({
+    required String? title,
+    required List<MarkdownInlineNode> children,
+    required this.isAutolink,
+    required super.span,
+    bool frozen = false,
+  }) : destination = '',
+       _hasTitle = title != null,
+       _title = title ?? '',
+       _children = children,
+       _blockedDestination = true,
+       _frozen = frozen;
 
   /// Resolved link destination URI (sanitized if URL sanitization is active).
   final String destination;
 
+  final bool _hasTitle;
+  final String _title;
+
   /// Optional unescaped link title.
-  final String? title;
+  String? get title => _hasTitle ? _title : null;
 
   final List<MarkdownInlineNode> _children;
   final bool _blockedDestination;
+  final bool _frozen;
 
   /// Visible link label inline nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   /// Whether this link was created from a CommonMark or GFM autolink.
   final bool isAutolink;
@@ -2508,9 +3032,10 @@ final class LinkNode extends MarkdownInlineNode {
         children: _shiftInlines(_children, offsetDelta, lineDelta),
         isAutolink: isAutolink,
         span: span.shift(offsetDelta, lineDelta),
+        frozen: true,
       );
     }
-    return LinkNode(
+    return LinkNode._frozen(
       destination: destination,
       title: title,
       children: _shiftInlines(_children, offsetDelta, lineDelta),
@@ -2524,7 +3049,8 @@ final class LinkNode extends MarkdownInlineNode {
       identical(this, other) ||
       other is LinkNode &&
           destination == other.destination &&
-          title == other.title &&
+          _hasTitle == other._hasTitle &&
+          _title == other._title &&
           isAutolink == other.isAutolink &&
           span == other.span &&
           _listEquals(_children, other._children);
@@ -2552,7 +3078,20 @@ final class ImageNode extends MarkdownInlineNode {
     super.span,
     // ignore: prefer_initializing_formals
   }) : _children = children,
-       _blockedDestination = false;
+       _blockedDestination = false,
+       _frozen = false;
+
+  const ImageNode._frozen({
+    required this.destination,
+    required this.alt,
+    required this.title,
+    required this.width,
+    required this.height,
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _blockedDestination = false,
+       _frozen = true;
 
   const ImageNode._blocked({
     required this.alt,
@@ -2561,9 +3100,11 @@ final class ImageNode extends MarkdownInlineNode {
     required this.height,
     required List<MarkdownInlineNode> children,
     required super.span,
+    bool frozen = false,
   }) : destination = '',
        _children = children,
-       _blockedDestination = true;
+       _blockedDestination = true,
+       _frozen = frozen;
 
   /// Image URI destination (sanitized if URL sanitization is active).
   final String destination;
@@ -2582,9 +3123,11 @@ final class ImageNode extends MarkdownInlineNode {
 
   final List<MarkdownInlineNode> _children;
   final bool _blockedDestination;
+  final bool _frozen;
 
   /// Parsed inline children extracted for the image alt description.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => alt;
@@ -2602,9 +3145,10 @@ final class ImageNode extends MarkdownInlineNode {
         height: height,
         children: _shiftInlines(_children, offsetDelta, lineDelta),
         span: span.shift(offsetDelta, lineDelta),
+        frozen: true,
       );
     }
-    return ImageNode(
+    return ImageNode._frozen(
       destination: destination,
       alt: alt,
       title: title,
@@ -2722,12 +3266,21 @@ final class KbdInlineNode extends MarkdownInlineNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const KbdInlineNode._frozen({
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Inline contents of the `<kbd>` tag.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2737,7 +3290,7 @@ final class KbdInlineNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return KbdInlineNode(
+    return KbdInlineNode._frozen(
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       span: span.shift(offsetDelta, lineDelta),
     );
@@ -2762,15 +3315,25 @@ final class AbbrInlineNode extends MarkdownInlineNode {
     List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
     super.span,
     // ignore: prefer_initializing_formals
-  }) : _children = children;
+  }) : _children = children,
+       _frozen = false;
+
+  const AbbrInlineNode._frozen({
+    required this.title,
+    required List<MarkdownInlineNode> children,
+    required super.span,
+  }) : _children = children,
+       _frozen = true;
 
   /// Expanded abbreviation definition title.
   final String title;
 
   final List<MarkdownInlineNode> _children;
+  final bool _frozen;
 
   /// Visible abbreviation text nodes.
-  List<MarkdownInlineNode> get children => _asUnmodifiableListView(_children);
+  List<MarkdownInlineNode> get children =>
+      _frozen ? _children : _asUnmodifiableListView(_children);
 
   @override
   String toPlainText() => _inlinesToPlainText(_children);
@@ -2780,7 +3343,7 @@ final class AbbrInlineNode extends MarkdownInlineNode {
     if (offsetDelta == 0 && lineDelta == 0) {
       return this;
     }
-    return AbbrInlineNode(
+    return AbbrInlineNode._frozen(
       title: title,
       children: _shiftInlines(_children, offsetDelta, lineDelta),
       span: span.shift(offsetDelta, lineDelta),
@@ -2931,23 +3494,31 @@ final class RawHtmlInlineNode extends MarkdownInlineNode {
 }
 
 String _inlinesToPlainText(List<MarkdownInlineNode> nodes) {
-  if (nodes.isEmpty) {
+  final int len = nodes.length;
+  if (len == 0) {
     return '';
   }
+  if (len == 1) {
+    return nodes[0].toPlainText();
+  }
   final StringBuffer out = StringBuffer();
-  for (final MarkdownInlineNode node in nodes) {
-    out.write(node.toPlainText());
+  for (int i = 0; i < len; i++) {
+    out.write(nodes[i].toPlainText());
   }
   return out.toString();
 }
 
 String _blocksToPlainText(List<MarkdownBlockNode> blocks) {
-  if (blocks.isEmpty) {
+  final int len = blocks.length;
+  if (len == 0) {
     return '';
   }
+  if (len == 1) {
+    return blocks[0].toPlainText();
+  }
   final List<String> parts = <String>[];
-  for (final MarkdownBlockNode block in blocks) {
-    final String text = block.toPlainText();
+  for (int i = 0; i < len; i++) {
+    final String text = blocks[i].toPlainText();
     if (text.isNotEmpty) {
       parts.add(text);
     }
@@ -2960,9 +3531,22 @@ List<MarkdownInlineNode> _shiftInlines(
   int offsetDelta,
   int lineDelta,
 ) {
-  return nodes
-      .map((MarkdownInlineNode n) => n.shiftSpan(offsetDelta, lineDelta))
-      .toList(growable: false);
+  final int len = nodes.length;
+  if (len == 0) {
+    return const <MarkdownInlineNode>[];
+  }
+  if (len == 1) {
+    return _SingletonList<MarkdownInlineNode>(
+      nodes[0].shiftSpan(offsetDelta, lineDelta),
+    );
+  }
+  return List<MarkdownInlineNode>.unmodifiable(
+    List<MarkdownInlineNode>.generate(
+      len,
+      (int i) => nodes[i].shiftSpan(offsetDelta, lineDelta),
+      growable: false,
+    ),
+  );
 }
 
 List<MarkdownBlockNode> _shiftBlocks(
@@ -2970,9 +3554,22 @@ List<MarkdownBlockNode> _shiftBlocks(
   int offsetDelta,
   int lineDelta,
 ) {
-  return blocks
-      .map((MarkdownBlockNode b) => b.shiftSpan(offsetDelta, lineDelta))
-      .toList(growable: false);
+  final int len = blocks.length;
+  if (len == 0) {
+    return const <MarkdownBlockNode>[];
+  }
+  if (len == 1) {
+    return _SingletonList<MarkdownBlockNode>(
+      blocks[0].shiftSpan(offsetDelta, lineDelta),
+    );
+  }
+  return List<MarkdownBlockNode>.unmodifiable(
+    List<MarkdownBlockNode>.generate(
+      len,
+      (int i) => blocks[i].shiftSpan(offsetDelta, lineDelta),
+      growable: false,
+    ),
+  );
 }
 
 bool _listEquals<T>(List<T> a, List<T> b) {
@@ -3086,11 +3683,13 @@ LinkNode createBlockedLinkNode({
   List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
   bool isAutolink = false,
   SourceSpan span = SourceSpan.zero,
+  bool frozen = false,
 }) => LinkNode._blocked(
   title: title,
   children: children,
   isAutolink: isAutolink,
   span: span,
+  frozen: frozen,
 );
 
 /// Package-internal helper constructing an [ImageNode] whose destination was
@@ -3102,6 +3701,7 @@ ImageNode createBlockedImageNode({
   int? height,
   List<MarkdownInlineNode> children = const <MarkdownInlineNode>[],
   SourceSpan span = SourceSpan.zero,
+  bool frozen = false,
 }) => ImageNode._blocked(
   alt: alt,
   title: title,
@@ -3109,7 +3709,265 @@ ImageNode createBlockedImageNode({
   height: height,
   children: children,
   span: span,
+  frozen: frozen,
 );
+
+/// Package-internal constructors creating AST nodes backed by already-frozen
+/// lists so getters return O(1) without wrapping in [UnmodifiableListView].
+ParagraphNode createFrozenParagraphNode({
+  required String blockId,
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => ParagraphNode._frozen(blockId: blockId, children: children, span: span);
+
+HeadingNode createFrozenHeadingNode({
+  required String blockId,
+  required int level,
+  required String text,
+  String? slug,
+  HeadingSlugBatch? slugBatch,
+  String? explicitId,
+  required List<MarkdownInlineNode> children,
+  required bool isSetext,
+  required SourceSpan span,
+}) => HeadingNode._frozen(
+  blockId: blockId,
+  level: level,
+  text: text,
+  slug: slug,
+  lazySlug: slugBatch?._register(text),
+  explicitId: explicitId,
+  children: children,
+  isSetext: isSetext,
+  span: span,
+);
+
+BlockQuoteNode createFrozenBlockQuoteNode({
+  required String blockId,
+  required List<MarkdownBlockNode> children,
+  required SourceSpan span,
+}) => BlockQuoteNode._frozen(blockId: blockId, children: children, span: span);
+
+AlertNode createFrozenAlertNode({
+  required String blockId,
+  required AlertKind kind,
+  required String title,
+  required List<MarkdownBlockNode> children,
+  required SourceSpan span,
+}) => AlertNode._frozen(
+  blockId: blockId,
+  kind: kind,
+  title: title,
+  children: children,
+  span: span,
+);
+
+ListNode createFrozenListNode({
+  required String blockId,
+  required bool ordered,
+  required int start,
+  required bool tight,
+  required String delimiter,
+  required List<ListItemNode> items,
+  required SourceSpan span,
+}) => ListNode._frozen(
+  blockId: blockId,
+  ordered: ordered,
+  start: start,
+  tight: tight,
+  delimiter: delimiter,
+  items: items,
+  span: span,
+);
+
+ListItemNode createFrozenListItemNode({
+  required String blockId,
+  required bool? taskState,
+  required List<MarkdownBlockNode> children,
+  required SourceSpan span,
+}) => ListItemNode._frozen(
+  blockId: blockId,
+  taskState: taskState,
+  children: children,
+  span: span,
+);
+
+TableCellNode createFrozenTableCellNode({
+  required List<MarkdownInlineNode> children,
+  required TableAlignment alignment,
+  required SourceSpan span,
+}) =>
+    TableCellNode._frozen(children: children, alignment: alignment, span: span);
+
+TableNode createFrozenTableNode({
+  required String blockId,
+  required List<TableAlignment> alignments,
+  required List<TableCellNode> headers,
+  required List<List<TableCellNode>> rows,
+  required SourceSpan span,
+}) => TableNode._frozen(
+  blockId: blockId,
+  alignments: alignments,
+  headers: headers,
+  rows: rows,
+  span: span,
+);
+
+DetailsBlockNode createFrozenDetailsBlockNode({
+  required String blockId,
+  required String summary,
+  required List<MarkdownInlineNode> summaryInlines,
+  required bool initiallyOpen,
+  required List<MarkdownBlockNode> children,
+  required SourceSpan span,
+}) => DetailsBlockNode._frozen(
+  blockId: blockId,
+  summary: summary,
+  summaryInlines: summaryInlines,
+  initiallyOpen: initiallyOpen,
+  children: children,
+  span: span,
+);
+
+AlignedBlockNode createFrozenAlignedBlockNode({
+  required String blockId,
+  required TableAlignment alignment,
+  required List<MarkdownBlockNode> children,
+  required SourceSpan span,
+}) => AlignedBlockNode._frozen(
+  blockId: blockId,
+  alignment: alignment,
+  children: children,
+  span: span,
+);
+
+FigureBlockNode createFrozenFigureBlockNode({
+  required String blockId,
+  required List<MarkdownBlockNode> children,
+  required String? caption,
+  required List<MarkdownInlineNode> captionInlines,
+  required SourceSpan span,
+}) => FigureBlockNode._frozen(
+  blockId: blockId,
+  children: children,
+  caption: caption,
+  captionInlines: captionInlines,
+  span: span,
+);
+
+DefinitionGroup createFrozenDefinitionGroup({
+  required List<MarkdownInlineNode> term,
+  required List<List<MarkdownBlockNode>> definitions,
+  required SourceSpan span,
+}) => DefinitionGroup._frozen(term: term, definitions: definitions, span: span);
+
+DefinitionListNode createFrozenDefinitionListNode({
+  required String blockId,
+  required List<DefinitionGroup> groups,
+  required SourceSpan span,
+}) => DefinitionListNode._frozen(blockId: blockId, groups: groups, span: span);
+
+FootnoteDefinitionNode createFrozenFootnoteDefinitionNode({
+  required String blockId,
+  required String label,
+  required int index,
+  required int referenceCount,
+  required List<MarkdownBlockNode> children,
+  required SourceSpan span,
+}) => FootnoteDefinitionNode._frozen(
+  blockId: blockId,
+  label: label,
+  index: index,
+  referenceCount: referenceCount,
+  children: children,
+  span: span,
+);
+
+FootnoteSectionNode createFrozenFootnoteSectionNode({
+  required String blockId,
+  required List<FootnoteDefinitionNode> definitions,
+  required SourceSpan span,
+}) => FootnoteSectionNode._frozen(
+  blockId: blockId,
+  definitions: definitions,
+  span: span,
+);
+
+EmphasisNode createFrozenEmphasisNode({
+  required List<MarkdownInlineNode> children,
+  required String delimiter,
+  required SourceSpan span,
+}) =>
+    EmphasisNode._frozen(children: children, delimiter: delimiter, span: span);
+
+StrongNode createFrozenStrongNode({
+  required List<MarkdownInlineNode> children,
+  required String delimiter,
+  required SourceSpan span,
+}) => StrongNode._frozen(children: children, delimiter: delimiter, span: span);
+
+StrikethroughNode createFrozenStrikethroughNode({
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => StrikethroughNode._frozen(children: children, span: span);
+
+HighlightNode createFrozenHighlightNode({
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => HighlightNode._frozen(children: children, span: span);
+
+SubscriptNode createFrozenSubscriptNode({
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => SubscriptNode._frozen(children: children, span: span);
+
+SuperscriptNode createFrozenSuperscriptNode({
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => SuperscriptNode._frozen(children: children, span: span);
+
+LinkNode createFrozenLinkNode({
+  required String destination,
+  required String? title,
+  required List<MarkdownInlineNode> children,
+  required bool isAutolink,
+  required SourceSpan span,
+}) => LinkNode._frozen(
+  destination: destination,
+  title: title,
+  children: children,
+  isAutolink: isAutolink,
+  span: span,
+);
+
+ImageNode createFrozenImageNode({
+  required String destination,
+  required String alt,
+  required String? title,
+  required int? width,
+  required int? height,
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => ImageNode._frozen(
+  destination: destination,
+  alt: alt,
+  title: title,
+  width: width,
+  height: height,
+  children: children,
+  span: span,
+);
+
+KbdInlineNode createFrozenKbdInlineNode({
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => KbdInlineNode._frozen(children: children, span: span);
+
+AbbrInlineNode createFrozenAbbrInlineNode({
+  required String title,
+  required List<MarkdownInlineNode> children,
+  required SourceSpan span,
+}) => AbbrInlineNode._frozen(title: title, children: children, span: span);
 
 /// Returns whether [node]'s original destination was cleared by URL policy.
 bool isBlockedLinkNode(LinkNode node) => node._blockedDestination;
@@ -3143,3 +4001,15 @@ List<MarkdownBlockNode> rawFootnoteDefChildren(FootnoteDefinitionNode n) =>
     n._children;
 List<FootnoteDefinitionNode> rawFootnoteSectionDefs(FootnoteSectionNode n) =>
     n._definitions;
+
+SourceSpan createUncheckedSpan({
+  required int startOffset,
+  required int endOffset,
+  required int startLine,
+  required int endLine,
+}) => SourceSpan._unchecked(
+  startOffset: startOffset,
+  endOffset: endOffset,
+  startLine: startLine,
+  endLine: endLine,
+);

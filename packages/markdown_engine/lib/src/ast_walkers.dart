@@ -25,9 +25,10 @@ int countTotalBlocks(List<MarkdownBlockNode> blocks) {
         case AlertNode():
           walk(rawAlertChildren(b));
         case ListNode():
-          for (final ListItemNode item in rawListItems(b)) {
+          final List<ListItemNode> items = rawListItems(b);
+          for (int i = 0; i < items.length; i++) {
             total++;
-            walk(rawListItemChildren(item));
+            walk(rawListItemChildren(items[i]));
           }
         case ListItemNode():
           walk(rawListItemChildren(b));
@@ -76,8 +77,9 @@ bool blockContainsHeading(MarkdownBlockNode block) {
     case AlertNode():
       return containsHeadingInBlocks(rawAlertChildren(block));
     case ListNode():
-      for (final ListItemNode item in rawListItems(block)) {
-        if (containsHeadingInBlocks(rawListItemChildren(item))) {
+      final List<ListItemNode> items = rawListItems(block);
+      for (int i = 0; i < items.length; i++) {
+        if (containsHeadingInBlocks(rawListItemChildren(items[i]))) {
           return true;
         }
       }
@@ -91,9 +93,13 @@ bool blockContainsHeading(MarkdownBlockNode block) {
     case FigureBlockNode():
       return containsHeadingInBlocks(rawFigureChildren(block));
     case DefinitionListNode():
-      for (final DefinitionGroup g in rawDefinitionGroups(block)) {
-        for (final List<MarkdownBlockNode> def in rawDefinitionBodies(g)) {
-          if (containsHeadingInBlocks(def)) {
+      final List<DefinitionGroup> groups = rawDefinitionGroups(block);
+      for (int i = 0; i < groups.length; i++) {
+        final List<List<MarkdownBlockNode>> defs = rawDefinitionBodies(
+          groups[i],
+        );
+        for (int j = 0; j < defs.length; j++) {
+          if (containsHeadingInBlocks(defs[j])) {
             return true;
           }
         }
@@ -102,8 +108,9 @@ bool blockContainsHeading(MarkdownBlockNode block) {
     case FootnoteDefinitionNode():
       return containsHeadingInBlocks(rawFootnoteDefChildren(block));
     case FootnoteSectionNode():
-      for (final FootnoteDefinitionNode d in rawFootnoteSectionDefs(block)) {
-        if (containsHeadingInBlocks(rawFootnoteDefChildren(d))) {
+      final List<FootnoteDefinitionNode> defs = rawFootnoteSectionDefs(block);
+      for (int i = 0; i < defs.length; i++) {
+        if (containsHeadingInBlocks(rawFootnoteDefChildren(defs[i]))) {
           return true;
         }
       }
@@ -114,12 +121,133 @@ bool blockContainsHeading(MarkdownBlockNode block) {
 /// Returns whether any block in [blocks] or its nested containers is a
 /// [HeadingNode].
 bool containsHeadingInBlocks(List<MarkdownBlockNode> blocks) {
-  for (final MarkdownBlockNode b in blocks) {
-    if (blockContainsHeading(b)) {
+  for (int i = 0; i < blocks.length; i++) {
+    if (blockContainsHeading(blocks[i])) {
       return true;
     }
   }
   return false;
+}
+
+/// Appends raw heading plain texts from [block] (excluding explicit IDs) in
+/// Phase 2 order so settled headings can be seeded lazily into a slug batch.
+void collectSettledHeadingTexts(
+  MarkdownBlockNode block,
+  MarkdownOptions options,
+  List<String> out,
+) {
+  if (!options.headingSlugs || !blockContainsHeading(block)) {
+    return;
+  }
+  _walkSettledHeadingTexts(block, options, out.add);
+}
+
+/// Advances [slugGenerator] across any headings contained inside [block]
+/// (matching Phase 2 slug generation order) without constructing outline items.
+void collectSettledBlockSlugs(
+  MarkdownBlockNode block,
+  MarkdownOptions options,
+  HeadingSlugGenerator slugGenerator,
+) {
+  if (!options.headingSlugs || !blockContainsHeading(block)) {
+    return;
+  }
+  _walkSettledHeadingTexts(block, options, slugGenerator.generate);
+}
+
+void _walkSettledHeadingTexts(
+  MarkdownBlockNode block,
+  MarkdownOptions options,
+  void Function(String) onHeadingText,
+) {
+  void walkBlock(MarkdownBlockNode b) {
+    switch (b) {
+      case HeadingNode():
+        final bool hasExplicit =
+            options.explicitHeadingIds && b.explicitId != null;
+        if (!hasExplicit) {
+          onHeadingText(b.text);
+        }
+      case FrontmatterNode():
+      case ParagraphNode():
+      case CodeBlockNode():
+      case TableNode():
+      case ThematicBreakNode():
+      case HtmlBlockNode():
+      case MathBlockNode():
+        break;
+      case BlockQuoteNode():
+        if (blockContainsHeading(b)) {
+          for (final MarkdownBlockNode child in rawBlockQuoteChildren(b)) {
+            walkBlock(child);
+          }
+        }
+      case AlertNode():
+        if (blockContainsHeading(b)) {
+          for (final MarkdownBlockNode child in rawAlertChildren(b)) {
+            walkBlock(child);
+          }
+        }
+      case ListNode():
+        if (blockContainsHeading(b)) {
+          for (final ListItemNode item in rawListItems(b)) {
+            for (final MarkdownBlockNode child in rawListItemChildren(item)) {
+              walkBlock(child);
+            }
+          }
+        }
+      case ListItemNode():
+        if (blockContainsHeading(b)) {
+          for (final MarkdownBlockNode child in rawListItemChildren(b)) {
+            walkBlock(child);
+          }
+        }
+      case DetailsBlockNode():
+        if (blockContainsHeading(b)) {
+          for (final MarkdownBlockNode child in rawDetailsChildren(b)) {
+            walkBlock(child);
+          }
+        }
+      case AlignedBlockNode():
+        if (blockContainsHeading(b)) {
+          for (final MarkdownBlockNode child in rawAlignedChildren(b)) {
+            walkBlock(child);
+          }
+        }
+      case FigureBlockNode():
+        if (blockContainsHeading(b)) {
+          for (final MarkdownBlockNode child in rawFigureChildren(b)) {
+            walkBlock(child);
+          }
+        }
+      case DefinitionListNode():
+        if (blockContainsHeading(b)) {
+          for (final DefinitionGroup g in rawDefinitionGroups(b)) {
+            for (final List<MarkdownBlockNode> def in rawDefinitionBodies(g)) {
+              for (final MarkdownBlockNode child in def) {
+                walkBlock(child);
+              }
+            }
+          }
+        }
+      case FootnoteDefinitionNode():
+        if (blockContainsHeading(b)) {
+          for (final MarkdownBlockNode child in rawFootnoteDefChildren(b)) {
+            walkBlock(child);
+          }
+        }
+      case FootnoteSectionNode():
+        if (blockContainsHeading(b)) {
+          for (final FootnoteDefinitionNode d in rawFootnoteSectionDefs(b)) {
+            for (final MarkdownBlockNode child in rawFootnoteDefChildren(d)) {
+              walkBlock(child);
+            }
+          }
+        }
+    }
+  }
+
+  walkBlock(block);
 }
 
 /// Advances [slugGenerator] across any headings contained inside [block]
@@ -160,69 +288,83 @@ void collectSettledBlockOutlineAndSlugs(
         break;
       case BlockQuoteNode():
         if (blockContainsHeading(b)) {
-          for (final MarkdownBlockNode child in b.children) {
-            walkBlock(child);
+          final List<MarkdownBlockNode> children = b.children;
+          for (int i = 0; i < children.length; i++) {
+            walkBlock(children[i]);
           }
         }
       case AlertNode():
         if (blockContainsHeading(b)) {
-          for (final MarkdownBlockNode child in b.children) {
-            walkBlock(child);
+          final List<MarkdownBlockNode> children = b.children;
+          for (int i = 0; i < children.length; i++) {
+            walkBlock(children[i]);
           }
         }
       case ListNode():
         if (blockContainsHeading(b)) {
-          for (final ListItemNode item in b.items) {
-            for (final MarkdownBlockNode child in item.children) {
-              walkBlock(child);
+          final List<ListItemNode> items = b.items;
+          for (int i = 0; i < items.length; i++) {
+            final List<MarkdownBlockNode> children = items[i].children;
+            for (int j = 0; j < children.length; j++) {
+              walkBlock(children[j]);
             }
           }
         }
       case ListItemNode():
         if (blockContainsHeading(b)) {
-          for (final MarkdownBlockNode child in b.children) {
-            walkBlock(child);
+          final List<MarkdownBlockNode> children = b.children;
+          for (int i = 0; i < children.length; i++) {
+            walkBlock(children[i]);
           }
         }
       case DetailsBlockNode():
         if (blockContainsHeading(b)) {
-          for (final MarkdownBlockNode child in b.children) {
-            walkBlock(child);
+          final List<MarkdownBlockNode> children = b.children;
+          for (int i = 0; i < children.length; i++) {
+            walkBlock(children[i]);
           }
         }
       case AlignedBlockNode():
         if (blockContainsHeading(b)) {
-          for (final MarkdownBlockNode child in b.children) {
-            walkBlock(child);
+          final List<MarkdownBlockNode> children = b.children;
+          for (int i = 0; i < children.length; i++) {
+            walkBlock(children[i]);
           }
         }
       case FigureBlockNode():
         if (blockContainsHeading(b)) {
-          for (final MarkdownBlockNode child in b.children) {
-            walkBlock(child);
+          final List<MarkdownBlockNode> children = b.children;
+          for (int i = 0; i < children.length; i++) {
+            walkBlock(children[i]);
           }
         }
       case DefinitionListNode():
         if (blockContainsHeading(b)) {
-          for (final DefinitionGroup g in b.groups) {
-            for (final List<MarkdownBlockNode> def in g.definitions) {
-              for (final MarkdownBlockNode child in def) {
-                walkBlock(child);
+          final List<DefinitionGroup> groups = b.groups;
+          for (int i = 0; i < groups.length; i++) {
+            final List<List<MarkdownBlockNode>> defs = groups[i].definitions;
+            for (int j = 0; j < defs.length; j++) {
+              final List<MarkdownBlockNode> def = defs[j];
+              for (int k = 0; k < def.length; k++) {
+                walkBlock(def[k]);
               }
             }
           }
         }
       case FootnoteDefinitionNode():
         if (blockContainsHeading(b)) {
-          for (final MarkdownBlockNode child in b.children) {
-            walkBlock(child);
+          final List<MarkdownBlockNode> children = b.children;
+          for (int i = 0; i < children.length; i++) {
+            walkBlock(children[i]);
           }
         }
       case FootnoteSectionNode():
         if (blockContainsHeading(b)) {
-          for (final FootnoteDefinitionNode d in b.definitions) {
-            for (final MarkdownBlockNode child in d.children) {
-              walkBlock(child);
+          final List<FootnoteDefinitionNode> defs = b.definitions;
+          for (int i = 0; i < defs.length; i++) {
+            final List<MarkdownBlockNode> children = defs[i].children;
+            for (int j = 0; j < children.length; j++) {
+              walkBlock(children[j]);
             }
           }
         }
@@ -241,7 +383,8 @@ List<MarkdownOutlineItem> collectOutlineFromBlocks(
   final List<MarkdownOutlineItem> out = <MarkdownOutlineItem>[];
 
   void walk(List<MarkdownBlockNode> list) {
-    for (final MarkdownBlockNode b in list) {
+    for (int i = 0; i < list.length; i++) {
+      final MarkdownBlockNode b = list[i];
       switch (b) {
         case HeadingNode():
           if (options.headingSlugs || b.explicitId != null) {
@@ -316,7 +459,7 @@ List<MarkdownOutlineItem> collectOutlineFromBlocks(
   }
 
   walk(blocks);
-  return freezeList(out);
+  return freezeFreshList(out);
 }
 
 /// Recomputes deduplicated heading slugs and outline items recursively across
@@ -349,7 +492,7 @@ recomputeSlugsAndOutline(
         if (slug == b.slug) {
           return b;
         }
-        return HeadingNode(
+        return createFrozenHeadingNode(
           blockId: b.blockId,
           level: b.level,
           text: b.text,
@@ -378,7 +521,7 @@ recomputeSlugsAndOutline(
         if (identical(updated, b.children)) {
           return b;
         }
-        return BlockQuoteNode(
+        return createFrozenBlockQuoteNode(
           blockId: b.blockId,
           children: updated,
           span: b.span,
@@ -394,7 +537,7 @@ recomputeSlugsAndOutline(
         if (identical(updated, b.children)) {
           return b;
         }
-        return AlertNode(
+        return createFrozenAlertNode(
           blockId: b.blockId,
           kind: b.kind,
           title: b.title,
@@ -418,13 +561,13 @@ recomputeSlugsAndOutline(
         if (nextItems == null) {
           return b;
         }
-        return ListNode(
+        return createFrozenListNode(
           blockId: b.blockId,
           ordered: b.ordered,
           start: b.start,
           tight: b.tight,
           delimiter: b.delimiter,
-          items: freezeList(nextItems),
+          items: freezeFreshList(nextItems),
           span: b.span,
         );
       case ListItemNode():
@@ -438,7 +581,7 @@ recomputeSlugsAndOutline(
         if (identical(updated, b.children)) {
           return b;
         }
-        return ListItemNode(
+        return createFrozenListItemNode(
           blockId: b.blockId,
           taskState: b.taskState,
           children: updated,
@@ -455,7 +598,7 @@ recomputeSlugsAndOutline(
         if (identical(updated, b.children)) {
           return b;
         }
-        return DetailsBlockNode(
+        return createFrozenDetailsBlockNode(
           blockId: b.blockId,
           summary: b.summary,
           summaryInlines: b.summaryInlines,
@@ -474,7 +617,7 @@ recomputeSlugsAndOutline(
         if (identical(updated, b.children)) {
           return b;
         }
-        return AlignedBlockNode(
+        return createFrozenAlignedBlockNode(
           blockId: b.blockId,
           alignment: b.alignment,
           children: updated,
@@ -491,7 +634,7 @@ recomputeSlugsAndOutline(
         if (identical(updated, b.children)) {
           return b;
         }
-        return FigureBlockNode(
+        return createFrozenFigureBlockNode(
           blockId: b.blockId,
           children: updated,
           caption: b.caption,
@@ -521,9 +664,9 @@ recomputeSlugsAndOutline(
           }
           if (nextDefs != null) {
             nextGroups ??= List<DefinitionGroup>.of(prevGroups);
-            nextGroups[gi] = DefinitionGroup(
+            nextGroups[gi] = createFrozenDefinitionGroup(
               term: g.term,
-              definitions: freezeList(nextDefs),
+              definitions: freezeFreshList(nextDefs),
               span: g.span,
             );
           }
@@ -531,9 +674,9 @@ recomputeSlugsAndOutline(
         if (nextGroups == null) {
           return b;
         }
-        return DefinitionListNode(
+        return createFrozenDefinitionListNode(
           blockId: b.blockId,
-          groups: freezeList(nextGroups),
+          groups: freezeFreshList(nextGroups),
           span: b.span,
         );
       case FootnoteDefinitionNode():
@@ -547,7 +690,7 @@ recomputeSlugsAndOutline(
         if (identical(updated, b.children)) {
           return b;
         }
-        return FootnoteDefinitionNode(
+        return createFrozenFootnoteDefinitionNode(
           blockId: b.blockId,
           label: b.label,
           index: b.index,
@@ -573,16 +716,16 @@ recomputeSlugsAndOutline(
         if (nextDefs == null) {
           return b;
         }
-        return FootnoteSectionNode(
+        return createFrozenFootnoteSectionNode(
           blockId: b.blockId,
-          definitions: freezeList(nextDefs),
+          definitions: freezeFreshList(nextDefs),
           span: b.span,
         );
     }
   }
 
   final List<MarkdownBlockNode> updated = _visitBlockList(blocks, visitBlock);
-  return (blocks: freezeList(updated), outline: freezeList(outline));
+  return (blocks: freezeList(updated), outline: freezeFreshList(outline));
 }
 
 List<MarkdownBlockNode> _visitBlockList(
@@ -598,16 +741,19 @@ List<MarkdownBlockNode> _visitBlockList(
       copy[i] = next;
     }
   }
-  return copy == null ? list : freezeList(copy);
+  return copy == null ? list : freezeFreshList(copy);
 }
 
 /// Collects deduplicated remote (`http://`, `https://`, or protocol-relative
 /// `//`) image URLs across [blocks] using exhaustive AST walks.
-List<String> collectRemoteImagesFromBlocks(List<MarkdownBlockNode> blocks) {
+List<String> collectRemoteImagesFromBlocks(
+  List<MarkdownBlockNode> blocks, {
+  MarkdownOptions? options,
+}) {
   final List<String> result = <String>[];
   final Set<String> seen = <String>{};
-  collectRemoteImagesInto(blocks, result, seen);
-  return freezeList(result);
+  collectRemoteImagesInto(blocks, result, seen, options: options);
+  return freezeFreshList(result);
 }
 
 /// Appends deduplicated remote image URLs from [blocks] into [result] using
@@ -615,13 +761,22 @@ List<String> collectRemoteImagesFromBlocks(List<MarkdownBlockNode> blocks) {
 void collectRemoteImagesInto(
   List<MarkdownBlockNode> blocks,
   List<String> result,
-  Set<String> seen,
-) {
+  Set<String> seen, {
+  MarkdownOptions? options,
+}) {
   void addUrl(String url) {
     if (url.isEmpty) {
       return;
     }
     final String cleaned = stripControlAndWhitespaceForUrl(url);
+    if (cleaned.isEmpty) {
+      return;
+    }
+    if (options != null &&
+        options.sanitizeUrls &&
+        !options.urlPolicy.isAllowed(cleaned)) {
+      return;
+    }
     final String lower = cleaned.toLowerCase();
     if ((lower.startsWith('http://') ||
             lower.startsWith('https://') ||
@@ -632,7 +787,9 @@ void collectRemoteImagesInto(
   }
 
   void walkInlines(List<MarkdownInlineNode> inlines) {
-    for (final MarkdownInlineNode n in inlines) {
+    final int len = inlines.length;
+    for (int i = 0; i < len; i++) {
+      final MarkdownInlineNode n = inlines[i];
       switch (n) {
         case ImageNode():
           addUrl(n.destination);
@@ -673,7 +830,9 @@ void collectRemoteImagesInto(
   }
 
   void walkBlocks(List<MarkdownBlockNode> list) {
-    for (final MarkdownBlockNode b in list) {
+    final int len = list.length;
+    for (int i = 0; i < len; i++) {
+      final MarkdownBlockNode b = list[i];
       switch (b) {
         case ParagraphNode():
           walkInlines(rawParagraphInlines(b));
@@ -684,18 +843,22 @@ void collectRemoteImagesInto(
         case AlertNode():
           walkBlocks(rawAlertChildren(b));
         case ListNode():
-          for (final ListItemNode item in rawListItems(b)) {
-            walkBlocks(rawListItemChildren(item));
+          final List<ListItemNode> items = rawListItems(b);
+          for (int j = 0; j < items.length; j++) {
+            walkBlocks(rawListItemChildren(items[j]));
           }
         case ListItemNode():
           walkBlocks(rawListItemChildren(b));
         case TableNode():
-          for (final TableCellNode cell in rawTableHeaders(b)) {
-            walkInlines(rawTableCellInlines(cell));
+          final List<TableCellNode> headers = rawTableHeaders(b);
+          for (int j = 0; j < headers.length; j++) {
+            walkInlines(rawTableCellInlines(headers[j]));
           }
-          for (final List<TableCellNode> row in rawTableRows(b)) {
-            for (final TableCellNode cell in row) {
-              walkInlines(rawTableCellInlines(cell));
+          final List<List<TableCellNode>> rows = rawTableRows(b);
+          for (int r = 0; r < rows.length; r++) {
+            final List<TableCellNode> row = rows[r];
+            for (int c = 0; c < row.length; c++) {
+              walkInlines(rawTableCellInlines(row[c]));
             }
           }
         case DetailsBlockNode():
@@ -707,17 +870,21 @@ void collectRemoteImagesInto(
           walkBlocks(rawFigureChildren(b));
           walkInlines(rawFigureCaptionInlines(b));
         case DefinitionListNode():
-          for (final DefinitionGroup g in rawDefinitionGroups(b)) {
+          final List<DefinitionGroup> groups = rawDefinitionGroups(b);
+          for (int j = 0; j < groups.length; j++) {
+            final DefinitionGroup g = groups[j];
             walkInlines(rawDefinitionTerm(g));
-            for (final List<MarkdownBlockNode> def in rawDefinitionBodies(g)) {
-              walkBlocks(def);
+            final List<List<MarkdownBlockNode>> defs = rawDefinitionBodies(g);
+            for (int k = 0; k < defs.length; k++) {
+              walkBlocks(defs[k]);
             }
           }
         case FootnoteDefinitionNode():
           walkBlocks(rawFootnoteDefChildren(b));
         case FootnoteSectionNode():
-          for (final FootnoteDefinitionNode d in rawFootnoteSectionDefs(b)) {
-            walkBlocks(rawFootnoteDefChildren(d));
+          final List<FootnoteDefinitionNode> defs = rawFootnoteSectionDefs(b);
+          for (int j = 0; j < defs.length; j++) {
+            walkBlocks(rawFootnoteDefChildren(defs[j]));
           }
         case FrontmatterNode():
         case CodeBlockNode():

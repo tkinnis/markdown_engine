@@ -21,24 +21,41 @@ typedef _MathCacheEntry = ({
   DisplayList? displayList,
   String? spokenText,
   TexMathError? error,
+  int byteSize,
 });
 
-/// Bounded LRU cache mapping `(font.signature, displayMode, latex)` keys to
-/// laid-out [DisplayList]s, spoken accessibility text, or caught [TexMathError]s.
+/// Bounded dual entry-count and retained-byte LRU cache mapping
+/// `(font.signature, displayMode, latex)` keys to laid-out [DisplayList]s,
+/// spoken accessibility text, or caught [TexMathError]s.
 final class BuiltInMathCache {
   BuiltInMathCache._();
 
   /// Shared cache instance used by built-in math rendering.
   static final BuiltInMathCache instance = BuiltInMathCache._();
 
-  /// Maximum number of retained entries in the LRU cache.
-  static const int maxEntries = 256;
+  /// Default maximum number of retained entries in the LRU cache.
+  static const int defaultMaxEntries = 1024;
+
+  /// Default maximum estimated retained byte budget in the LRU cache (8 MiB).
+  static const int defaultMaxBytes = 8 * 1024 * 1024;
 
   final LinkedHashMap<_MathCacheKey, _MathCacheEntry> _entries =
       LinkedHashMap<_MathCacheKey, _MathCacheEntry>();
 
+  int _maxEntries = defaultMaxEntries;
+  int _maxBytes = defaultMaxBytes;
+  int _currentBytes = 0;
   int _layoutCount = 0;
   int _hitCount = 0;
+
+  /// Active maximum entry capacity before LRU eviction.
+  int get maxEntries => _maxEntries;
+
+  /// Active maximum estimated byte budget before LRU eviction.
+  int get maxBytes => _maxBytes;
+
+  /// Estimated retained bytes across all currently cached math entries.
+  int get currentBytes => _currentBytes;
 
   /// Number of synchronous TeX layout evaluations executed on cache misses.
   int get layoutCount => _layoutCount;
@@ -49,11 +66,86 @@ final class BuiltInMathCache {
   /// Current number of cached entries.
   int get length => _entries.length;
 
-  /// Clears all cached entries and resets hit/miss telemetry counters.
+  /// Configures positive entry-count and/or byte-budget caps and immediately
+  /// evicts least-recently-used entries exceeding the updated limits.
+  void configure({int? maxEntries, int? maxBytes}) {
+    if (maxEntries != null && maxEntries <= 0) {
+      throw RangeError.value(
+        maxEntries,
+        'maxEntries',
+        'Must be greater than zero.',
+      );
+    }
+    if (maxBytes != null && maxBytes <= 0) {
+      throw RangeError.value(
+        maxBytes,
+        'maxBytes',
+        'Must be greater than zero.',
+      );
+    }
+    if (maxEntries != null) {
+      _maxEntries = maxEntries;
+    }
+    if (maxBytes != null) {
+      _maxBytes = maxBytes;
+    }
+    _evictOverBudget();
+  }
+
+  /// Restores [defaultMaxEntries] and [defaultMaxBytes], evicting any entries
+  /// exceeding the restored budgets.
+  void resetDefaults() {
+    _maxEntries = defaultMaxEntries;
+    _maxBytes = defaultMaxBytes;
+    _evictOverBudget();
+  }
+
+  /// Clears all cached entries, resetting retained byte count and hit/miss
+  /// telemetry counters.
   void clear() {
     _entries.clear();
+    _currentBytes = 0;
     _layoutCount = 0;
     _hitCount = 0;
+  }
+
+  static int _estimateSuccessBytes(
+    DisplayList displayList,
+    String? spokenText,
+    String latex,
+  ) =>
+      displayList.items.length * 48 +
+      (spokenText?.length ?? 0) * 2 +
+      latex.length * 2 +
+      128;
+
+  static int _estimateErrorBytes(TexMathError error, String latex) =>
+      error.message.length * 2 + latex.length * 2 + 128;
+
+  void _evictOverBudget() {
+    while (_entries.isNotEmpty &&
+        (_entries.length > _maxEntries || _currentBytes > _maxBytes)) {
+      final _MathCacheKey oldestKey = _entries.keys.first;
+      final _MathCacheEntry? removed = _entries.remove(oldestKey);
+      if (removed != null) {
+        _currentBytes -= removed.byteSize;
+      }
+    }
+    if (_entries.isEmpty) {
+      _currentBytes = 0;
+    }
+  }
+
+  void _put(_MathCacheKey key, _MathCacheEntry entry) {
+    final _MathCacheEntry? existing = _entries.remove(key);
+    if (existing != null) {
+      _currentBytes -= existing.byteSize;
+    }
+    if (entry.byteSize <= _maxBytes) {
+      _entries[key] = entry;
+      _currentBytes += entry.byteSize;
+      _evictOverBudget();
+    }
   }
 
   _MathCacheEntry _lookupOrRender(
@@ -74,26 +166,34 @@ final class BuiltInMathCache {
     try {
       final RenderResult result = TexMathEngine(font: font)
           .render(latex, options: TexMathOptions(displayMode: displayMode));
-      final String spoken = result.toSpokenText().trim();
+      final String rawSpoken = result.toSpokenText().trim();
+      final String spoken = rawSpoken.isNotEmpty ? rawSpoken : latex;
       entry = (
         displayList: result.displayList,
-        spokenText: spoken.isNotEmpty ? spoken : latex,
+        spokenText: spoken,
         error: null,
+        byteSize: _estimateSuccessBytes(result.displayList, spoken, latex),
       );
     } on TexMathError catch (error) {
-      entry = (displayList: null, spokenText: null, error: error);
-    } on Object catch (error) {
       entry = (
         displayList: null,
         spokenText: null,
-        error: TexMathSyntaxError('Unable to render TeX expression: $error'),
+        error: error,
+        byteSize: _estimateErrorBytes(error, latex),
+      );
+    } on Object catch (error) {
+      final TexMathError wrapped = TexMathSyntaxError(
+        'Unable to render TeX expression: $error',
+      );
+      entry = (
+        displayList: null,
+        spokenText: null,
+        error: wrapped,
+        byteSize: _estimateErrorBytes(wrapped, latex),
       );
     }
 
-    if (_entries.length >= maxEntries) {
-      _entries.remove(_entries.keys.first);
-    }
-    _entries[key] = entry;
+    _put(key, entry);
     return entry;
   }
 }
@@ -166,8 +266,11 @@ Widget buildBuiltInInlineMathWidget({
   required MarkdownBuilderDelegates delegates,
   required MarkdownUrlPolicy urlPolicy,
   required bool isInsideLink,
+  bool? hasAncestorSelection,
+  TextScaler? textScaler,
 }) {
-  final bool hasAncestorSelection = SelectionContainer.maybeOf(context) != null;
+  final bool resolvedSelection =
+      hasAncestorSelection ?? (SelectionContainer.maybeOf(context) != null);
   final TexMathThemeData mathTheme = deriveTexMathThemeData(
     theme,
     fontSize: style.fontSize ?? theme.fontSize,
@@ -186,7 +289,8 @@ Widget buildBuiltInInlineMathWidget({
         latex: node.latex,
         style: style,
         theme: theme,
-        hasAncestorSelection: hasAncestorSelection,
+        hasAncestorSelection: resolvedSelection,
+        textScaler: textScaler,
         onInternalLinkTap: onInternalLinkTap,
       ),
     );
@@ -200,7 +304,8 @@ Widget buildBuiltInInlineMathWidget({
       font: cachedFont,
       style: style,
       theme: theme,
-      hasAncestorSelection: hasAncestorSelection,
+      hasAncestorSelection: resolvedSelection,
+      textScaler: textScaler,
       onInternalLinkTap: onInternalLinkTap,
     ),
   );
@@ -209,15 +314,16 @@ Widget buildBuiltInInlineMathWidget({
 double _resolveScaledFontSize(
   BuildContext context,
   TextStyle style,
-  MarkdownThemeData theme,
-) {
+  MarkdownThemeData theme, {
+  TextScaler? textScaler,
+}) {
   final double candidateSize = style.fontSize ?? theme.fontSize;
   final double safeBaseSize = (candidateSize.isFinite && candidateSize > 0.0)
       ? candidateSize
       : theme.fontSize;
-  final double rawScaled =
-      MediaQuery.maybeTextScalerOf(context)?.scale(safeBaseSize) ??
-      safeBaseSize;
+  final TextScaler? effectiveScaler =
+      textScaler ?? MediaQuery.maybeTextScalerOf(context);
+  final double rawScaled = effectiveScaler?.scale(safeBaseSize) ?? safeBaseSize;
   return (rawScaled.isFinite && rawScaled > 0.0) ? rawScaled : safeBaseSize;
 }
 
@@ -228,9 +334,15 @@ Widget _buildWarmInlineMath({
   required TextStyle style,
   required MarkdownThemeData theme,
   required bool hasAncestorSelection,
+  TextScaler? textScaler,
   required ValueChanged<String>? onInternalLinkTap,
 }) {
-  final double scaledFontSize = _resolveScaledFontSize(context, style, theme);
+  final double scaledFontSize = _resolveScaledFontSize(
+    context,
+    style,
+    theme,
+    textScaler: textScaler,
+  );
   final _MathCacheEntry entry = BuiltInMathCache.instance._lookupOrRender(
     latex,
     displayMode: TexMathDisplayMode.inline,
@@ -286,6 +398,7 @@ final class _ColdInlineMath extends StatefulWidget {
     required this.style,
     required this.theme,
     required this.hasAncestorSelection,
+    this.textScaler,
     required this.onInternalLinkTap,
   });
 
@@ -293,6 +406,7 @@ final class _ColdInlineMath extends StatefulWidget {
   final TextStyle style;
   final MarkdownThemeData theme;
   final bool hasAncestorSelection;
+  final TextScaler? textScaler;
   final ValueChanged<String>? onInternalLinkTap;
 
   @override
@@ -335,6 +449,7 @@ final class _ColdInlineMathState extends State<_ColdInlineMath> {
         style: widget.style,
         theme: widget.theme,
         hasAncestorSelection: widget.hasAncestorSelection,
+        textScaler: widget.textScaler,
         onInternalLinkTap: widget.onInternalLinkTap,
       );
     }
@@ -342,6 +457,7 @@ final class _ColdInlineMathState extends State<_ColdInlineMath> {
       context,
       widget.style,
       widget.theme,
+      textScaler: widget.textScaler,
     );
     return _IntrinsicSizeHint(
       intrinsicWidth: 0.0,
@@ -469,8 +585,10 @@ Widget buildBuiltInMathBlockWidget({
   required MarkdownThemeData theme,
   required MarkdownBuilderDelegates delegates,
   required MarkdownUrlPolicy urlPolicy,
+  bool? hasAncestorSelection,
 }) {
-  final bool hasAncestorSelection = SelectionContainer.maybeOf(context) != null;
+  final bool resolvedSelection =
+      hasAncestorSelection ?? (SelectionContainer.maybeOf(context) != null);
   final TexMathThemeData mathTheme = deriveTexMathThemeData(
     theme,
     fontSize: theme.fontSize,
@@ -494,14 +612,14 @@ Widget buildBuiltInMathBlockWidget({
       overflow: TexMathOverflow.scroll,
       pathCache: TexMathPathCache.shared,
       textStyle: displayStyle,
-      selectable: hasAncestorSelection,
+      selectable: resolvedSelection,
       onLinkTap: onInternalLinkTap,
       errorBuilder: (BuildContext ctx, String source, TexMathError error) =>
           TexMathErrorWidget(
             source: source,
             error: error,
             displayMode: TexMathDisplayMode.display,
-            selectable: hasAncestorSelection,
+            selectable: resolvedSelection,
           ),
     );
   } else {
@@ -515,7 +633,7 @@ Widget buildBuiltInMathBlockWidget({
         source: trimmedSource,
         error: entry.error,
         displayMode: TexMathDisplayMode.display,
-        selectable: hasAncestorSelection,
+        selectable: resolvedSelection,
       );
     } else {
       innerMath = TexMath.displayList(
@@ -527,7 +645,7 @@ Widget buildBuiltInMathBlockWidget({
         pathCache: TexMathPathCache.shared,
         textStyle: displayStyle,
         semanticsLabel: entry.spokenText,
-        selectable: hasAncestorSelection,
+        selectable: resolvedSelection,
         onLinkTap: onInternalLinkTap,
       );
     }

@@ -18,6 +18,66 @@ abstract final class MarkdownBuiltInRenderers {
     ]);
   }
 
+  /// Configures dual entry-count and retained-byte LRU budgets for the built-in
+  /// TeX math and Mermaid caches, immediately evicting LRU entries over budget.
+  ///
+  /// Throws [RangeError] if any supplied limit is `<= 0` without mutating
+  /// existing cache budgets.
+  static void configureCaches({
+    int? mathMaxEntries,
+    int? mathMaxBytes,
+    int? mermaidMaxEntries,
+    int? mermaidMaxBytes,
+  }) {
+    if (mathMaxEntries != null && mathMaxEntries <= 0) {
+      throw RangeError.value(
+        mathMaxEntries,
+        'mathMaxEntries',
+        'Must be greater than zero.',
+      );
+    }
+    if (mathMaxBytes != null && mathMaxBytes <= 0) {
+      throw RangeError.value(
+        mathMaxBytes,
+        'mathMaxBytes',
+        'Must be greater than zero.',
+      );
+    }
+    if (mermaidMaxEntries != null && mermaidMaxEntries <= 0) {
+      throw RangeError.value(
+        mermaidMaxEntries,
+        'mermaidMaxEntries',
+        'Must be greater than zero.',
+      );
+    }
+    if (mermaidMaxBytes != null && mermaidMaxBytes <= 0) {
+      throw RangeError.value(
+        mermaidMaxBytes,
+        'mermaidMaxBytes',
+        'Must be greater than zero.',
+      );
+    }
+    if (mathMaxEntries != null || mathMaxBytes != null) {
+      BuiltInMathCache.instance.configure(
+        maxEntries: mathMaxEntries,
+        maxBytes: mathMaxBytes,
+      );
+    }
+    if (mermaidMaxEntries != null || mermaidMaxBytes != null) {
+      BuiltInMermaidCache.instance.configure(
+        maxEntries: mermaidMaxEntries,
+        maxBytes: mermaidMaxBytes,
+      );
+    }
+  }
+
+  /// Restores default entry-count and retained-byte budgets for both the TeX
+  /// math and Mermaid LRU caches, evicting any entries exceeding defaults.
+  static void resetCacheDefaults() {
+    BuiltInMathCache.instance.resetDefaults();
+    BuiltInMermaidCache.instance.resetDefaults();
+  }
+
   /// Clears all cached TeX math display lists and compiled Mermaid diagrams,
   /// resetting telemetry counters.
   static void clearCaches() {
@@ -37,6 +97,15 @@ abstract final class MarkdownBuiltInRenderers {
   /// Current number of cached built-in math entries.
   static int get mathCacheLength => BuiltInMathCache.instance.length;
 
+  /// Estimated retained bytes across all currently cached math entries.
+  static int get mathCacheBytes => BuiltInMathCache.instance.currentBytes;
+
+  /// Configured maximum entry count for the built-in math LRU cache.
+  static int get mathMaxEntries => BuiltInMathCache.instance.maxEntries;
+
+  /// Configured maximum retained byte budget for the built-in math LRU cache.
+  static int get mathMaxBytes => BuiltInMathCache.instance.maxBytes;
+
   /// Number of cold Mermaid diagram compilations executed.
   static int get mermaidRenderCount => BuiltInMermaidCache.instance.renderCount;
 
@@ -45,6 +114,15 @@ abstract final class MarkdownBuiltInRenderers {
 
   /// Current number of cached compiled Mermaid diagrams.
   static int get mermaidCacheLength => BuiltInMermaidCache.instance.length;
+
+  /// Estimated retained bytes across all currently cached Mermaid entries.
+  static int get mermaidCacheBytes => BuiltInMermaidCache.instance.currentBytes;
+
+  /// Configured maximum entry count for the built-in Mermaid LRU cache.
+  static int get mermaidMaxEntries => BuiltInMermaidCache.instance.maxEntries;
+
+  /// Configured maximum retained byte budget for the built-in Mermaid LRU cache.
+  static int get mermaidMaxBytes => BuiltInMermaidCache.instance.maxBytes;
 
   /// Test-only hook forcing Mermaid rendering to use background `compute`
   /// isolates even under `TestWidgetsFlutterBinding`.

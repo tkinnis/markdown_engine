@@ -28,10 +28,13 @@ final class MarkdownEngine {
     }
 
     if (source.isEmpty) {
-      return MarkdownDocument(
+      return createFrozenDocument(
         source: source,
         options: effective,
-        blocks: const <MarkdownBlockNode>[],
+        blocks: emptyFrozenBlockList,
+        outline: const <MarkdownOutlineItem>[],
+        footnotes: const <FootnoteDefinitionNode>[],
+        remoteImageAddresses: const <String>[],
         normalizedSource: '',
         html: '',
       );
@@ -40,14 +43,12 @@ final class MarkdownEngine {
     final Phase1Result phase1 = parseBlocks(source, effective);
     final Phase2Result phase2 = parseInlines(phase1, effective);
 
-    return MarkdownDocument(
+    return createFrozenDocument(
       source: source,
       options: effective,
       blocks: phase2.blocks,
       frontmatter: phase1.frontmatter?.frontmatter,
-      outline: phase2.outline,
       footnotes: phase2.footnotes,
-      remoteImageAddresses: phase2.remoteImageAddresses,
       linkDefinitions: phase1.linkDefinitions,
       abbreviations: phase1.abbreviations,
       normalizedSource: phase1.normalizedSource,

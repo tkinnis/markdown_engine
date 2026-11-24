@@ -6,10 +6,10 @@ Pure-Dart Flutter sliver rendering widgets, built-in native OpenType TeX math (`
 
 ## Highlights
 
-* **Out-of-the-Box LaTeX Math & Vector Mermaid Diagrams**: With default `MarkdownOptions()` (`math: true`) and `MarkdownBuilderDelegates` (`enableBuiltInMath: true`, `enableBuiltInMermaid: true`), inline (`$...$`, `\(...\)`) and display (`$$...$$`, `\[...\]`) TeX math renders natively via `tex_math_flutter` (`TexMath` + `NewCMMath-Regular.otf`) and fenced `mermaid` code blocks compile via `pele_dart` + `vector_graphics` (`VectorGraphic`) in background isolates with zero custom builder boilerplate, bounded LRU caches (`256` math / `128` Mermaid), calm streaming preview cards for unclosed Mermaid fences, and safe fallback widgets for invalid syntax.
-* **Zero-Reparse Theme Switching & Block Memoization**: `MarkdownView` caches the parsed AST in widget state, reuses untouched blocks automatically via `IncrementalMarkdownParser` on `data` edits (preserving stateful block widgets such as `<details>`), memoizes top-level block and inline `RichText` subtrees, derives `TexMathThemeData` and `PelePalette` reactively from `MarkdownThemeData`, and performs zero re-parses or TeX relayouts when `MarkdownTheme` flips Light/Dark modes.
+* **Out-of-the-Box Extensions, LaTeX Math & Vector Mermaid Diagrams**: With default `MarkdownOptions()` (all 23 extensions enabled out of the box, each individually opt-out) and `MarkdownBuilderDelegates` (`enableBuiltInMath: true`, `enableBuiltInMermaid: true`), inline (`$...$`, `\(...\)`) and display (`$$...$$`, `\[...\]`) TeX math renders natively via `tex_math_flutter` (`TexMath` + `NewCMMath-Regular.otf`) and fenced `mermaid` code blocks compile via `pele_dart` + `vector_graphics` (`VectorGraphic`) in background isolates with zero custom builder boilerplate, dual entry+byte LRU caches (`1,024` entries / `8 MiB` math and `128` entries / `16 MiB` Mermaid, configurable via `MarkdownBuiltInRenderers.configureCaches(...)`), calm streaming preview cards for unclosed Mermaid fences, and safe fallback widgets for invalid syntax.
+* **Zero-Reparse Theme Switching & Fast Simple-Prose Rendering**: `MarkdownView` caches the parsed AST in widget state, reuses untouched blocks automatically via `IncrementalMarkdownParser` on `data` edits (preserving stateful block widgets such as `<details>`), memoizes top-level block and inline `RichText` subtrees, renders eligible prose and code/table overflows via lightweight `FastMarkdownText` / `MarkdownParagraphLeaf` / `MarkdownHorizontalOverflowBox` render boxes, derives `TexMathThemeData` and `PelePalette` reactively from `MarkdownThemeData`, and performs zero re-parses or TeX relayouts when `MarkdownTheme` flips Light/Dark modes.
 * **Lazy Sliver Virtualization & Full-Document Selection**: `SliverMarkdownDocument` materializes only visible top-level blocks via `SliverChildBuilderDelegate` keyed by `node.blockId` (`addAutomaticKeepAlives: true`), works inside both `MaterialApp` (`SelectionArea`) and `WidgetsApp` (`SelectableRegion`), accepts an optional `focusNode`, excludes UI chrome (`Copy` buttons, bullets, alert badges) from selection, and exports full `document.toPlainText()` on `Cmd+A` / Select All across off-screen slivers.
-* **Push-Based Split-Sliver LLM Streaming**: `MarkdownView.streaming` subscribes directly to `StreamingMarkdownController.addListener` with zero polling timers and splits `CustomScrollView` into a settled-prefix `SliverMarkdownDocument` (aligned to `settledPrefixBlockCount`) plus a dedicated active tail sliver so trailing token appends never rebuild settled blocks (including post-`finish()` `reset()` / `append()` reuse).
+* **Push-Based Streaming Canvas & Split-Sliver Streaming**: `MarkdownView.streaming` subscribes directly to `StreamingMarkdownController.addListener` with zero polling timers, accelerates plain and formatted streams via tail-isolated `RenderMarkdownStreamingCanvas` (`MarkdownStreamingCanvasLeaf` with visible-viewport frozen-prefix `ui.Picture` reuse and native `Selectable` integration), and transparently splits `CustomScrollView` into a settled-prefix `SliverMarkdownDocument` (aligned to `settledPrefixBlockCount`) plus a dedicated active tail sliver when custom builders, math, Mermaid, or interactive containers appear so trailing token appends never rebuild settled blocks (including post-`finish()` `reset()` / `append()` reuse).
 * **Background Isolate `ValueListenable` Reader**: `MarkdownDocumentReader` implements `ValueListenable<MarkdownDocument>` (`value`, `hasRead`), parses short inputs (`< 4096` UTF-16 code units) synchronously, offloads larger documents to `Isolate.run` with in-flight deduplication and latest-wins coalescing, and falls back synchronously on `IsolateSpawnException`.
 * **Defense-in-Depth Security & Accessibility**: Enforces `MarkdownUrlPolicy` (defaulting to strict scheme/host checks) on interactive links and images, gates remote/external images via `MarkdownImagePolicy` (`block`, `ask`, `load` with `remoteImagesApproved` scoping per document), and provides screen-reader `Semantics` (`headingLevel`, table header traits, spoken TeX labels, SVG `aria-label` diagram semantics, single-speak `<abbr>` tooltips, link traits) and keyboard `FocusableActionDetector` controls.
 * **Rich Native Widgets**: Supports headings with anchor registration and `MarkdownController.readingPlaceNotifier` tracking, aligned GFM tables, task list checkboxes, all five GitHub Alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), YAML/TOML frontmatter cards, interactive collapsible `<details>`/`<summary>`, figures, aligned blocks, definition lists, footnotes with back-links, `<kbd>`, `<abbr>`, `<u>`/`<small>`/`<q>`, sized `<img width height>`, `<picture>`, and code blocks with language badges and copy buttons.
@@ -37,7 +37,6 @@ Widget buildReader(BuildContext context, MarkdownController controller) {
     data: MarkdownThemeData.fromTheme(context),
     child: MarkdownView(
       '# Hello, Flutter Markdown\n\n> [!TIP]\n> Built natively with slivers.',
-      options: const MarkdownOptions.extended(),
       controller: controller,
       padding: const EdgeInsets.all(20.0),
       delegates: MarkdownBuilderDelegates(
@@ -61,9 +60,7 @@ Use `MarkdownView.document(document: preParsed)` to render a pre-parsed `Markdow
 Bind `MarkdownView.streaming` directly to a `StreamingMarkdownController` for zero-poll push-driven UI updates as chunks arrive:
 
 ```dart
-final StreamingMarkdownController stream = StreamingMarkdownController(
-  options: const MarkdownOptions.extended(),
-);
+final StreamingMarkdownController stream = StreamingMarkdownController();
 
 // Inside your build method:
 Widget buildStreamingBubble() {
@@ -88,9 +85,7 @@ void onComplete() {
 Offload large Markdown files (`>= 4096` code units by default) onto a background isolate with automatic latest-wins coalescing while keeping short edits synchronous:
 
 ```dart
-final MarkdownDocumentReader reader = MarkdownDocumentReader(
-  engine: const MarkdownEngine(defaultOptions: MarkdownOptions.extended()),
-);
+final MarkdownDocumentReader reader = MarkdownDocumentReader();
 
 await reader.update(largeMarkdownText);
 
@@ -155,7 +150,7 @@ MarkdownBuilderDelegates buildCustomOverrideDelegates() {
 }
 ```
 
-Use `MarkdownBuiltInRenderers.clearCaches()` and `MarkdownBuiltInRenderers.dispose()` during teardown or tests to release cached math display lists (`256` max entries), compiled Mermaid `vector_graphics` payloads (`128` max entries), and pending compilation state.
+Use `MarkdownBuiltInRenderers.configureCaches(...)` / `MarkdownBuiltInRenderers.resetCacheDefaults()` to tune dual entry-count and retained-byte LRU budgets (`1,024` entries / `8 MiB` default for math; `128` entries / `16 MiB` default for Mermaid), inspect live usage via `mathCacheBytes` / `mathMaxEntries` / `mathMaxBytes` / `mermaidCacheBytes` / `mermaidMaxEntries` / `mermaidMaxBytes`, and call `MarkdownBuiltInRenderers.clearCaches()` and `MarkdownBuiltInRenderers.dispose()` during teardown or tests to release cached math display lists, compiled Mermaid `vector_graphics` payloads, and pending compilation state.
 
 ## License & Documentation
 

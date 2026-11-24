@@ -39,11 +39,12 @@ final class _HtmlRenderState {
   bool get _outputBudgetReached => buffer.length >= budgets.maxOutputBytes;
 
   void renderBlocks(List<MarkdownBlockNode> blocks) {
-    for (final MarkdownBlockNode block in blocks) {
+    final int len = blocks.length;
+    for (int i = 0; i < len; i++) {
       if (_outputBudgetReached) {
         return;
       }
-      renderBlock(block);
+      renderBlock(blocks[i]);
     }
   }
 
@@ -112,11 +113,12 @@ final class _HtmlRenderState {
         } else {
           buffer.writeln('<ul>');
         }
-        for (final ListItemNode item in rawListItems(block)) {
+        final List<ListItemNode> listItems = rawListItems(block);
+        for (int i = 0; i < listItems.length; i++) {
           if (_outputBudgetReached) {
             break;
           }
-          _renderListItem(item, tight: block.tight);
+          _renderListItem(listItems[i], tight: block.tight);
         }
         buffer.writeln(block.ordered ? '</ol>' : '</ul>');
       case ListItemNode():
@@ -126,7 +128,9 @@ final class _HtmlRenderState {
           ..writeln('<table>')
           ..writeln('<thead>')
           ..writeln('<tr>');
-        for (final TableCellNode header in rawTableHeaders(block)) {
+        final List<TableCellNode> headers = rawTableHeaders(block);
+        for (int i = 0; i < headers.length; i++) {
+          final TableCellNode header = headers[i];
           buffer.write('<th');
           _writeAlignmentAttr(header.alignment);
           buffer.write('>');
@@ -139,12 +143,14 @@ final class _HtmlRenderState {
         final List<List<TableCellNode>> rows = rawTableRows(block);
         if (rows.isNotEmpty) {
           buffer.writeln('<tbody>');
-          for (final List<TableCellNode> row in rows) {
+          for (int r = 0; r < rows.length; r++) {
             if (_outputBudgetReached) {
               break;
             }
+            final List<TableCellNode> row = rows[r];
             buffer.writeln('<tr>');
-            for (final TableCellNode cell in row) {
+            for (int c = 0; c < row.length; c++) {
+              final TableCellNode cell = row[c];
               buffer.write('<td');
               _writeAlignmentAttr(cell.alignment);
               buffer.write('>');
@@ -209,19 +215,21 @@ final class _HtmlRenderState {
         buffer.writeln('\n\$\$</div>');
       case DefinitionListNode():
         buffer.writeln('<dl>');
-        for (final DefinitionGroup group in rawDefinitionGroups(block)) {
+        final List<DefinitionGroup> groups = rawDefinitionGroups(block);
+        for (int i = 0; i < groups.length; i++) {
           if (_outputBudgetReached) {
             break;
           }
+          final DefinitionGroup group = groups[i];
           buffer.write('<dt>');
           renderInlines(rawDefinitionTerm(group));
           buffer.writeln('</dt>');
-          for (final List<MarkdownBlockNode> def in rawDefinitionBodies(
-            group,
-          )) {
+          final List<List<MarkdownBlockNode>> defs = rawDefinitionBodies(group);
+          for (int j = 0; j < defs.length; j++) {
             if (_outputBudgetReached) {
               break;
             }
+            final List<MarkdownBlockNode> def = defs[j];
             if (def.length == 1 && def.first is ParagraphNode) {
               buffer.write('<dd>');
               renderInlines(rawParagraphInlines(def.first as ParagraphNode));
@@ -240,13 +248,14 @@ final class _HtmlRenderState {
         buffer
           ..writeln('<section class="footnotes" data-footnotes>')
           ..writeln('<ol>');
-        for (final FootnoteDefinitionNode def in rawFootnoteSectionDefs(
+        final List<FootnoteDefinitionNode> fnDefs = rawFootnoteSectionDefs(
           block,
-        )) {
+        );
+        for (int i = 0; i < fnDefs.length; i++) {
           if (_outputBudgetReached) {
             break;
           }
-          _renderFootnoteDefinition(def);
+          _renderFootnoteDefinition(fnDefs[i]);
         }
         buffer
           ..writeln('</ol>')
@@ -416,11 +425,18 @@ final class _HtmlRenderState {
   }
 
   void renderInlines(List<MarkdownInlineNode> nodes) {
-    for (final MarkdownInlineNode node in nodes) {
+    final int len = nodes.length;
+    if (len == 1) {
+      if (!_outputBudgetReached) {
+        _renderInline(nodes[0]);
+      }
+      return;
+    }
+    for (int i = 0; i < len; i++) {
       if (_outputBudgetReached) {
         return;
       }
-      _renderInline(node);
+      _renderInline(nodes[i]);
     }
   }
 

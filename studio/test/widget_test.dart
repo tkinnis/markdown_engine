@@ -237,7 +237,20 @@ void main() {
       expect(find.byKey(const Key('studio-ast-tree')), findsOneWidget);
       expect(find.text('HeadingNode'), findsOneWidget);
       expect(find.text('ParagraphNode'), findsOneWidget);
-      expect(find.textContaining('heading-'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('studio-ast-tree')),
+          matching: find.text('b-1'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('studio-ast-tree')),
+          matching: find.text('b-2'),
+        ),
+        findsOneWidget,
+      );
       expect(find.text('L1..1'), findsOneWidget);
       expect(find.textContaining('off 0..'), findsOneWidget);
 

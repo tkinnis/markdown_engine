@@ -82,16 +82,102 @@ final class MarkdownUrlPolicy {
 
   /// Returns whether [url] is permitted by this policy.
   bool isAllowed(String url) {
+    final int rawLen = url.length;
+    if (rawLen >= 8 &&
+        url.codeUnitAt(0) == 0x68 &&
+        url.codeUnitAt(1) == 0x74 &&
+        url.codeUnitAt(2) == 0x74 &&
+        url.codeUnitAt(3) == 0x70 &&
+        allowedHosts == null &&
+        !allowUserInfo &&
+        (identical(allowedSchemes, defaultStrictSchemes) ||
+            (allowedSchemes == null &&
+                identical(blockedSchemes, defaultBlockedSchemes)))) {
+      int authStart = 0;
+      if (url.codeUnitAt(4) == 0x73 &&
+          url.codeUnitAt(5) == 0x3A &&
+          url.codeUnitAt(6) == 0x2F &&
+          url.codeUnitAt(7) == 0x2F) {
+        authStart = 8;
+      } else if (url.codeUnitAt(4) == 0x3A &&
+          url.codeUnitAt(5) == 0x2F &&
+          url.codeUnitAt(6) == 0x2F) {
+        authStart = 7;
+      }
+      if (authStart != 0) {
+        bool inAuthority = true;
+        bool clean = true;
+        for (int i = authStart; i < rawLen; i++) {
+          final int cu = url.codeUnitAt(i);
+          if (cu <= 0x20 || cu >= 0x7F || cu == 0x5C) {
+            clean = false;
+            break;
+          }
+          if (inAuthority) {
+            if (cu == 0x40) {
+              return false;
+            }
+            if (cu == 0x2F || cu == 0x3F || cu == 0x23) {
+              inAuthority = false;
+            }
+          }
+        }
+        if (clean) {
+          return true;
+        }
+      }
+    } else if (rawLen > 0) {
+      final int c0 = url.codeUnitAt(0);
+      if (c0 == 0x23) {
+        if (allowFragments) {
+          bool clean = true;
+          for (int i = 1; i < rawLen; i++) {
+            final int cu = url.codeUnitAt(i);
+            if (cu <= 0x20 || cu >= 0x7F) {
+              clean = false;
+              break;
+            }
+          }
+          if (clean) {
+            return true;
+          }
+        }
+      } else if (c0 > 0x20 &&
+          c0 < 0x7F &&
+          c0 != 0x5C &&
+          allowRelative &&
+          allowedHosts == null &&
+          !(c0 == 0x2F && rawLen > 1 && url.codeUnitAt(1) == 0x2F)) {
+        bool cleanRelative = true;
+        for (int i = 0; i < rawLen; i++) {
+          final int cu = url.codeUnitAt(i);
+          if (cu <= 0x20 || cu >= 0x7F || cu == 0x3A || cu == 0x5C) {
+            cleanRelative = false;
+            break;
+          }
+        }
+        if (cleanRelative) {
+          return true;
+        }
+      }
+    }
+
+    return _isAllowedSlow(url);
+  }
+
+  @pragma('vm:never-inline')
+  bool _isAllowedSlow(String url) {
     final String cleaned = stripControlAndWhitespaceForUrl(url);
-    if (cleaned.isEmpty) {
+    final int len = cleaned.length;
+    if (len == 0) {
       return allowRelative;
     }
-    if (cleaned.startsWith('#')) {
+    if (cleaned.codeUnitAt(0) == 0x23) {
       return allowFragments;
     }
 
-    final String? scheme = _extractScheme(cleaned);
-    if (scheme == null) {
+    final int colonIndex = _schemeColonIndex(cleaned);
+    if (colonIndex < 0) {
       if (!allowRelative) {
         return false;
       }
@@ -99,62 +185,84 @@ final class MarkdownUrlPolicy {
         if (!allowProtocolRelative) {
           return false;
         }
-        final String authorityAndRest = cleaned.substring(2);
-        if (!allowUserInfo && _authorityHasUserInfo(authorityAndRest)) {
+        if (!allowUserInfo && _authorityHasUserInfoFrom(cleaned, 2)) {
           return false;
         }
         if (allowedHosts != null) {
-          return _isAllowedHost(authorityAndRest);
+          return _isAllowedHost(cleaned.substring(2));
         }
         return true;
       }
       return true;
     }
 
-    if (scheme == 'data' &&
+    if (colonIndex == 4 &&
         allowSafeImageDataUrls &&
+        _equalsAsciiLowerLiteral(cleaned, 4, 'data') &&
         _safeImageDataPattern.hasMatch(cleaned)) {
       return true;
     }
 
-    if (allowedSchemes != null) {
+    final Set<String>? allowed = allowedSchemes;
+    if (allowed != null) {
       bool found = false;
-      for (final String allowed in allowedSchemes!) {
-        if (allowed.toLowerCase() == scheme) {
-          found = true;
-          break;
+      if (identical(allowed, defaultStrictSchemes)) {
+        found =
+            (colonIndex == 4 && _equalsAsciiLowerLiteral(cleaned, 4, 'http')) ||
+            (colonIndex == 5 &&
+                _equalsAsciiLowerLiteral(cleaned, 5, 'https')) ||
+            (colonIndex == 6 && _equalsAsciiLowerLiteral(cleaned, 6, 'mailto'));
+      } else {
+        for (final String entry in allowed) {
+          if (_equalsAsciiIgnoreCasePrefix(cleaned, colonIndex, entry)) {
+            found = true;
+            break;
+          }
         }
       }
       if (!found) {
         return false;
       }
     } else {
-      for (final String blocked in blockedSchemes) {
-        if (blocked.toLowerCase() == scheme) {
+      if (identical(blockedSchemes, defaultBlockedSchemes)) {
+        final bool blocked =
+            (colonIndex == 4 && _equalsAsciiLowerLiteral(cleaned, 4, 'data')) ||
+            (colonIndex == 8 &&
+                _equalsAsciiLowerLiteral(cleaned, 8, 'vbscript')) ||
+            (colonIndex == 10 &&
+                _equalsAsciiLowerLiteral(cleaned, 10, 'javascript'));
+        if (blocked) {
           return false;
+        }
+      } else {
+        for (final String entry in blockedSchemes) {
+          if (_equalsAsciiIgnoreCasePrefix(cleaned, colonIndex, entry)) {
+            return false;
+          }
         }
       }
     }
 
-    final int colonIndex = cleaned.indexOf(':');
-    final String afterScheme = cleaned.substring(colonIndex + 1);
-    if (afterScheme.isNotEmpty) {
-      final int c0 = afterScheme.codeUnitAt(0);
+    final int afterStart = colonIndex + 1;
+    if (afterStart < len) {
+      final int c0 = cleaned.codeUnitAt(afterStart);
       // Reject backslash authority differentials such as `https:\\evil` or
       // `https:/\evil` which browsers normalize to `https://evil`.
       if (c0 == 0x5C ||
           (c0 == 0x2F &&
-              afterScheme.length > 1 &&
-              afterScheme.codeUnitAt(1) == 0x5C)) {
+              afterStart + 1 < len &&
+              cleaned.codeUnitAt(afterStart + 1) == 0x5C)) {
         return false;
       }
-      if (afterScheme.startsWith('//')) {
-        final String authorityAndRest = afterScheme.substring(2);
-        if (!allowUserInfo && _authorityHasUserInfo(authorityAndRest)) {
+      if (c0 == 0x2F &&
+          afterStart + 1 < len &&
+          cleaned.codeUnitAt(afterStart + 1) == 0x2F) {
+        final int authStart = afterStart + 2;
+        if (!allowUserInfo && _authorityHasUserInfoFrom(cleaned, authStart)) {
           return false;
         }
         if (allowedHosts != null) {
-          return _isAllowedHost(authorityAndRest);
+          return _isAllowedHost(cleaned.substring(authStart));
         }
       }
     }
@@ -166,9 +274,9 @@ final class MarkdownUrlPolicy {
     return isAllowed(url) ? url : fallback;
   }
 
-  bool _authorityHasUserInfo(String authorityAndRest) {
-    for (int i = 0; i < authorityAndRest.length; i++) {
-      final int cu = authorityAndRest.codeUnitAt(i);
+  bool _authorityHasUserInfoFrom(String cleaned, int start) {
+    for (int i = start; i < cleaned.length; i++) {
+      final int cu = cleaned.codeUnitAt(i);
       if (cu == 0x40) {
         return true;
       }
@@ -256,6 +364,9 @@ String stripControlAndWhitespaceForUrl(String input) {
   int last = 0;
   for (int i = 0; i < input.length; i++) {
     final int cu = input.codeUnitAt(i);
+    if (cu > 0x20 && cu < 0x7F) {
+      continue;
+    }
     if (_isStrippedUrlChar(cu)) {
       out ??= StringBuffer();
       if (i > last) {
@@ -307,31 +418,64 @@ bool _startsWithAuthorityPrefix(String cleaned) {
   return (c0 == 0x2F || c0 == 0x5C) && (c1 == 0x2F || c1 == 0x5C);
 }
 
-String? _extractScheme(String cleaned) {
+int _schemeColonIndex(String cleaned) {
   if (cleaned.isEmpty) {
-    return null;
+    return -1;
   }
   final int first = cleaned.codeUnitAt(0);
   if (!_isAsciiAlpha(first)) {
-    return null;
+    return -1;
   }
   for (int i = 1; i < cleaned.length; i++) {
     final int cu = cleaned.codeUnitAt(i);
     if (cu == 0x3A) {
-      return cleaned.substring(0, i).toLowerCase();
+      return i;
     }
     if (cu == 0x2F || cu == 0x5C || cu == 0x3F || cu == 0x23) {
-      return null;
+      return -1;
     }
     if (!(_isAsciiAlpha(cu) ||
         (cu >= 0x30 && cu <= 0x39) ||
         cu == 0x2B ||
         cu == 0x2D ||
         cu == 0x2E)) {
-      return null;
+      return -1;
     }
   }
-  return null;
+  return -1;
+}
+
+bool _equalsAsciiLowerLiteral(String s, int prefixLen, String lowerLiteral) {
+  for (int i = 0; i < prefixLen; i++) {
+    int cu = s.codeUnitAt(i);
+    if (cu >= 0x41 && cu <= 0x5A) {
+      cu += 0x20;
+    }
+    if (cu != lowerLiteral.codeUnitAt(i)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool _equalsAsciiIgnoreCasePrefix(String s, int prefixLen, String target) {
+  if (target.length != prefixLen) {
+    return false;
+  }
+  for (int i = 0; i < prefixLen; i++) {
+    int a = s.codeUnitAt(i);
+    if (a >= 0x41 && a <= 0x5A) {
+      a += 0x20;
+    }
+    int b = target.codeUnitAt(i);
+    if (b >= 0x41 && b <= 0x5A) {
+      b += 0x20;
+    }
+    if (a != b) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool _isAsciiAlpha(int cu) =>

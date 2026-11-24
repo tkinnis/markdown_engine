@@ -20,6 +20,7 @@ final class Phase1Result {
     required this.normalizedSource,
     this.idPrefix = '',
     this.totalBlockCount = 0,
+    this.hasHeading = true,
   });
 
   /// Top-level block builders/nodes produced by Phase 1.
@@ -45,6 +46,9 @@ final class Phase1Result {
 
   /// Total blocks opened during Phase 1 (including nested containers).
   final int totalBlockCount;
+
+  /// Whether Phase 1 produced at least one [RawHeading] anywhere in the tree.
+  final bool hasHeading;
 }
 
 /// Intermediate Phase 1 block representation carrying raw inline text before
@@ -101,6 +105,9 @@ final class RawCodeBlock extends RawBlock {
     required this.literal,
     required this.isFenced,
     required this.codeUnitOffset,
+    this.fenceChar = 0,
+    this.fenceIndent = 0,
+    this.isClosed = true,
     super.endsWithBlankLine,
   });
 
@@ -109,6 +116,9 @@ final class RawCodeBlock extends RawBlock {
   final String literal;
   final bool isFenced;
   final int codeUnitOffset;
+  final int fenceChar;
+  final int fenceIndent;
+  final bool isClosed;
 }
 
 /// Intermediate Phase 1 thematic break node.
@@ -199,12 +209,12 @@ final class RawListItem extends RawBlock {
   const RawListItem({
     required super.blockId,
     required super.span,
-    required this.taskState,
+    required this.taskStateCode,
     required this.children,
     super.endsWithBlankLine,
   });
 
-  final bool? taskState;
+  final int taskStateCode;
   final List<RawBlock> children;
 }
 
@@ -365,39 +375,122 @@ Phase1Result parseBlocks(
   int baseLine = 1,
   String idPrefix = '',
   MarkdownBudgets? budgetsOverride,
+  bool alreadyNormalized = false,
 }) {
-  final String normalized = normalizeMarkdownSource(source);
   final MarkdownBudgets budgets = budgetsOverride ?? options.effectiveBudgets;
 
+  final String normalized;
   FrontmatterNode? frontmatterNode;
   int bodyStartOffset = 0;
   int bodyStartLine = baseLine;
+  final ({Int32List ranges, int lineCount}) split;
 
-  if (options.frontmatter && baseOffset == 0) {
-    final ParsedFrontmatter? parsed = tryParseFrontmatter(normalized);
+  final bool mayHaveFrontmatter =
+      options.frontmatter &&
+      baseOffset == 0 &&
+      source.length >= 3 &&
+      (source.codeUnitAt(0) == 0x2D || source.codeUnitAt(0) == 0x2B);
+
+  if (!alreadyNormalized && !mayHaveFrontmatter) {
+    final ({Int32List ranges, int lineCount})? clean =
+        _trySplitCleanNormalizedLines(source);
+    if (clean != null) {
+      normalized = source;
+      split = clean;
+    } else {
+      normalized = normalizeMarkdownSource(source);
+      split = _splitLineRanges(normalized, startOffset: 0);
+    }
+  } else {
+    normalized = alreadyNormalized ? source : normalizeMarkdownSource(source);
+    if (mayHaveFrontmatter) {
+      final ParsedFrontmatter? parsed = tryParseFrontmatter(normalized);
+      if (parsed != null) {
+        frontmatterNode = parsed.node;
+        bodyStartOffset = parsed.bodyStartOffset;
+        bodyStartLine = parsed.bodyStartLine;
+      }
+    }
+    split = _splitLineRanges(normalized, startOffset: bodyStartOffset);
+  }
+
+  return _parseSplitBlocks(
+    normalized: normalized,
+    ranges: split.ranges,
+    lineCount: split.lineCount,
+    baseOffset: baseOffset,
+    bodyStartLine: bodyStartLine,
+    options: options,
+    budgets: budgets,
+    idPrefix: idPrefix,
+    frontmatterNode: frontmatterNode,
+  );
+}
+
+/// Executes Phase 1 block parsing on already-normalized [normalizedSource].
+Phase1Result parseNormalizedBlocks(
+  String normalizedSource,
+  MarkdownOptions options, {
+  int baseOffset = 0,
+  int baseLine = 1,
+  String idPrefix = '',
+  MarkdownBudgets? budgetsOverride,
+}) {
+  final MarkdownBudgets budgets = budgetsOverride ?? options.effectiveBudgets;
+  FrontmatterNode? frontmatterNode;
+  int bodyStartOffset = 0;
+  int bodyStartLine = baseLine;
+  if (options.frontmatter &&
+      baseOffset == 0 &&
+      normalizedSource.length >= 3 &&
+      (normalizedSource.codeUnitAt(0) == 0x2D ||
+          normalizedSource.codeUnitAt(0) == 0x2B)) {
+    final ParsedFrontmatter? parsed = tryParseFrontmatter(normalizedSource);
     if (parsed != null) {
       frontmatterNode = parsed.node;
       bodyStartOffset = parsed.bodyStartOffset;
       bodyStartLine = parsed.bodyStartLine;
     }
   }
-
-  final ({Int32List ranges, int lineCount}) split = _splitLineRanges(
-    normalized,
-    startOffset: bodyStartOffset,
+  final ({Int32List ranges, int lineCount}) split =
+      (bodyStartOffset == 0
+          ? _trySplitCleanNormalizedLines(normalizedSource)
+          : null) ??
+      _splitLineRanges(normalizedSource, startOffset: bodyStartOffset);
+  return _parseSplitBlocks(
+    normalized: normalizedSource,
+    ranges: split.ranges,
+    lineCount: split.lineCount,
+    baseOffset: baseOffset,
+    bodyStartLine: bodyStartLine,
+    options: options,
+    budgets: budgets,
+    idPrefix: idPrefix,
+    frontmatterNode: frontmatterNode,
   );
+}
 
+Phase1Result _parseSplitBlocks({
+  required String normalized,
+  required Int32List ranges,
+  required int lineCount,
+  required int baseOffset,
+  required int bodyStartLine,
+  required MarkdownOptions options,
+  required MarkdownBudgets budgets,
+  required String idPrefix,
+  required FrontmatterNode? frontmatterNode,
+}) {
   final _BlockEngine engine = _BlockEngine(
     source: normalized,
-    lineRanges: split.ranges,
-    lineCount: split.lineCount,
+    lineCount: lineCount,
     baseOffset: baseOffset,
     startLine: bodyStartLine,
     options: options,
     budgets: budgets,
     idPrefix: idPrefix,
   );
-  engine.processLines();
+  engine.processLines(ranges);
   return engine.finalize(
     normalizedSource: normalized,
     frontmatter: frontmatterNode,
@@ -405,6 +498,60 @@ Phase1Result parseBlocks(
 }
 
 final Int32List _emptyInt32List = Int32List(0);
+
+final List<String> _precomputedBlockIds = List<String>.generate(
+  4096,
+  (int i) => 'b-$i',
+  growable: false,
+);
+
+({Int32List ranges, int lineCount})? _trySplitCleanNormalizedLines(
+  String source,
+) {
+  final int len = source.length;
+  if (len == 0) {
+    return (ranges: _emptyInt32List, lineCount: 0);
+  }
+  int cap = (len >> 5) + 32;
+  if (len < 256) {
+    cap = 16;
+  } else if (cap < 32) {
+    cap = 32;
+  }
+  Int32List ranges = Int32List(cap * 2);
+  int rangesLen = ranges.length;
+  int slot = 0;
+  int lineStart = 0;
+  for (int i = 0; i < len; i++) {
+    final int cu = source.codeUnitAt(i);
+    if (cu > 0x0D) {
+      continue;
+    }
+    if (cu == 0x0A) {
+      if (slot + 1 >= rangesLen) {
+        final Int32List grown = Int32List(rangesLen * 2);
+        grown.setRange(0, rangesLen, ranges);
+        ranges = grown;
+        rangesLen = grown.length;
+      }
+      ranges[slot++] = lineStart;
+      ranges[slot++] = i;
+      lineStart = i + 1;
+    } else if (cu == 0x0D || cu == 0x00) {
+      return null;
+    }
+  }
+  if (lineStart < len) {
+    if (slot + 1 >= rangesLen) {
+      final Int32List grown = Int32List(rangesLen * 2);
+      grown.setRange(0, rangesLen, ranges);
+      ranges = grown;
+    }
+    ranges[slot++] = lineStart;
+    ranges[slot++] = len;
+  }
+  return (ranges: ranges, lineCount: slot >> 1);
+}
 
 ({Int32List ranges, int lineCount}) _splitLineRanges(
   String normalized, {
@@ -414,8 +561,10 @@ final Int32List _emptyInt32List = Int32List(0);
   if (startOffset >= len) {
     return (ranges: _emptyInt32List, lineCount: 0);
   }
-  int cap = ((len - startOffset) >> 4) + 16;
-  if (cap < 32) {
+  int cap = ((len - startOffset) >> 5) + 32;
+  if (len - startOffset < 256) {
+    cap = 16;
+  } else if (cap < 32) {
     cap = 32;
   }
   Int32List ranges = Int32List(cap * 2);
@@ -461,6 +610,7 @@ final class _LineCursor {
   int firstNonSpacePendingSpaces = 0;
   int indent = 0;
   bool blank = false;
+  bool _nonSpaceValid = false;
 
   void reset({
     required int lineIndex,
@@ -484,14 +634,27 @@ final class _LineCursor {
     firstNonSpacePendingSpaces = 0;
     indent = 0;
     blank = false;
+    _nonSpaceValid = false;
   }
 
   bool get isAtEnd => pendingTabSpaces == 0 && index >= lineEnd;
 
   void findNextNonSpace() {
+    if (_nonSpaceValid) {
+      return;
+    }
+    _nonSpaceValid = true;
     int i = index;
     int col = column;
     int pending = pendingTabSpaces;
+    if (pending == 0 && i < lineEnd && source.codeUnitAt(i) > 0x20) {
+      blank = false;
+      firstNonSpaceIndex = i;
+      firstNonSpaceColumn = col;
+      firstNonSpacePendingSpaces = 0;
+      indent = 0;
+      return;
+    }
     if (pending > 0) {
       col += pending;
       pending = 0;
@@ -519,9 +682,11 @@ final class _LineCursor {
     index = firstNonSpaceIndex;
     column = firstNonSpaceColumn;
     pendingTabSpaces = firstNonSpacePendingSpaces;
+    _nonSpaceValid = false;
   }
 
   void advanceOffset(int chars) {
+    _nonSpaceValid = false;
     for (int k = 0; k < chars && index < lineEnd; k++) {
       final int cu = source.codeUnitAt(index);
       if (cu == 0x09) {
@@ -535,6 +700,7 @@ final class _LineCursor {
   }
 
   void advanceColumns(int count) {
+    _nonSpaceValid = false;
     int remaining = count;
     if (pendingTabSpaces > 0) {
       final int take = remaining < pendingTabSpaces
@@ -597,20 +763,21 @@ sealed class _OpenBlock {
     required this.blockId,
     required this.startOffset,
     required this.startLine,
+    this.isContainer = false,
   }) : endOffset = startOffset,
        endLine = startLine;
 
-  final String blockId;
+  String blockId;
   final int startOffset;
   int endOffset;
   final int startLine;
   int endLine;
+  final bool isContainer;
 
   bool isOpen = true;
   bool lastLineBlank = false;
   bool endsWithBlank = false;
 
-  bool get isContainer => false;
   bool get acceptsLines => false;
 
   void extendSpan(int nextEndOffset, int nextEndLine) {
@@ -620,12 +787,10 @@ sealed class _OpenBlock {
 }
 
 final class _DocOpenBlock extends _OpenBlock {
-  _DocOpenBlock() : super(blockId: 'doc', startOffset: 0, startLine: 1);
+  _DocOpenBlock()
+    : super(blockId: 'doc', startOffset: 0, startLine: 1, isContainer: true);
 
   final List<_OpenBlock> children = <_OpenBlock>[];
-
-  @override
-  bool get isContainer => true;
 }
 
 final class _BlockQuoteOpenBlock extends _OpenBlock {
@@ -633,12 +798,9 @@ final class _BlockQuoteOpenBlock extends _OpenBlock {
     required super.blockId,
     required super.startOffset,
     required super.startLine,
-  });
+  }) : super(isContainer: true);
 
   final List<_OpenBlock> children = <_OpenBlock>[];
-
-  @override
-  bool get isContainer => true;
 }
 
 final class _ListOpenBlock extends _OpenBlock {
@@ -650,7 +812,7 @@ final class _ListOpenBlock extends _OpenBlock {
     required this.start,
     required this.delimiter,
     required this.bulletChar,
-  });
+  }) : super(isContainer: true);
 
   final bool ordered;
   final int start;
@@ -658,9 +820,6 @@ final class _ListOpenBlock extends _OpenBlock {
   final int bulletChar;
   final List<_ListItemOpenBlock> items = <_ListItemOpenBlock>[];
   bool tight = true;
-
-  @override
-  bool get isContainer => true;
 }
 
 final class _ListItemOpenBlock extends _OpenBlock {
@@ -673,7 +832,7 @@ final class _ListItemOpenBlock extends _OpenBlock {
     required this.start,
     required this.delimiter,
     required this.bulletChar,
-  });
+  }) : super(isContainer: true);
 
   final int contentIndent;
   final bool ordered;
@@ -686,9 +845,6 @@ final class _ListItemOpenBlock extends _OpenBlock {
   bool hasBlankBetweenChildren = false;
   bool startedBlank = false;
   bool closedBySecondBlank = false;
-
-  @override
-  bool get isContainer => true;
 }
 
 final class _FootnoteDefOpenBlock extends _OpenBlock {
@@ -697,14 +853,11 @@ final class _FootnoteDefOpenBlock extends _OpenBlock {
     required super.startOffset,
     required super.startLine,
     required this.label,
-  });
+  }) : super(isContainer: true);
 
   final String label;
   final List<_OpenBlock> children = <_OpenBlock>[];
   bool hadBlankLine = false;
-
-  @override
-  bool get isContainer => true;
 }
 
 final class _ParagraphOpenBlock extends _OpenBlock {
@@ -714,10 +867,62 @@ final class _ParagraphOpenBlock extends _OpenBlock {
     required super.startLine,
   });
 
-  final List<String> lines = <String>[];
-  final List<int> sourceLineIndices = <int>[];
+  int rawStart = -1;
+  int rawEnd = -1;
+  bool rawContiguous = false;
+  int firstLineIndex = -1;
+  int lineCount = 0;
+  List<String>? _lines;
   String? finalizedText;
   bool hadPredecessorBlankLine = false;
+  bool isTable = false;
+  List<TableAlignment> tableAlignments = _emptyTableAlignments;
+  List<String> tableHeaderCells = _emptyTableHeaderCells;
+  List<List<String>> tableRows = _emptyTableRows;
+
+  static final List<TableAlignment> _emptyTableAlignments = <TableAlignment>[];
+  static final List<String> _emptyTableHeaderCells = <String>[];
+  static final List<List<String>> _emptyTableRows = <List<String>>[];
+
+  void appendLine(String source, int segStart, int segEnd, int lineIdx) {
+    if (lineCount == 0) {
+      firstLineIndex = lineIdx;
+      lineCount = 1;
+      rawStart = segStart;
+      rawEnd = segEnd;
+      rawContiguous = true;
+      return;
+    }
+    lineCount++;
+    if (rawContiguous &&
+        segStart == rawEnd + 1 &&
+        source.codeUnitAt(rawEnd) == 0x0A) {
+      rawEnd = segEnd;
+      return;
+    }
+    final List<String> lines = _lines ??= _materializeLines(source);
+    lines.add(source.substring(segStart, segEnd));
+  }
+
+  List<String> _materializeLines(String source) {
+    rawContiguous = false;
+    return rawStart >= 0 && rawStart <= rawEnd
+        ? source.substring(rawStart, rawEnd).split('\n')
+        : <String>[];
+  }
+
+  String buildUnfinalizedText(String source) {
+    if (rawContiguous) {
+      return rawStart >= 0 && rawStart < rawEnd
+          ? source.substring(rawStart, rawEnd).trimRight()
+          : '';
+    }
+    final List<String>? lines = _lines;
+    if (lines == null || lines.isEmpty) {
+      return '';
+    }
+    return (lines.length == 1 ? lines.first : lines.join('\n')).trimRight();
+  }
 
   @override
   bool get acceptsLines => true;
@@ -759,7 +964,49 @@ final class _CodeOpenBlock extends _OpenBlock {
   final int fenceIndent;
   final String info;
   final int codeUnitOffset;
-  final List<String> lines = <String>[];
+  bool isClosed = false;
+  int rawStart = -1;
+  int rawEnd = -1;
+  bool rawContiguous = false;
+  List<String>? _lines;
+
+  void appendLineRange(String source, int segStart, int segEnd) {
+    if (rawStart < 0 && _lines == null) {
+      rawStart = segStart;
+      rawEnd = segEnd;
+      rawContiguous = true;
+      return;
+    }
+    if (rawContiguous &&
+        segStart == rawEnd + 1 &&
+        source.codeUnitAt(rawEnd) == 0x0A) {
+      rawEnd = segEnd;
+      return;
+    }
+    final List<String> lines = _lines ??= _materializeLines(source);
+    lines.add(source.substring(segStart, segEnd));
+  }
+
+  void appendLine(
+    String source,
+    _LineCursor cursor, {
+    bool allowContiguous = true,
+  }) {
+    if (allowContiguous && cursor.pendingTabSpaces == 0) {
+      appendLineRange(source, cursor.index, cursor.lineEnd);
+      return;
+    }
+    final List<String> lines = _lines ??= _materializeLines(source);
+    lines.add(cursor.restOfLine());
+  }
+
+  List<String> _materializeLines(String source) {
+    rawContiguous = false;
+    if (rawStart < 0) {
+      return <String>[];
+    }
+    return source.substring(rawStart, rawEnd).split('\n');
+  }
 
   @override
   bool get acceptsLines => true;
@@ -813,27 +1060,9 @@ final class _ThematicBreakOpenBlock extends _OpenBlock {
   });
 }
 
-final class _TableOpenBlock extends _OpenBlock {
-  _TableOpenBlock({
-    required super.blockId,
-    required super.startOffset,
-    required super.startLine,
-    required this.alignments,
-    required this.headerCells,
-  });
-
-  final List<TableAlignment> alignments;
-  final List<String> headerCells;
-  final List<List<String>> rows = <List<String>>[];
-
-  @override
-  bool get acceptsLines => true;
-}
-
 final class _BlockEngine {
   _BlockEngine({
     required this.source,
-    required this.lineRanges,
     required this.lineCount,
     required this.baseOffset,
     required this.startLine,
@@ -844,7 +1073,6 @@ final class _BlockEngine {
        _lookaheadCursor = _LineCursor(source);
 
   final String source;
-  final Int32List lineRanges;
   final int lineCount;
   final int baseOffset;
   final int startLine;
@@ -854,35 +1082,74 @@ final class _BlockEngine {
   final _LineCursor _cursor;
   final _LineCursor _lookaheadCursor;
 
+  static final Uint8List _blockStarterLut = _buildBlockStarterLut();
+
+  static Uint8List _buildBlockStarterLut() {
+    final Uint8List lut = Uint8List(128);
+    lut[0x3E] = 1; // '>'
+    lut[0x23] = 1; // '#'
+    lut[0x60] = 1; // '`'
+    lut[0x7E] = 1; // '~'
+    lut[0x24] = 1; // '$'
+    lut[0x5C] = 1; // '\'
+    lut[0x3C] = 1; // '<'
+    lut[0x3D] = 1; // '='
+    lut[0x2D] = 1; // '-'
+    lut[0x7C] = 1; // '|'
+    lut[0x3A] = 1; // ':'
+    lut[0x2A] = 1; // '*'
+    lut[0x5F] = 1; // '_'
+    lut[0x5B] = 1; // '['
+    lut[0x2B] = 1; // '+'
+    for (int c = 0x30; c <= 0x39; c++) {
+      lut[c] = 1; // '0'..'9'
+    }
+    return lut;
+  }
+
   final _DocOpenBlock _root = _DocOpenBlock();
   final List<_OpenBlock> _stack = <_OpenBlock>[];
-  final Map<String, MarkdownLinkDefinition> _linkDefinitions =
-      <String, MarkdownLinkDefinition>{};
-  final Map<String, RawFootnoteDef> _footnoteDefs = <String, RawFootnoteDef>{};
-  final Map<String, String> _abbreviations = <String, String>{};
+  Map<String, MarkdownLinkDefinition>? _linkDefinitions;
+  Map<String, RawFootnoteDef>? _footnoteDefs;
+  Map<String, String>? _abbreviations;
 
   int _idCounter = 0;
   int _blockCount = 0;
   int _subIdCounter = 0;
   bool _budgetExceeded = false;
+  bool _hasHeading = false;
+  bool _hasPotentialDefList = false;
+  bool _hasPotentialAbbr = false;
+  bool _hasTopLevelHtmlBlock = false;
   _OpenBlock? _failedDollarSearchContainer;
   int _failedDollarSearchLimit = -1;
   _OpenBlock? _failedBracketSearchContainer;
   int _failedBracketSearchLimit = -1;
 
-  int _lineTextStart(int lineIdx) => lineRanges[lineIdx * 2];
-  int _lineTextEnd(int lineIdx) => lineRanges[lineIdx * 2 + 1];
-  int _lineStartOffset(int lineIdx) => baseOffset + lineRanges[lineIdx * 2];
-  int _lineEndOffset(int lineIdx) {
-    final int end = lineRanges[lineIdx * 2 + 1];
-    return baseOffset + (end < source.length ? end + 1 : end);
-  }
+  // Scratch match fields to avoid short-lived wrapper object allocations on
+  // headings and list markers.
+  int _atxLevel = 0;
+  String _atxContent = '';
+  String? _atxExplicitId;
+  String _explicitText = '';
+  String? _explicitId;
+  bool _listOrdered = false;
+  int _listStart = 1;
+  String _listDelimiter = '';
+  int _listBulletChar = 0;
+  int _listIndent = 0;
+  int _listMarkerChars = 0;
+  int _listPadding = 0;
+  int _listSpacesConsumed = 0;
 
   int _lineNumber(int lineIdx) => startLine + lineIdx;
 
-  String _nextId(String prefix) {
-    _idCounter++;
-    return '$idPrefix$prefix-$_idCounter';
+  String _nextId() {
+    final int idx = ++_idCounter;
+    if (idPrefix.isEmpty && idx < _precomputedBlockIds.length) {
+      return _precomputedBlockIds[idx];
+    }
+    return idPrefix.isEmpty ? 'b-$idx' : '${idPrefix}b-$idx';
   }
 
   bool _canOpenBlock([int count = 1]) {
@@ -893,14 +1160,21 @@ final class _BlockEngine {
     return true;
   }
 
-  void processLines() {
+  void processLines(Int32List lineRanges) {
     _stack.add(_root);
+    final int srcLen = source.length;
+    final int baseOff = baseOffset;
     for (int lineIdx = 0; lineIdx < lineCount; lineIdx++) {
       if (_budgetExceeded ||
           (_blockCount >= budgets.maxBlocks && _stack.length == 1)) {
         break;
       }
-      _incorporateLine(lineIdx);
+      final int pairIdx = lineIdx * 2;
+      final int lineStart = lineRanges[pairIdx];
+      final int lineEnd = lineRanges[pairIdx + 1];
+      final int spanEndOffset =
+          baseOff + (lineEnd < srcLen ? lineEnd + 1 : lineEnd);
+      _incorporateLine(lineIdx, lineStart, lineEnd, spanEndOffset, lineRanges);
     }
     _closeStackDownTo(0);
   }
@@ -919,46 +1193,460 @@ final class _BlockEngine {
         ),
       );
     }
-    for (final _OpenBlock child in _root.children) {
+    final List<_OpenBlock> rootChildren = _root.children;
+    for (int i = 0; i < rootChildren.length; i++) {
       if (topBlocks.length >= budgets.maxBlocks) {
         break;
       }
-      final RawBlock? built = _buildBlock(child, isTopLevel: true);
+      final RawBlock? built = _buildBlock(rootChildren[i], isTopLevel: true);
       if (built != null) {
         topBlocks.add(built);
+        if (built is RawHtmlBlock) {
+          _hasTopLevelHtmlBlock = true;
+        }
       }
     }
     final List<RawBlock> transformed = _postProcessBlocks(topBlocks);
     return Phase1Result(
-      blocks: freezeList(transformed),
+      blocks: transformed,
       frontmatter: frontmatter,
-      linkDefinitions: freezeMap(_linkDefinitions),
-      footnoteDefinitions: freezeMap(_footnoteDefs),
-      abbreviations: freezeMap(_abbreviations),
+      linkDefinitions: _linkDefinitions == null
+          ? const <String, MarkdownLinkDefinition>{}
+          : freezeMap(_linkDefinitions!),
+      footnoteDefinitions: _footnoteDefs ?? const <String, RawFootnoteDef>{},
+      abbreviations: _abbreviations == null
+          ? const <String, String>{}
+          : freezeMap(_abbreviations!),
       normalizedSource: normalizedSource,
       idPrefix: idPrefix,
       totalBlockCount: _blockCount,
+      hasHeading: _hasHeading,
     );
   }
 
-  void _incorporateLine(int lineIdx) {
+  void _incorporateLine(
+    int lineIdx,
+    int lineStart,
+    int lineEnd,
+    int spanEndOffset,
+    Int32List lineRanges,
+  ) {
+    final int stackLen = _stack.length;
+    if (stackLen <= 2) {
+      final _OpenBlock? singleChild = stackLen == 2 ? _stack[1] : null;
+      if (lineStart == lineEnd) {
+        if (singleChild == null) {
+          _root.lastLineBlank = true;
+          _root.endsWithBlank = true;
+          return;
+        }
+        if (singleChild is _ParagraphOpenBlock) {
+          _popLeaf();
+          _root.lastLineBlank = true;
+          _root.endsWithBlank = true;
+          return;
+        }
+      } else if (singleChild is _ParagraphOpenBlock && singleChild.isTable) {
+        if (lineStart < lineEnd &&
+            source.codeUnitAt(lineStart) == 0x7C &&
+            singleChild.tableRows.length < budgets.maxTableRows) {
+          singleChild.tableRows.add(
+            _splitTableRowSpan(
+              source,
+              lineStart,
+              lineEnd,
+              maxColumns: singleChild.tableAlignments.length,
+            ),
+          );
+          singleChild.extendSpan(spanEndOffset, _lineNumber(lineIdx));
+          return;
+        }
+      } else if (singleChild == null || singleChild is _ParagraphOpenBlock) {
+        final int cu = source.codeUnitAt(lineStart);
+        if (cu > 0x20 && (cu >= 128 || _blockStarterLut[cu] == 0)) {
+          final int lineNum = _lineNumber(lineIdx);
+          if (singleChild is _ParagraphOpenBlock) {
+            singleChild.appendLine(source, lineStart, lineEnd, lineIdx);
+            singleChild.extendSpan(spanEndOffset, lineNum);
+            singleChild.lastLineBlank = false;
+            singleChild.endsWithBlank = false;
+            _root.lastLineBlank = false;
+            _root.endsWithBlank = false;
+            return;
+          }
+          if (!_canOpenBlock()) {
+            return;
+          }
+          final _ParagraphOpenBlock para = _ParagraphOpenBlock(
+            blockId: _nextId(),
+            startOffset: baseOffset + lineStart,
+            startLine: lineNum,
+          );
+          para.appendLine(source, lineStart, lineEnd, lineIdx);
+          para.extendSpan(spanEndOffset, lineNum);
+          _root.lastLineBlank = false;
+          _root.endsWithBlank = false;
+          _root.children.add(para);
+          _stack.add(para);
+          _blockCount++;
+          return;
+        }
+      } else if (singleChild is _CodeOpenBlock &&
+          singleChild.isFenced &&
+          singleChild.fenceIndent == 0 &&
+          lineStart < lineEnd) {
+        final int cu = source.codeUnitAt(lineStart);
+        if (cu != 0x20 && cu != 0x09 && cu != singleChild.fenceChar) {
+          singleChild.appendLineRange(source, lineStart, lineEnd);
+          singleChild.extendSpan(spanEndOffset, _lineNumber(lineIdx));
+          return;
+        }
+      }
+    }
+
+    _incorporateLineWithCursor(
+      lineIdx,
+      lineStart,
+      lineEnd,
+      spanEndOffset,
+      lineRanges,
+    );
+  }
+
+  bool _allContainersMatched = true;
+
+  void _incorporateLineWithCursor(
+    int lineIdx,
+    int lineStart,
+    int lineEnd,
+    int spanEndOffset,
+    Int32List lineRanges,
+  ) {
     final _LineCursor cursor = _cursor;
     cursor.reset(
       lineIndex: lineIdx,
-      lineStart: _lineTextStart(lineIdx),
-      lineEnd: _lineTextEnd(lineIdx),
-      spanStartOffset: _lineStartOffset(lineIdx),
-      spanEndOffset: _lineEndOffset(lineIdx),
+      lineStart: lineStart,
+      lineEnd: lineEnd,
+      spanStartOffset: baseOffset + lineStart,
+      spanEndOffset: spanEndOffset,
       lineNumber: _lineNumber(lineIdx),
     );
+    final int lastMatched = _matchOpenContainers(cursor);
+    final bool allMatched = _allContainersMatched;
+    final _OpenBlock oldTip = _stack[_stack.length - 1];
+    final bool oldTipWasParagraph =
+        oldTip is _ParagraphOpenBlock && !oldTip.isTable;
+    final bool oldTipWasTable = oldTip is _ParagraphOpenBlock && oldTip.isTable;
+
+    // An indented code block closes immediately when indent < 4 on a non-blank
+    // line (or when an ancestor container failed), allowing Step 2 starters.
+    if (oldTip is _CodeOpenBlock && !oldTip.isFenced) {
+      cursor.findNextNonSpace();
+      if (!allMatched || (!cursor.blank && cursor.indent < 4)) {
+        _popLeaf();
+      }
+    }
+
+    // Step 2: check block starters unless inside an unbroken code block,
+    // HTML block, or math block whose ancestor containers all matched.
+    final _OpenBlock tipBeforeStarters = _stack[_stack.length - 1];
+    final bool insideUnbrokenVerbatim =
+        allMatched &&
+        (tipBeforeStarters is _CodeOpenBlock ||
+            tipBeforeStarters is _HtmlOpenBlock ||
+            tipBeforeStarters is _MathOpenBlock);
+
+    bool closedUnmatched = false;
+    bool keepCheckingStarters = !insideUnbrokenVerbatim;
+
+    while (keepCheckingStarters) {
+      cursor.findNextNonSpace();
+      final _OpenBlock currentContainer = closedUnmatched
+          ? _stack[_stack.length - 1]
+          : _stack[lastMatched];
+      final int containerDepth = closedUnmatched
+          ? _stack.length - 1
+          : lastMatched;
+      final bool atMaxDepth = containerDepth >= budgets.maxNestingDepth;
+
+      if (cursor.indent < 4) {
+        final int firstCu = cursor.peekCodeUnitAtNonSpace();
+        if (firstCu < 0 || firstCu >= 128 || _blockStarterLut[firstCu] == 0) {
+          break;
+        }
+        if (!oldTipWasParagraph &&
+            (firstCu == 0x7C || firstCu == 0x3A || firstCu == 0x3D)) {
+          break;
+        }
+
+        // 1. Blockquote (`>`), subject to maxNestingDepth.
+        if (firstCu == 0x3E && !atMaxDepth) {
+          if (!_canOpenBlock()) {
+            return;
+          }
+          if (!closedUnmatched) {
+            closedUnmatched = true;
+            _closeStackDownTo(lastMatched);
+          }
+          cursor.advanceToNextNonSpace();
+          cursor.advanceOffset(1);
+          if (!cursor.isAtEnd) {
+            if (cursor.pendingTabSpaces > 0) {
+              cursor.advanceColumns(1);
+            } else {
+              final int nextCu = source.codeUnitAt(cursor.index);
+              if (nextCu == 0x20 || nextCu == 0x09) {
+                cursor.advanceColumns(1);
+              }
+            }
+          }
+          _addChild(
+            _BlockQuoteOpenBlock(
+              blockId: _nextId(),
+              startOffset: cursor.spanStartOffset,
+              startLine: cursor.lineNumber,
+            ),
+            cursor,
+          );
+          continue;
+        }
+
+        // 2. ATX Heading (`#`).
+        if (firstCu == 0x23 && _matchAtxHeading(cursor)) {
+          if (!_canOpenBlock()) {
+            return;
+          }
+          if (!closedUnmatched) {
+            closedUnmatched = true;
+            _closeStackDownTo(lastMatched);
+          }
+          _addChild(
+            _HeadingOpenBlock(
+              blockId: _nextId(),
+              startOffset: cursor.spanStartOffset,
+              startLine: cursor.lineNumber,
+              level: _atxLevel,
+              rawText: _atxContent,
+              isSetext: false,
+              explicitId: _atxExplicitId,
+            ),
+            cursor,
+          );
+          _popLeaf();
+          return;
+        }
+
+        // 3. Fenced Code Block (``` or ~~~).
+        if (firstCu == 0x60 || firstCu == 0x7E) {
+          if (_tryOpenFencedCode(
+            cursor,
+            lastMatched: lastMatched,
+            closedUnmatched: closedUnmatched,
+          )) {
+            return;
+          }
+        }
+
+        // 4. Display Math Block (`$$` or `\[...\]`).
+        if (options.math && (firstCu == 0x24 || firstCu == 0x5C)) {
+          if (_tryOpenMathBlock(
+            cursor,
+            lineRanges,
+            lastMatched: lastMatched,
+            closedUnmatched: closedUnmatched,
+            containerDepth: containerDepth,
+            currentContainer: currentContainer,
+          )) {
+            return;
+          }
+        }
+
+        // 5. HTML Block (Conditions 1..7).
+        if (firstCu == 0x3C) {
+          if (_tryOpenHtmlBlock(
+            cursor,
+            lastMatched: lastMatched,
+            closedUnmatched: closedUnmatched,
+            oldTipWasParagraph: oldTipWasParagraph,
+          )) {
+            return;
+          }
+        }
+
+        // 6. Setext Heading Underline (`===` or `---`) on an active paragraph.
+        if (!closedUnmatched &&
+            allMatched &&
+            oldTip is _ParagraphOpenBlock &&
+            !oldTip.isTable &&
+            (firstCu == 0x3D || firstCu == 0x2D)) {
+          if (_tryConvertParagraphToSetext(oldTip, cursor)) {
+            return;
+          }
+        }
+
+        // 7. GFM Pipe Table Delimiter Row interrupting an active paragraph.
+        if (options.gfmTables &&
+            !closedUnmatched &&
+            allMatched &&
+            oldTip is _ParagraphOpenBlock &&
+            !oldTip.isTable &&
+            (firstCu == 0x7C || firstCu == 0x2D || firstCu == 0x3A)) {
+          if (_tryInterceptTableFromParagraph(oldTip, cursor, lineRanges)) {
+            return;
+          }
+        }
+
+        // 8. Thematic Break (`***`, `---`, `___`).
+        if (firstCu == 0x2A || firstCu == 0x2D || firstCu == 0x5F) {
+          if (_tryOpenThematicBreak(
+            cursor,
+            lastMatched: lastMatched,
+            closedUnmatched: closedUnmatched,
+          )) {
+            return;
+          }
+        }
+
+        // 9. Footnote Definition (`[^label]: ...`) when not interrupting paragraph.
+        if (options.footnotes &&
+            firstCu == 0x5B &&
+            !(!closedUnmatched && oldTipWasParagraph) &&
+            !atMaxDepth) {
+          final int fnRes = _tryOpenFootnoteDef(
+            cursor,
+            lastMatched: lastMatched,
+            closedUnmatched: closedUnmatched,
+          );
+          if (fnRes != 0) {
+            if (fnRes < 0) {
+              return;
+            }
+            closedUnmatched = true;
+            continue;
+          }
+        }
+
+        // 10. List Item (`-`, `+`, `*`, `1.`, `1)`).
+        if (firstCu == 0x2D ||
+            firstCu == 0x2B ||
+            firstCu == 0x2A ||
+            isAsciiDigit(firstCu)) {
+          final int listRes = _tryOpenListItem(
+            cursor,
+            lastMatched: lastMatched,
+            allMatched: allMatched,
+            closedUnmatched: closedUnmatched,
+            oldTipWasParagraph: oldTipWasParagraph,
+            atMaxDepth: atMaxDepth,
+          );
+          if (listRes != 0) {
+            if (listRes < 0) {
+              return;
+            }
+            closedUnmatched = true;
+            continue;
+          }
+        }
+      }
+
+      // 11. Indented Code Block (`indent >= 4`).
+      final bool tipIsParagraph = !closedUnmatched && oldTipWasParagraph;
+      if (cursor.indent >= 4 &&
+          !cursor.blank &&
+          !tipIsParagraph &&
+          !oldTipWasTable) {
+        _openIndentedCode(
+          cursor,
+          lastMatched: lastMatched,
+          closedUnmatched: closedUnmatched,
+        );
+        return;
+      }
+
+      keepCheckingStarters = false;
+      final _ = currentContainer;
+    }
+
+    _appendRemainingLineToTip(
+      cursor,
+      oldTip,
+      lastMatched,
+      allMatched,
+      closedUnmatched,
+      lineIdx,
+      lineEnd,
+    );
+  }
+
+  @pragma('vm:never-inline')
+  bool _tryOpenThematicBreak(
+    _LineCursor cursor, {
+    required int lastMatched,
+    required bool closedUnmatched,
+  }) {
+    if (!_matchThematicBreakSpan(
+      source,
+      cursor.firstNonSpaceIndex,
+      cursor.lineEnd,
+    )) {
+      return false;
+    }
+    if (!_canOpenBlock()) {
+      return true;
+    }
+    if (!closedUnmatched) {
+      _closeStackDownTo(lastMatched);
+    }
+    _addChild(
+      _ThematicBreakOpenBlock(
+        blockId: _nextId(),
+        startOffset: cursor.spanStartOffset,
+        startLine: cursor.lineNumber,
+      ),
+      cursor,
+    );
+    _popLeaf();
+    return true;
+  }
+
+  @pragma('vm:never-inline')
+  void _openIndentedCode(
+    _LineCursor cursor, {
+    required int lastMatched,
+    required bool closedUnmatched,
+  }) {
+    if (!_canOpenBlock()) {
+      return;
+    }
+    if (!closedUnmatched) {
+      _closeStackDownTo(lastMatched);
+    }
+    cursor.advanceColumns(4);
+    final _CodeOpenBlock code = _CodeOpenBlock(
+      blockId: _nextId(),
+      startOffset: cursor.spanStartOffset,
+      startLine: cursor.lineNumber,
+      isFenced: false,
+      codeUnitOffset: cursor.spanStartOffset,
+    );
+    code.appendLine(source, cursor);
+    code.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+    _addChild(code, cursor);
+  }
+
+  int _matchOpenContainers(_LineCursor cursor) {
     int matchedDepth = 0;
     bool allMatched = true;
-
-    // Step 1: check open containers along the active stack.
     for (int d = 1; d < _stack.length; d++) {
       final _OpenBlock container = _stack[d];
       if (!container.isContainer) {
         break;
+      }
+      if (container is _ListOpenBlock) {
+        // Keep `matchedDepth` at the list's parent until a child list item
+        // actually matches, so a failed list item closes the list cleanly
+        // unless a sibling list item of the same type opens in Step 2.
+        continue;
       }
       cursor.findNextNonSpace();
 
@@ -982,10 +1670,6 @@ final class _BlockEngine {
           allMatched = false;
           break;
         }
-      } else if (container is _ListOpenBlock) {
-        // Keep `matchedDepth` at the list's parent until a child list item
-        // actually matches, so a failed list item closes the list cleanly
-        // unless a sibling list item of the same type opens in Step 2.
       } else if (container is _ListItemOpenBlock) {
         if (cursor.blank) {
           if (container.children.isEmpty && container.startedBlank) {
@@ -1016,520 +1700,68 @@ final class _BlockEngine {
         }
       }
     }
+    _allContainersMatched = allMatched;
+    return matchedDepth;
+  }
 
-    final int lastMatched = matchedDepth;
-    final _OpenBlock oldTip = _stack.last;
-    final bool oldTipWasParagraph = oldTip is _ParagraphOpenBlock;
-    final bool oldTipWasTable = oldTip is _TableOpenBlock;
-
-    // An indented code block closes immediately when indent < 4 on a non-blank
-    // line (or when an ancestor container failed), allowing Step 2 starters.
-    if (oldTip is _CodeOpenBlock && !oldTip.isFenced) {
-      cursor.findNextNonSpace();
-      if (!allMatched || (!cursor.blank && cursor.indent < 4)) {
-        _popLeaf();
-      }
-    }
-
-    // Step 2: check block starters unless inside an unbroken code block,
-    // HTML block, or math block whose ancestor containers all matched.
-    final _OpenBlock tipBeforeStarters = _stack.last;
-    final bool insideUnbrokenVerbatim =
-        allMatched &&
-        (tipBeforeStarters is _CodeOpenBlock ||
-            tipBeforeStarters is _HtmlOpenBlock ||
-            tipBeforeStarters is _MathOpenBlock);
-
-    bool closedUnmatched = false;
-    bool keepCheckingStarters = !insideUnbrokenVerbatim;
-
-    void closeUnmatchedIfNeeded() {
-      if (!closedUnmatched) {
-        closedUnmatched = true;
-        _closeStackDownTo(lastMatched);
-      }
-    }
-
-    while (keepCheckingStarters) {
-      cursor.findNextNonSpace();
-      final _OpenBlock currentContainer = closedUnmatched
-          ? _stack.last
-          : _stack[lastMatched];
-      final int containerDepth = closedUnmatched
-          ? _stack.length - 1
-          : lastMatched;
-      final bool atMaxDepth = containerDepth >= budgets.maxNestingDepth;
-
-      if (cursor.indent < 4) {
-        final int firstCu = cursor.peekCodeUnitAtNonSpace();
-
-        // 1. Blockquote (`>`), subject to maxNestingDepth.
-        if (firstCu == 0x3E && !atMaxDepth) {
-          if (!_canOpenBlock()) {
-            return;
-          }
-          closeUnmatchedIfNeeded();
-          cursor.advanceToNextNonSpace();
-          cursor.advanceOffset(1);
-          if (!cursor.isAtEnd) {
-            if (cursor.pendingTabSpaces > 0) {
-              cursor.advanceColumns(1);
-            } else {
-              final int nextCu = source.codeUnitAt(cursor.index);
-              if (nextCu == 0x20 || nextCu == 0x09) {
-                cursor.advanceColumns(1);
-              }
-            }
-          }
-          _addChild(
-            _BlockQuoteOpenBlock(
-              blockId: _nextId('quote'),
-              startOffset: cursor.spanStartOffset,
-              startLine: cursor.lineNumber,
-            ),
-            cursor,
-          );
-          continue;
-        }
-
-        // 2. ATX Heading (`#`).
-        if (firstCu == 0x23) {
-          final _AtxMatch? atx = _matchAtxHeading(cursor);
-          if (atx != null) {
-            if (!_canOpenBlock()) {
-              return;
-            }
-            closeUnmatchedIfNeeded();
-            _addChild(
-              _HeadingOpenBlock(
-                blockId: _nextId('heading'),
-                startOffset: cursor.spanStartOffset,
-                startLine: cursor.lineNumber,
-                level: atx.level,
-                rawText: atx.content,
-                isSetext: false,
-                explicitId: atx.explicitId,
-              ),
-              cursor,
-            );
-            _popLeaf();
-            return;
-          }
-        }
-
-        // 3. Fenced Code Block (``` or ~~~).
-        if (firstCu == 0x60 || firstCu == 0x7E) {
-          final _FenceOpenMatch? fence = _matchFenceOpen(cursor);
-          if (fence != null) {
-            if (!_canOpenBlock()) {
-              return;
-            }
-            closeUnmatchedIfNeeded();
-            _addChild(
-              _CodeOpenBlock(
-                blockId: _nextId('code'),
-                startOffset: cursor.spanStartOffset,
-                startLine: cursor.lineNumber,
-                isFenced: true,
-                fenceChar: fence.fenceChar,
-                fenceLength: fence.fenceLength,
-                fenceIndent: fence.indent,
-                info: fence.info,
-                codeUnitOffset: cursor.spanEndOffset,
-              ),
-              cursor,
-            );
-            return;
-          }
-        }
-
-        // 4. Display Math Block (`$$` or `\[...\]`).
-        if (options.math && (firstCu == 0x24 || firstCu == 0x5C)) {
-          final _MathOpenMatch? mathMatch = _matchMathOpen(
-            cursor,
-            activeDepth: containerDepth,
-            currentContainer: currentContainer,
-          );
-          if (mathMatch != null) {
-            if (!_canOpenBlock()) {
-              return;
-            }
-            closeUnmatchedIfNeeded();
-            final _MathOpenBlock mathBlock = _MathOpenBlock(
-              blockId: _nextId('math'),
-              startOffset: cursor.spanStartOffset,
-              startLine: cursor.lineNumber,
-              kind: mathMatch.kind,
-              singleLineLatex: mathMatch.singleLineLatex,
-              firstLineLatex: mathMatch.firstLineLatex,
-            );
-            _addChild(mathBlock, cursor);
-            if (mathBlock.isClosed) {
-              _popLeaf();
-            }
-            return;
-          }
-        }
-
-        // 5. HTML Block (Conditions 1..7).
-        if (firstCu == 0x3C) {
-          final bool tipIsActivePara = !closedUnmatched && oldTipWasParagraph;
-          final int? htmlType = _matchHtmlBlockStart(
-            source,
-            cursor.firstNonSpaceIndex,
-            cursor.lineEnd,
-            allowType7: !tipIsActivePara,
-          );
-          if (htmlType != null) {
-            if (!_canOpenBlock()) {
-              return;
-            }
-            closeUnmatchedIfNeeded();
-            final _HtmlOpenBlock htmlBlock = _HtmlOpenBlock(
-              blockId: _nextId('html'),
-              startOffset: cursor.spanStartOffset,
-              startLine: cursor.lineNumber,
-              blockType: htmlType,
-            );
-            final String fullLine = cursor.restOfLine();
-            htmlBlock.lines.add(fullLine);
-            htmlBlock.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-            _addChild(htmlBlock, cursor);
-            if (htmlType <= 5 && _matchHtmlBlockEnd(htmlType, fullLine)) {
-              _popLeaf();
-            }
-            return;
-          }
-        }
-
-        // 6. Setext Heading Underline (`===` or `---`) on an active paragraph.
-        if (!closedUnmatched &&
-            allMatched &&
-            oldTip is _ParagraphOpenBlock &&
-            (firstCu == 0x3D || firstCu == 0x2D)) {
-          final int? setextLevel = _matchSetextUnderlineSpan(
-            source,
-            cursor.firstNonSpaceIndex,
-            cursor.lineEnd,
-          );
-          if (setextLevel != null) {
-            final String remaining = _extractLinkDefsFromParagraph(oldTip);
-            if (remaining.isNotEmpty) {
-              final _OpenBlock parent = _stack[_stack.length - 2];
-              _stack.removeLast();
-              _removeLastChild(parent);
-              final _SetextHeadingText parsedSetext = _extractExplicitId(
-                remaining,
-                enabled: options.explicitHeadingIds,
-              );
-              final _HeadingOpenBlock heading = _HeadingOpenBlock(
-                blockId: _nextId('heading'),
-                startOffset: oldTip.startOffset,
-                startLine: oldTip.startLine,
-                level: setextLevel,
-                rawText: parsedSetext.text,
-                isSetext: true,
-                explicitId: parsedSetext.explicitId,
-              )..extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-              _addChild(heading, cursor);
-              _popLeaf();
-              return;
-            }
-          }
-        }
-
-        // 7. GFM Pipe Table Delimiter Row interrupting an active paragraph.
-        if (options.gfmTables &&
-            !closedUnmatched &&
-            allMatched &&
-            oldTip is _ParagraphOpenBlock &&
-            (firstCu == 0x7C || firstCu == 0x2D || firstCu == 0x3A)) {
-          final List<TableAlignment>? alignments = _matchTableDelimiterRowSpan(
-            source,
-            cursor.firstNonSpaceIndex,
-            cursor.lineEnd,
-            maxColumns: budgets.maxTableColumns,
-          );
-          if (alignments != null &&
-              alignments.length <= budgets.maxTableColumns) {
-            final _TableIntercept? table = _tryConvertParagraphTailToTable(
-              oldTip,
-              alignments,
-              cursor,
-            );
-            if (table != null) {
-              return;
-            }
-          }
-        }
-
-        // 8. Thematic Break (`***`, `---`, `___`).
-        if (firstCu == 0x2A || firstCu == 0x2D || firstCu == 0x5F) {
-          if (_matchThematicBreakSpan(
-            source,
-            cursor.firstNonSpaceIndex,
-            cursor.lineEnd,
-          )) {
-            if (!_canOpenBlock()) {
-              return;
-            }
-            closeUnmatchedIfNeeded();
-            _addChild(
-              _ThematicBreakOpenBlock(
-                blockId: _nextId('hr'),
-                startOffset: cursor.spanStartOffset,
-                startLine: cursor.lineNumber,
-              ),
-              cursor,
-            );
-            _popLeaf();
-            return;
-          }
-        }
-
-        // 9. Footnote Definition (`[^label]: ...`) when not interrupting paragraph.
-        if (options.footnotes &&
-            firstCu == 0x5B &&
-            !(!closedUnmatched && oldTipWasParagraph) &&
-            !atMaxDepth) {
-          final _FootnoteStartMatch? fn = _matchFootnoteStart(cursor);
-          if (fn != null) {
-            if (!_canOpenBlock()) {
-              return;
-            }
-            closeUnmatchedIfNeeded();
-            cursor.advanceToNextNonSpace();
-            cursor.advanceOffset(fn.consumedChars);
-            final _FootnoteDefOpenBlock fnBlock = _FootnoteDefOpenBlock(
-              blockId: _nextId('fn'),
-              startOffset: cursor.spanStartOffset,
-              startLine: cursor.lineNumber,
-              label: fn.label,
-            );
-            _addChild(fnBlock, cursor);
-            continue;
-          }
-        }
-
-        // 10. List Item (`-`, `+`, `*`, `1.`, `1)`).
-        if (firstCu == 0x2D ||
-            firstCu == 0x2B ||
-            firstCu == 0x2A ||
-            isAsciiDigit(firstCu)) {
-          final bool tipIsMatchedParagraph =
-              !closedUnmatched && allMatched && oldTipWasParagraph;
-          final _ListMarkerMatch? marker = _matchListMarker(
-            cursor,
-            interruptingParagraph: tipIsMatchedParagraph,
-          );
-          if (marker != null && !atMaxDepth) {
-            final _OpenBlock tipBeforeList = closedUnmatched
-                ? _stack.last
-                : _stack[lastMatched];
-            final _OpenBlock? prevLastChild = _lastChildOf(tipBeforeList);
-            final bool reusesExistingList =
-                (tipBeforeList is _ListOpenBlock &&
-                    tipBeforeList.ordered == marker.ordered &&
-                    tipBeforeList.delimiter == marker.delimiter &&
-                    tipBeforeList.bulletChar == marker.bulletChar) ||
-                (prevLastChild is _ListOpenBlock &&
-                    prevLastChild.ordered == marker.ordered &&
-                    prevLastChild.delimiter == marker.delimiter &&
-                    prevLastChild.bulletChar == marker.bulletChar);
-            if (!_canOpenBlock(reusesExistingList ? 1 : 2)) {
-              return;
-            }
-            closeUnmatchedIfNeeded();
-            final int contentIndent = marker.indent + marker.padding;
-            cursor.advanceToNextNonSpace();
-            cursor.advanceOffset(marker.markerChars);
-            cursor.advanceColumns(marker.spacesAfterMarkerConsumed);
-
-            _ListOpenBlock? listBlock;
-            final _OpenBlock tipNow = _stack.last;
-            final _OpenBlock? lastChild = _lastChildOf(tipNow);
-            if (tipNow is _ListOpenBlock &&
-                tipNow.ordered == marker.ordered &&
-                tipNow.delimiter == marker.delimiter &&
-                tipNow.bulletChar == marker.bulletChar) {
-              listBlock = tipNow;
-            } else if (lastChild is _ListOpenBlock &&
-                lastChild.ordered == marker.ordered &&
-                lastChild.delimiter == marker.delimiter &&
-                lastChild.bulletChar == marker.bulletChar) {
-              // Reopen immediately preceding list of the same marker type.
-              if (lastChild.items.isNotEmpty &&
-                  lastChild.items.last.endsWithBlank) {
-                lastChild.tight = false;
-              }
-              _stack.add(lastChild);
-              listBlock = lastChild;
-            } else {
-              if (tipNow is _ListOpenBlock) {
-                _closeTopBlock();
-              }
-              listBlock = _ListOpenBlock(
-                blockId: _nextId('list'),
-                startOffset: cursor.spanStartOffset,
-                startLine: cursor.lineNumber,
-                ordered: marker.ordered,
-                start: marker.start,
-                delimiter: marker.delimiter,
-                bulletChar: marker.bulletChar,
-              );
-              _addChild(listBlock, cursor);
-            }
-
-            final _ListItemOpenBlock itemBlock = _ListItemOpenBlock(
-              blockId: _nextId('item'),
-              startOffset: cursor.spanStartOffset,
-              startLine: cursor.lineNumber,
-              contentIndent: contentIndent,
-              ordered: marker.ordered,
-              start: marker.start,
-              delimiter: marker.delimiter,
-              bulletChar: marker.bulletChar,
-            );
-            cursor.findNextNonSpace();
-            if (cursor.blank) {
-              itemBlock.startedBlank = true;
-              _addChild(itemBlock, cursor);
-              return;
-            }
-            _addChild(itemBlock, cursor);
-            continue;
-          }
-        }
-      }
-
-      // 11. Indented Code Block (`indent >= 4`).
-      final bool tipIsParagraph = !closedUnmatched && oldTipWasParagraph;
-      if (cursor.indent >= 4 &&
-          !cursor.blank &&
-          !tipIsParagraph &&
-          !oldTipWasTable) {
-        if (!_canOpenBlock()) {
-          return;
-        }
-        closeUnmatchedIfNeeded();
-        cursor.advanceColumns(4);
-        final _CodeOpenBlock code = _CodeOpenBlock(
-          blockId: _nextId('code'),
-          startOffset: cursor.spanStartOffset,
-          startLine: cursor.lineNumber,
-          isFenced: false,
-          codeUnitOffset: cursor.spanStartOffset,
-        );
-        code.lines.add(cursor.restOfLine());
-        code.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-        _addChild(code, cursor);
-        return;
-      }
-
-      keepCheckingStarters = false;
-      final _ = currentContainer;
-    }
-
+  void _appendRemainingLineToTip(
+    _LineCursor cursor,
+    _OpenBlock oldTip,
+    int lastMatched,
+    bool allMatched,
+    bool closedUnmatched,
+    int lineIdx,
+    int lineEnd,
+  ) {
     // Step 3: handle remaining text for the current leaf or container tip.
     if (!closedUnmatched && !allMatched) {
       // Check lazy paragraph continuation.
-      if (oldTip is _ParagraphOpenBlock && !cursor.blank) {
+      if (oldTip is _ParagraphOpenBlock && !oldTip.isTable && !cursor.blank) {
         // Lazy paragraph continuation (must not be a blank line).
         cursor.advanceToNextNonSpace();
-        oldTip.lines.add(cursor.restOfLine());
-        oldTip.sourceLineIndices.add(lineIdx);
+        final int idx = cursor.index;
+        final int cu = source.codeUnitAt(idx);
+        if (cu == 0x3A && options.definitionLists) {
+          _hasPotentialDefList = true;
+        } else if (cu == 0x2A &&
+            options.abbreviations &&
+            idx + 1 < lineEnd &&
+            source.codeUnitAt(idx + 1) == 0x5B) {
+          _hasPotentialAbbr = true;
+        }
+        oldTip.appendLine(source, idx, lineEnd, lineIdx);
         oldTip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
         _clearLastLineBlankUpTo(oldTip);
         return;
       }
-      closeUnmatchedIfNeeded();
+      _closeStackDownTo(lastMatched);
     }
 
-    final _OpenBlock tip = _stack.last;
+    final _OpenBlock tip = _stack[_stack.length - 1];
 
-    if (tip is _CodeOpenBlock) {
-      if (tip.isFenced) {
-        cursor.findNextNonSpace();
-        if (cursor.indent <= 3 &&
-            _matchFenceClose(
-              source,
-              cursor.firstNonSpaceIndex,
-              cursor.lineEnd,
-              tip.fenceChar,
-              tip.fenceLength,
-            )) {
-          tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-          _popLeaf();
-          return;
-        }
-        // Strip up to opening fence indent spaces.
-        cursor.advanceColumns(tip.fenceIndent);
-        tip.lines.add(cursor.restOfLine());
-        tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-        return;
-      } else {
-        // Indented code block.
-        cursor.findNextNonSpace();
-        if (cursor.blank) {
-          cursor.advanceColumns(4);
-          tip.lines.add(cursor.restOfLine());
-          tip.lastLineBlank = true;
-          tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-          return;
-        }
-        if (cursor.indent >= 4) {
-          cursor.advanceColumns(4);
-          tip.lines.add(cursor.restOfLine());
-          tip.lastLineBlank = false;
-          tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-          return;
-        }
-        _popLeaf();
-      }
-    }
-
-    if (tip is _MathOpenBlock) {
-      if (_tryCloseMathBlock(tip, cursor)) {
+    if (tip is _CodeOpenBlock ||
+        tip is _MathOpenBlock ||
+        tip is _HtmlOpenBlock) {
+      if (_appendLiteralTipLine(tip, cursor)) {
         return;
       }
-      tip.lines.add(cursor.restOfLine());
-      tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-      return;
     }
 
-    if (tip is _HtmlOpenBlock) {
-      if (tip.blockType >= 6) {
-        cursor.findNextNonSpace();
-        if (cursor.blank) {
-          _popLeaf();
-          _markBlankLineOnStack();
-          return;
-        }
-      }
-      final String text = cursor.restOfLine();
-      tip.lines.add(text);
-      tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
-      if (tip.blockType <= 5 && _matchHtmlBlockEnd(tip.blockType, text)) {
-        _popLeaf();
-      }
-      return;
-    }
-
-    if (tip is _TableOpenBlock) {
+    if (tip is _ParagraphOpenBlock && tip.isTable) {
       cursor.findNextNonSpace();
       if (cursor.blank) {
         _popLeaf();
         _markBlankLineOnStack();
         return;
       }
-      if (tip.rows.length < budgets.maxTableRows) {
+      if (tip.tableRows.length < budgets.maxTableRows) {
         final List<String> rowCells = _splitTableRowSpan(
           source,
           cursor.index,
           cursor.lineEnd,
-          maxColumns: tip.alignments.length,
+          maxColumns: tip.tableAlignments.length,
         );
-        tip.rows.add(rowCells);
+        tip.tableRows.add(rowCells);
         tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
         return;
       } else {
@@ -1537,7 +1769,7 @@ final class _BlockEngine {
       }
     }
 
-    final _OpenBlock activeTip = _stack.last;
+    final _OpenBlock activeTip = _stack[_stack.length - 1];
     cursor.findNextNonSpace();
 
     if (cursor.blank) {
@@ -1550,8 +1782,17 @@ final class _BlockEngine {
 
     if (activeTip is _ParagraphOpenBlock) {
       cursor.advanceToNextNonSpace();
-      activeTip.lines.add(cursor.restOfLine());
-      activeTip.sourceLineIndices.add(lineIdx);
+      final int idx = cursor.index;
+      final int cu = source.codeUnitAt(idx);
+      if (cu == 0x3A && options.definitionLists) {
+        _hasPotentialDefList = true;
+      } else if (cu == 0x2A &&
+          options.abbreviations &&
+          idx + 1 < lineEnd &&
+          source.codeUnitAt(idx + 1) == 0x5B) {
+        _hasPotentialAbbr = true;
+      }
+      activeTip.appendLine(source, idx, lineEnd, lineIdx);
       activeTip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
       _clearLastLineBlankUpTo(activeTip);
       return;
@@ -1562,8 +1803,15 @@ final class _BlockEngine {
       return;
     }
     cursor.advanceToNextNonSpace();
+    final int idx = cursor.index;
+    if (options.abbreviations &&
+        idx + 1 < lineEnd &&
+        source.codeUnitAt(idx) == 0x2A &&
+        source.codeUnitAt(idx + 1) == 0x5B) {
+      _hasPotentialAbbr = true;
+    }
     final _ParagraphOpenBlock para = _ParagraphOpenBlock(
-      blockId: _nextId('para'),
+      blockId: _nextId(),
       startOffset: cursor.spanStartOffset,
       startLine: cursor.lineNumber,
     );
@@ -1576,25 +1824,388 @@ final class _BlockEngine {
     } else if (activeTip is _FootnoteDefOpenBlock) {
       activeTip.hadBlankLine = false;
     }
-    para.lines.add(cursor.restOfLine());
-    para.sourceLineIndices.add(lineIdx);
+    para.appendLine(source, idx, lineEnd, lineIdx);
     para.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
     _clearLastLineBlankUpTo(para);
     _addChild(para, cursor);
   }
 
-  _TableIntercept? _tryConvertParagraphTailToTable(
+  int _tryOpenListItem(
+    _LineCursor cursor, {
+    required int lastMatched,
+    required bool allMatched,
+    required bool closedUnmatched,
+    required bool oldTipWasParagraph,
+    required bool atMaxDepth,
+  }) {
+    final bool tipIsMatchedParagraph =
+        !closedUnmatched && allMatched && oldTipWasParagraph;
+    if (atMaxDepth ||
+        !_matchListMarker(
+          cursor,
+          interruptingParagraph: tipIsMatchedParagraph,
+          skipThematicCheck: true,
+        )) {
+      return 0;
+    }
+    final _OpenBlock tipBeforeList = closedUnmatched
+        ? _stack[_stack.length - 1]
+        : _stack[lastMatched];
+    final _OpenBlock? prevLastChild = _lastChildOf(tipBeforeList);
+    final bool reusesExistingList =
+        (tipBeforeList is _ListOpenBlock &&
+            tipBeforeList.ordered == _listOrdered &&
+            tipBeforeList.delimiter == _listDelimiter &&
+            tipBeforeList.bulletChar == _listBulletChar) ||
+        (prevLastChild is _ListOpenBlock &&
+            prevLastChild.ordered == _listOrdered &&
+            prevLastChild.delimiter == _listDelimiter &&
+            prevLastChild.bulletChar == _listBulletChar);
+    if (!_canOpenBlock(reusesExistingList ? 1 : 2)) {
+      return -1;
+    }
+    if (!closedUnmatched) {
+      _closeStackDownTo(lastMatched);
+    }
+    final int contentIndent = _listIndent + _listPadding;
+    cursor.advanceToNextNonSpace();
+    cursor.advanceOffset(_listMarkerChars);
+    cursor.advanceColumns(_listSpacesConsumed);
+
+    _ListOpenBlock? listBlock;
+    final _OpenBlock tipNow = _stack[_stack.length - 1];
+    final _OpenBlock? lastChild = _lastChildOf(tipNow);
+    if (tipNow is _ListOpenBlock &&
+        tipNow.ordered == _listOrdered &&
+        tipNow.delimiter == _listDelimiter &&
+        tipNow.bulletChar == _listBulletChar) {
+      listBlock = tipNow;
+    } else if (lastChild is _ListOpenBlock &&
+        lastChild.ordered == _listOrdered &&
+        lastChild.delimiter == _listDelimiter &&
+        lastChild.bulletChar == _listBulletChar) {
+      // Reopen immediately preceding list of the same marker type.
+      if (lastChild.items.isNotEmpty &&
+          lastChild.items[lastChild.items.length - 1].endsWithBlank) {
+        lastChild.tight = false;
+      }
+      _stack.add(lastChild);
+      listBlock = lastChild;
+    } else {
+      if (tipNow is _ListOpenBlock) {
+        _closeTopBlock();
+      }
+      listBlock = _ListOpenBlock(
+        blockId: _nextId(),
+        startOffset: cursor.spanStartOffset,
+        startLine: cursor.lineNumber,
+        ordered: _listOrdered,
+        start: _listStart,
+        delimiter: _listDelimiter,
+        bulletChar: _listBulletChar,
+      );
+      _addChild(listBlock, cursor);
+    }
+
+    final _ListItemOpenBlock itemBlock = _ListItemOpenBlock(
+      blockId: _nextId(),
+      startOffset: cursor.spanStartOffset,
+      startLine: cursor.lineNumber,
+      contentIndent: contentIndent,
+      ordered: _listOrdered,
+      start: _listStart,
+      delimiter: _listDelimiter,
+      bulletChar: _listBulletChar,
+    );
+    cursor.findNextNonSpace();
+    if (cursor.blank) {
+      itemBlock.startedBlank = true;
+      _addChild(itemBlock, cursor);
+      return -1;
+    }
+    _addChild(itemBlock, cursor);
+    return 1;
+  }
+
+  bool _tryOpenFencedCode(
+    _LineCursor cursor, {
+    required int lastMatched,
+    required bool closedUnmatched,
+  }) {
+    final _FenceOpenMatch? fence = _matchFenceOpen(cursor);
+    if (fence == null) {
+      return false;
+    }
+    if (!_canOpenBlock()) {
+      return true;
+    }
+    if (!closedUnmatched) {
+      _closeStackDownTo(lastMatched);
+    }
+    _addChild(
+      _CodeOpenBlock(
+        blockId: _nextId(),
+        startOffset: cursor.spanStartOffset,
+        startLine: cursor.lineNumber,
+        isFenced: true,
+        fenceChar: fence.fenceChar,
+        fenceLength: fence.fenceLength,
+        fenceIndent: fence.indent,
+        info: fence.info,
+        codeUnitOffset: cursor.spanEndOffset,
+      ),
+      cursor,
+    );
+    return true;
+  }
+
+  int _tryOpenFootnoteDef(
+    _LineCursor cursor, {
+    required int lastMatched,
+    required bool closedUnmatched,
+  }) {
+    final _FootnoteStartMatch? fn = _matchFootnoteStart(cursor);
+    if (fn == null) {
+      return 0;
+    }
+    if (!_canOpenBlock()) {
+      return -1;
+    }
+    if (!closedUnmatched) {
+      _closeStackDownTo(lastMatched);
+    }
+    cursor.advanceToNextNonSpace();
+    cursor.advanceOffset(fn.consumedChars);
+    final _FootnoteDefOpenBlock fnBlock = _FootnoteDefOpenBlock(
+      blockId: _nextId(),
+      startOffset: cursor.spanStartOffset,
+      startLine: cursor.lineNumber,
+      label: fn.label,
+    );
+    _addChild(fnBlock, cursor);
+    return 1;
+  }
+
+  bool _appendLiteralTipLine(_OpenBlock tip, _LineCursor cursor) {
+    if (tip is _CodeOpenBlock) {
+      if (tip.isFenced) {
+        cursor.findNextNonSpace();
+        if (cursor.indent <= 3 &&
+            _matchFenceClose(
+              source,
+              cursor.firstNonSpaceIndex,
+              cursor.lineEnd,
+              tip.fenceChar,
+              tip.fenceLength,
+            )) {
+          tip.isClosed = true;
+          tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+          _popLeaf();
+          return true;
+        }
+        // Strip up to opening fence indent spaces.
+        cursor.advanceColumns(tip.fenceIndent);
+        tip.appendLine(source, cursor);
+        tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+        return true;
+      } else {
+        // Indented code block.
+        cursor.findNextNonSpace();
+        if (cursor.blank) {
+          cursor.advanceColumns(4);
+          tip.appendLine(source, cursor, allowContiguous: false);
+          tip.lastLineBlank = true;
+          tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+          return true;
+        }
+        if (cursor.indent >= 4) {
+          cursor.advanceColumns(4);
+          tip.appendLine(source, cursor, allowContiguous: false);
+          tip.lastLineBlank = false;
+          tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+          return true;
+        }
+        _popLeaf();
+        return false;
+      }
+    }
+
+    if (tip is _MathOpenBlock) {
+      if (_tryCloseMathBlock(tip, cursor)) {
+        return true;
+      }
+      tip.lines.add(cursor.restOfLine());
+      tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+      return true;
+    }
+
+    if (tip is _HtmlOpenBlock) {
+      if (tip.blockType >= 6) {
+        cursor.findNextNonSpace();
+        if (cursor.blank) {
+          _popLeaf();
+          _markBlankLineOnStack();
+          return true;
+        }
+      }
+      final String text = cursor.restOfLine();
+      tip.lines.add(text);
+      tip.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+      if (tip.blockType <= 5 && _matchHtmlBlockEnd(tip.blockType, text)) {
+        _popLeaf();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  bool _tryOpenMathBlock(
+    _LineCursor cursor,
+    Int32List lineRanges, {
+    required int lastMatched,
+    required bool closedUnmatched,
+    required int containerDepth,
+    required _OpenBlock currentContainer,
+  }) {
+    final _MathOpenMatch? mathMatch = _matchMathOpen(
+      cursor,
+      lineRanges,
+      activeDepth: containerDepth,
+      currentContainer: currentContainer,
+    );
+    if (mathMatch == null) {
+      return false;
+    }
+    if (!_canOpenBlock()) {
+      return true;
+    }
+    if (!closedUnmatched) {
+      _closeStackDownTo(lastMatched);
+    }
+    final _MathOpenBlock mathBlock = _MathOpenBlock(
+      blockId: _nextId(),
+      startOffset: cursor.spanStartOffset,
+      startLine: cursor.lineNumber,
+      kind: mathMatch.kind,
+      singleLineLatex: mathMatch.singleLineLatex,
+      firstLineLatex: mathMatch.firstLineLatex,
+    );
+    _addChild(mathBlock, cursor);
+    if (mathBlock.isClosed) {
+      _popLeaf();
+    }
+    return true;
+  }
+
+  bool _tryOpenHtmlBlock(
+    _LineCursor cursor, {
+    required int lastMatched,
+    required bool closedUnmatched,
+    required bool oldTipWasParagraph,
+  }) {
+    final bool tipIsActivePara = !closedUnmatched && oldTipWasParagraph;
+    final int? htmlType = _matchHtmlBlockStart(
+      source,
+      cursor.firstNonSpaceIndex,
+      cursor.lineEnd,
+      allowType7: !tipIsActivePara,
+    );
+    if (htmlType == null) {
+      return false;
+    }
+    if (!_canOpenBlock()) {
+      return true;
+    }
+    if (!closedUnmatched) {
+      _closeStackDownTo(lastMatched);
+    }
+    final _HtmlOpenBlock htmlBlock = _HtmlOpenBlock(
+      blockId: _nextId(),
+      startOffset: cursor.spanStartOffset,
+      startLine: cursor.lineNumber,
+      blockType: htmlType,
+    );
+    final String fullLine = cursor.restOfLine();
+    htmlBlock.lines.add(fullLine);
+    htmlBlock.extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+    _addChild(htmlBlock, cursor);
+    if (htmlType <= 5 && _matchHtmlBlockEnd(htmlType, fullLine)) {
+      _popLeaf();
+    }
+    return true;
+  }
+
+  bool _tryConvertParagraphToSetext(
+    _ParagraphOpenBlock oldTip,
+    _LineCursor cursor,
+  ) {
+    final int? setextLevel = _matchSetextUnderlineSpan(
+      source,
+      cursor.firstNonSpaceIndex,
+      cursor.lineEnd,
+    );
+    if (setextLevel == null) {
+      return false;
+    }
+    final String remaining = _extractLinkDefsFromParagraph(oldTip);
+    if (remaining.isEmpty) {
+      return false;
+    }
+    final _OpenBlock parent = _stack[_stack.length - 2];
+    _stack.removeLast();
+    _removeLastChild(parent);
+    _extractExplicitId(remaining, enabled: options.explicitHeadingIds);
+    final _HeadingOpenBlock heading = _HeadingOpenBlock(
+      blockId: _nextId(),
+      startOffset: oldTip.startOffset,
+      startLine: oldTip.startLine,
+      level: setextLevel,
+      rawText: _explicitText,
+      isSetext: true,
+      explicitId: _explicitId,
+    )..extendSpan(cursor.spanEndOffset, cursor.lineNumber);
+    _addChild(heading, cursor);
+    _popLeaf();
+    return true;
+  }
+
+  bool _tryInterceptTableFromParagraph(
+    _ParagraphOpenBlock oldTip,
+    _LineCursor cursor,
+    Int32List lineRanges,
+  ) {
+    final List<TableAlignment>? alignments = _matchTableDelimiterRowSpan(
+      source,
+      cursor.firstNonSpaceIndex,
+      cursor.lineEnd,
+      maxColumns: budgets.maxTableColumns,
+    );
+    if (alignments == null || alignments.length > budgets.maxTableColumns) {
+      return false;
+    }
+    return _tryConvertParagraphTailToTable(
+      oldTip,
+      alignments,
+      cursor,
+      lineRanges,
+    );
+  }
+
+  bool _tryConvertParagraphTailToTable(
     _ParagraphOpenBlock para,
     List<TableAlignment> alignments,
     _LineCursor delimiterCursor,
+    Int32List lineRanges,
   ) {
     // First consume any leading link reference definitions from the paragraph!
     final String remaining = _extractLinkDefsFromParagraph(para);
     if (remaining.isEmpty) {
-      return null;
+      return false;
     }
-    final List<String> remainingLines = remaining.split('\n');
-    final String headerLine = remainingLines.last;
+    final int lastNl = remaining.lastIndexOf('\n');
+    final String headerLine = lastNl == -1
+        ? remaining
+        : remaining.substring(lastNl + 1);
     final List<String> headerCells = _splitTableRowSpan(
       headerLine,
       0,
@@ -1602,7 +2213,7 @@ final class _BlockEngine {
       maxColumns: alignments.length + 1,
     );
     if (headerCells.length != alignments.length) {
-      return null;
+      return false;
     }
     // Check that either header or delimiter line actually contains a pipe
     // unless multi-column. Single-column table without pipes would shadow
@@ -1614,67 +2225,70 @@ final class _BlockEngine {
           delimiterCursor.lineEnd,
           0x7C,
         )) {
-      return null;
+      return false;
     }
 
-    final _OpenBlock parent = _stack[_stack.length - 2];
-    if (remainingLines.length == 1) {
-      // Whole paragraph becomes the table header (replaces para, net 0 blocks).
-      final int tableStartOffset = para.startOffset;
-      final int tableStartLine = para.startLine;
-      _stack.removeLast();
-      _removeLastChild(parent);
-      _blockCount--;
-      final _TableOpenBlock table = _TableOpenBlock(
-        blockId: _nextId('table'),
-        startOffset: tableStartOffset,
-        startLine: tableStartLine,
-        alignments: alignments,
-        headerCells: headerCells,
-      )..extendSpan(delimiterCursor.spanEndOffset, delimiterCursor.lineNumber);
-      _addChild(table, delimiterCursor);
-      return _TableIntercept(table);
+    if (lastNl == -1) {
+      // Convert the paragraph block to a table in place.
+      para.blockId = _nextId();
+      para.isTable = true;
+      para.tableAlignments = alignments;
+      para.tableHeaderCells = headerCells;
+      para.tableRows = <List<String>>[];
+      para.lastLineBlank = false;
+      para.endsWithBlank = false;
+      para.extendSpan(
+        delimiterCursor.spanEndOffset,
+        delimiterCursor.lineNumber,
+      );
+      return true;
     } else {
       if (!_canOpenBlock()) {
-        return null;
+        return false;
       }
+      final List<String> remainingLines = remaining.split('\n');
       // Split preceding lines into closed paragraph, then open table.
-      final int headerSourceLineIdx = para.sourceLineIndices.length - 1;
-      final int headerSrcLineIndex =
-          para.sourceLineIndices[headerSourceLineIdx];
-      para.lines
-        ..clear()
-        ..addAll(remainingLines.sublist(0, remainingLines.length - 1));
+      final int headerSourceLineIdx = para.lineCount - 1;
+      final int headerSrcLineIndex = para.firstLineIndex + headerSourceLineIdx;
+      para.rawContiguous = false;
+      para.finalizedText = null;
+      para._lines = remainingLines.sublist(0, remainingLines.length - 1);
       if (headerSourceLineIdx > 0) {
-        final int prevLineIndex =
-            para.sourceLineIndices[headerSourceLineIdx - 1];
-        para.endOffset = _lineEndOffset(prevLineIndex);
+        final int prevLineIndex = headerSrcLineIndex - 1;
+        final int prevEnd = lineRanges[prevLineIndex * 2 + 1];
+        para.endOffset =
+            baseOffset + (prevEnd < source.length ? prevEnd + 1 : prevEnd);
         para.endLine = _lineNumber(prevLineIndex);
-        para.sourceLineIndices.removeRange(
-          headerSourceLineIdx,
-          para.sourceLineIndices.length,
-        );
+        para.lineCount--;
       }
       _popLeaf();
-      final _TableOpenBlock table = _TableOpenBlock(
-        blockId: _nextId('table'),
-        startOffset: _lineStartOffset(headerSrcLineIndex),
-        startLine: _lineNumber(headerSrcLineIndex),
-        alignments: alignments,
-        headerCells: headerCells,
-      )..extendSpan(delimiterCursor.spanEndOffset, delimiterCursor.lineNumber);
+      final _ParagraphOpenBlock table =
+          _ParagraphOpenBlock(
+              blockId: _nextId(),
+              startOffset: baseOffset + lineRanges[headerSrcLineIndex * 2],
+              startLine: _lineNumber(headerSrcLineIndex),
+            )
+            ..isTable = true
+            ..tableAlignments = alignments
+            ..tableHeaderCells = headerCells
+            ..tableRows = <List<String>>[]
+            ..extendSpan(
+              delimiterCursor.spanEndOffset,
+              delimiterCursor.lineNumber,
+            );
       _addChild(table, delimiterCursor);
-      return _TableIntercept(table);
+      return true;
     }
   }
 
   void _addChild(_OpenBlock child, _LineCursor cursor) {
-    final _OpenBlock parent = _stack.last;
+    final _OpenBlock parent = _stack[_stack.length - 1];
     if (parent is _ListItemOpenBlock) {
       if ((parent.hadBlankBeforeChild ||
               (parent.children.isNotEmpty &&
-                  parent.children.last is _ListOpenBlock &&
-                  parent.children.last.endsWithBlank)) &&
+                  parent.children[parent.children.length - 1]
+                      is _ListOpenBlock &&
+                  parent.children[parent.children.length - 1].endsWithBlank)) &&
           parent.children.isNotEmpty) {
         parent.hasBlankBetweenChildren = true;
       }
@@ -1682,7 +2296,8 @@ final class _BlockEngine {
       parent.hadContentLine = true;
       parent.children.add(child);
     } else if (parent is _ListOpenBlock && child is _ListItemOpenBlock) {
-      if (parent.items.isNotEmpty && parent.items.last.endsWithBlank) {
+      if (parent.items.isNotEmpty &&
+          parent.items[parent.items.length - 1].endsWithBlank) {
         parent.tight = false;
       }
       parent.items.add(child);
@@ -1712,16 +2327,16 @@ final class _BlockEngine {
 
   _OpenBlock? _lastChildOf(_OpenBlock parent) {
     if (parent is _DocOpenBlock && parent.children.isNotEmpty) {
-      return parent.children.last;
+      return parent.children[parent.children.length - 1];
     }
     if (parent is _BlockQuoteOpenBlock && parent.children.isNotEmpty) {
-      return parent.children.last;
+      return parent.children[parent.children.length - 1];
     }
     if (parent is _ListItemOpenBlock && parent.children.isNotEmpty) {
-      return parent.children.last;
+      return parent.children[parent.children.length - 1];
     }
     if (parent is _FootnoteDefOpenBlock && parent.children.isNotEmpty) {
-      return parent.children.last;
+      return parent.children[parent.children.length - 1];
     }
     return null;
   }
@@ -1749,7 +2364,7 @@ final class _BlockEngine {
   }
 
   void _markBlankLineOnStack() {
-    final _OpenBlock tip = _stack.last;
+    final _OpenBlock tip = _stack[_stack.length - 1];
     tip.lastLineBlank = true;
     tip.endsWithBlank = true;
     if (tip is _ListItemOpenBlock) {
@@ -1758,7 +2373,7 @@ final class _BlockEngine {
       }
     } else if (tip is _ListOpenBlock) {
       if (tip.items.isNotEmpty) {
-        tip.items.last.endsWithBlank = true;
+        tip.items[tip.items.length - 1].endsWithBlank = true;
       }
     } else if (tip is _FootnoteDefOpenBlock) {
       tip.hadBlankLine = true;
@@ -1771,7 +2386,7 @@ final class _BlockEngine {
         b.endsWithBlank = true;
       } else if (b is _ListOpenBlock && i == _stack.length - 2) {
         if (b.items.isNotEmpty) {
-          b.items.last.endsWithBlank = true;
+          b.items[b.items.length - 1].endsWithBlank = true;
         }
       }
     }
@@ -1786,12 +2401,8 @@ final class _BlockEngine {
 
   void _finalizeOpenBlock(_OpenBlock block) {
     block.isOpen = false;
-    if (block is _ParagraphOpenBlock) {
-      final String remaining = _extractLinkDefsFromParagraph(block);
-      block.lines
-        ..clear()
-        ..add(remaining);
-      block.finalizedText = remaining;
+    if (block is _ParagraphOpenBlock && !block.isTable) {
+      block.finalizedText = _extractLinkDefsFromParagraph(block);
     } else if (block is _BlockQuoteOpenBlock) {
       // A blank line inside a blockquote (`>`) does not propagate out as a
       // blank line separating outer list items.
@@ -1800,21 +2411,22 @@ final class _BlockEngine {
     } else if (block is _ListItemOpenBlock) {
       _extendFromChildren(block, block.children);
       if (block.children.isNotEmpty &&
-          block.children.last is _ListOpenBlock &&
-          block.children.last.endsWithBlank) {
+          block.children[block.children.length - 1] is _ListOpenBlock &&
+          block.children[block.children.length - 1].endsWithBlank) {
         block.endsWithBlank = true;
       }
       if (block.hasBlankBetweenChildren) {
         // Parent list becomes loose when item contains >= 2 direct blocks
         // separated by a blank line.
-        final _OpenBlock parent = _stack.last;
+        final _OpenBlock parent = _stack[_stack.length - 1];
         if (parent is _ListOpenBlock) {
           parent.tight = false;
         }
       }
     } else if (block is _ListOpenBlock) {
       _extendFromChildren(block, block.items);
-      if (block.items.isNotEmpty && block.items.last.endsWithBlank) {
+      if (block.items.isNotEmpty &&
+          block.items[block.items.length - 1].endsWithBlank) {
         block.endsWithBlank = true;
       }
       // Check item-to-item blank lines and internal child blank lines.
@@ -1827,7 +2439,8 @@ final class _BlockEngine {
         if (i + 1 < block.items.length) {
           final _ListItemOpenBlock nextItem = block.items[i + 1];
           if (item.endsWithBlank ||
-              (item.children.isNotEmpty && item.children.last.endsWithBlank)) {
+              (item.children.isNotEmpty &&
+                  item.children[item.children.length - 1].endsWithBlank)) {
             block.tight = false;
             break;
           }
@@ -1843,7 +2456,7 @@ final class _BlockEngine {
     }
 
     if (_stack.length > 1) {
-      final _OpenBlock parent = _stack.last;
+      final _OpenBlock parent = _stack[_stack.length - 1];
       if (block.endOffset > parent.endOffset) {
         parent.endOffset = block.endOffset;
       }
@@ -1857,7 +2470,7 @@ final class _BlockEngine {
     if (children.isEmpty) {
       return;
     }
-    final _OpenBlock last = children.last;
+    final _OpenBlock last = children[children.length - 1];
     if (last.endOffset > parent.endOffset) {
       parent.endOffset = last.endOffset;
     }
@@ -1867,10 +2480,54 @@ final class _BlockEngine {
   }
 
   String _extractLinkDefsFromParagraph(_ParagraphOpenBlock para) {
-    if (para.lines.isEmpty) {
+    if (para.lineCount == 0) {
       return '';
     }
-    final String first = para.lines.first;
+    if (para.rawContiguous) {
+      final int start = para.rawStart;
+      final int end = para.rawEnd;
+      if (start >= end) {
+        return '';
+      }
+      final int cu0 = source.codeUnitAt(start);
+      bool mayStartWithBracket = false;
+      if (cu0 == 0x5B) {
+        mayStartWithBracket = true;
+      } else if (cu0 <= 0x20 || cu0 >= 0x80) {
+        int nl = source.indexOf('\n', start);
+        if (nl < 0 || nl > end) {
+          nl = end;
+        }
+        final String trimmed = source.substring(start, nl).trimLeft();
+        mayStartWithBracket =
+            trimmed.isNotEmpty && trimmed.codeUnitAt(0) == 0x5B;
+      }
+      if (!mayStartWithBracket) {
+        final int lastCu = source.codeUnitAt(end - 1);
+        if (lastCu > 0x20 && lastCu < 0x80) {
+          return source.substring(start, end);
+        }
+        int trimmedEnd = end;
+        while (trimmedEnd > start) {
+          final int cu = source.codeUnitAt(trimmedEnd - 1);
+          if (cu == 0x20 || cu == 0x09) {
+            trimmedEnd--;
+          } else if (cu <= 0x20 || cu >= 0x80) {
+            return source.substring(start, end).trimRight();
+          } else {
+            break;
+          }
+        }
+        return start == trimmedEnd ? '' : source.substring(start, trimmedEnd);
+      }
+      return _consumeLinkDefsFromText(para, source.substring(start, end));
+    }
+
+    final List<String>? lines = para._lines;
+    if (lines == null || lines.isEmpty) {
+      return '';
+    }
+    final String first = lines.first;
     bool mayStartWithBracket = false;
     if (first.isNotEmpty) {
       final int cu0 = first.codeUnitAt(0);
@@ -1883,11 +2540,19 @@ final class _BlockEngine {
       }
     }
     if (!mayStartWithBracket) {
-      return para.lines.length == 1
+      return lines.length == 1
           ? first.trimRight()
-          : para.lines.join('\n').trimRight();
+          : lines.join('\n').trimRight();
     }
-    String text = para.lines.length == 1 ? first : para.lines.join('\n');
+    final String text = lines.length == 1 ? first : lines.join('\n');
+    return _consumeLinkDefsFromText(para, text);
+  }
+
+  String _consumeLinkDefsFromText(
+    _ParagraphOpenBlock para,
+    String initialText,
+  ) {
+    String text = initialText;
     while (text.isNotEmpty) {
       final _LinkDefMatch? match = _parseLeadingLinkDef(
         text,
@@ -1898,10 +2563,14 @@ final class _BlockEngine {
         break;
       }
       final String norm = normalizeLinkLabel(match.label);
+      Map<String, MarkdownLinkDefinition>? defs = _linkDefinitions;
       if (norm.isNotEmpty &&
-          _linkDefinitions.length < _maxLinkDefinitions &&
-          !_linkDefinitions.containsKey(norm)) {
-        _linkDefinitions[norm] = MarkdownLinkDefinition(
+          (defs == null ||
+              (defs.length < _maxLinkDefinitions && !defs.containsKey(norm)))) {
+        final Map<String, MarkdownLinkDefinition> target = defs ??=
+            <String, MarkdownLinkDefinition>{};
+        _linkDefinitions = target;
+        target[norm] = MarkdownLinkDefinition(
           label: match.label,
           normalizedLabel: norm,
           destination: match.destination,
@@ -1920,23 +2589,38 @@ final class _BlockEngine {
   }
 
   RawBlock? _buildBlock(_OpenBlock block, {required bool isTopLevel}) {
-    final SourceSpan span = SourceSpan(
+    final SourceSpan span = createUncheckedSpan(
       startOffset: block.startOffset,
-      endOffset: block.endOffset,
+      endOffset: block.endOffset < block.startOffset
+          ? block.startOffset
+          : block.endOffset,
       startLine: block.startLine,
-      endLine: block.endLine,
+      endLine: block.endLine < block.startLine
+          ? block.startLine
+          : block.endLine,
     );
 
     if (block is _ParagraphOpenBlock) {
+      if (block.isTable) {
+        return RawTable(
+          blockId: block.blockId,
+          span: span,
+          alignments: freezeFreshList(block.tableAlignments),
+          headerCells: block.tableHeaderCells,
+          rows: block.tableRows,
+          endsWithBlankLine: block.endsWithBlank,
+        );
+      }
       final String text =
-          block.finalizedText ??
-          (block.lines.length == 1 ? block.lines.first : block.lines.join('\n'))
-              .trimRight();
+          block.finalizedText ?? block.buildUnfinalizedText(source);
       if (text.isEmpty) {
         return null;
       }
       // Check abbreviation definition `*[ABBR]: Title`.
-      if (options.abbreviations && isTopLevel && text.contains('*[')) {
+      if (_hasPotentialAbbr &&
+          options.abbreviations &&
+          isTopLevel &&
+          text.contains('*[')) {
         final String? remaining = _extractAbbreviationDefs(text);
         if (remaining == null) {
           return null;
@@ -1959,6 +2643,7 @@ final class _BlockEngine {
     }
 
     if (block is _HeadingOpenBlock) {
+      _hasHeading = true;
       return RawHeading(
         blockId: block.blockId,
         span: span,
@@ -1972,11 +2657,28 @@ final class _BlockEngine {
 
     if (block is _CodeOpenBlock) {
       if (block.isFenced) {
-        final String literal = block.lines.isEmpty
-            ? ''
-            : '${block.lines.join('\n')}\n';
-        final String unescapedInfo = unescapeMarkdownString(block.info.trim());
-        final String? lang = _firstWordBeforeSpaceOrTab(unescapedInfo);
+        final String literal;
+        if (block.rawContiguous) {
+          literal = '${source.substring(block.rawStart, block.rawEnd)}\n';
+        } else {
+          final List<String>? lines = block._lines;
+          literal = (lines == null || lines.isEmpty)
+              ? ''
+              : '${lines.join('\n')}\n';
+        }
+        final String rawInfo = block.info;
+        final String unescapedInfo;
+        final String? lang;
+        if (rawInfo.isEmpty) {
+          unescapedInfo = '';
+          lang = null;
+        } else if (_isPlainSingleWordInfo(rawInfo)) {
+          unescapedInfo = rawInfo;
+          lang = rawInfo;
+        } else {
+          unescapedInfo = unescapeMarkdownString(rawInfo.trim());
+          lang = _firstWordBeforeSpaceOrTab(unescapedInfo);
+        }
         return RawCodeBlock(
           blockId: block.blockId,
           span: span,
@@ -1985,16 +2687,23 @@ final class _BlockEngine {
           literal: literal,
           isFenced: true,
           codeUnitOffset: block.codeUnitOffset,
+          fenceChar: block.fenceChar,
+          fenceIndent: block.fenceIndent,
+          isClosed: block.isClosed,
           endsWithBlankLine: block.endsWithBlank,
         );
       } else {
-        int end = block.lines.length;
-        while (end > 0 && block.lines[end - 1].trim().isEmpty) {
-          end--;
+        final String literal;
+        if (block.rawContiguous) {
+          literal = '${source.substring(block.rawStart, block.rawEnd)}\n';
+        } else {
+          final List<String> lines = block._lines ?? const <String>[];
+          int end = lines.length;
+          while (end > 0 && lines[end - 1].trim().isEmpty) {
+            end--;
+          }
+          literal = end == 0 ? '' : '${lines.sublist(0, end).join('\n')}\n';
         }
-        final String literal = end == 0
-            ? ''
-            : '${block.lines.sublist(0, end).join('\n')}\n';
         return RawCodeBlock(
           blockId: block.blockId,
           span: span,
@@ -2008,6 +2717,111 @@ final class _BlockEngine {
       }
     }
 
+    if (block is _BlockQuoteOpenBlock) {
+      final List<RawBlock> children = <RawBlock>[];
+      final List<_OpenBlock> quoteChildren = block.children;
+      for (int i = 0; i < quoteChildren.length; i++) {
+        final RawBlock? built = _buildBlock(
+          quoteChildren[i],
+          isTopLevel: false,
+        );
+        if (built != null) {
+          children.add(built);
+        }
+      }
+      if (options.alerts && children.isNotEmpty) {
+        final RawBlock first = children[0];
+        if (first is RawParagraph &&
+            first.rawText.length >= 4 &&
+            first.rawText.codeUnitAt(0) == 0x5B &&
+            first.rawText.codeUnitAt(1) == 0x21) {
+          final RawAlert? alert = _tryExtractAlert(
+            blockId: block.blockId,
+            span: span,
+            children: children,
+            endsWithBlank: block.endsWithBlank,
+          );
+          if (alert != null) {
+            return alert;
+          }
+        }
+      }
+      return RawBlockQuote(
+        blockId: block.blockId,
+        span: span,
+        children: children,
+        endsWithBlankLine: block.endsWithBlank,
+      );
+    }
+
+    if (block is _ListOpenBlock) {
+      final List<RawListItem> items = <RawListItem>[];
+      final List<_ListItemOpenBlock> rawItems = block.items;
+      for (int i = 0; i < rawItems.length; i++) {
+        final RawBlock? built = _buildBlock(rawItems[i], isTopLevel: false);
+        if (built is RawListItem) {
+          items.add(built);
+        }
+      }
+      return RawList(
+        blockId: block.blockId,
+        span: span,
+        ordered: block.ordered,
+        start: block.start,
+        tight: block.tight,
+        delimiter: block.delimiter,
+        items: items,
+        endsWithBlankLine: block.endsWithBlank,
+      );
+    }
+
+    if (block is _ListItemOpenBlock) {
+      final List<RawBlock> children = <RawBlock>[];
+      final List<_OpenBlock> openChildren = block.children;
+      for (int i = 0; i < openChildren.length; i++) {
+        final RawBlock? built = _buildBlock(openChildren[i], isTopLevel: false);
+        if (built != null) {
+          children.add(built);
+        }
+      }
+      int taskStateCode = -1;
+      if (options.gfmTaskLists && children.isNotEmpty) {
+        final RawBlock first = children[0];
+        if (first is RawParagraph) {
+          final ({bool checked, String rest})? task = _extractTaskMarker(
+            first.rawText,
+          );
+          if (task != null) {
+            taskStateCode = task.checked ? 1 : 0;
+            children[0] = RawParagraph(
+              blockId: first.blockId,
+              span: first.span,
+              rawText: task.rest,
+              endsWithBlankLine: first.endsWithBlankLine,
+            );
+          }
+        }
+      }
+      return RawListItem(
+        blockId: block.blockId,
+        span: span,
+        taskStateCode: taskStateCode,
+        children: children,
+        endsWithBlankLine: block.endsWithBlank,
+      );
+    }
+
+    if (block is _MathOpenBlock ||
+        block is _HtmlOpenBlock ||
+        block is _ThematicBreakOpenBlock ||
+        block is _FootnoteDefOpenBlock) {
+      return _buildRareBlock(block, span);
+    }
+
+    return null;
+  }
+
+  RawBlock? _buildRareBlock(_OpenBlock block, SourceSpan span) {
     if (block is _MathOpenBlock) {
       final String latex =
           block.singleLineLatex ?? block.lines.join('\n').trim();
@@ -2038,116 +2852,23 @@ final class _BlockEngine {
       );
     }
 
-    if (block is _TableOpenBlock) {
-      final List<List<String>> frozenRows = <List<String>>[
-        for (final List<String> row in block.rows) freezeList(row),
-      ];
-      return RawTable(
-        blockId: block.blockId,
-        span: span,
-        alignments: freezeList(block.alignments),
-        headerCells: freezeList(block.headerCells),
-        rows: freezeList(frozenRows),
-        endsWithBlankLine: block.endsWithBlank,
-      );
-    }
-
-    if (block is _BlockQuoteOpenBlock) {
-      final List<RawBlock> children = <RawBlock>[];
-      for (final _OpenBlock c in block.children) {
-        final RawBlock? built = _buildBlock(c, isTopLevel: false);
-        if (built != null) {
-          children.add(built);
-        }
-      }
-      if (options.alerts) {
-        final RawAlert? alert = _tryExtractAlert(
-          blockId: block.blockId,
-          span: span,
-          children: children,
-          endsWithBlank: block.endsWithBlank,
-        );
-        if (alert != null) {
-          return alert;
-        }
-      }
-      return RawBlockQuote(
-        blockId: block.blockId,
-        span: span,
-        children: freezeList(children),
-        endsWithBlankLine: block.endsWithBlank,
-      );
-    }
-
-    if (block is _ListOpenBlock) {
-      final List<RawListItem> items = <RawListItem>[];
-      for (final _ListItemOpenBlock item in block.items) {
-        final RawBlock? built = _buildBlock(item, isTopLevel: false);
-        if (built is RawListItem) {
-          items.add(built);
-        }
-      }
-      return RawList(
-        blockId: block.blockId,
-        span: span,
-        ordered: block.ordered,
-        start: block.start,
-        tight: block.tight,
-        delimiter: block.delimiter,
-        items: freezeList(items),
-        endsWithBlankLine: block.endsWithBlank,
-      );
-    }
-
-    if (block is _ListItemOpenBlock) {
-      final List<RawBlock> children = <RawBlock>[];
-      for (final _OpenBlock c in block.children) {
-        final RawBlock? built = _buildBlock(c, isTopLevel: false);
-        if (built != null) {
-          children.add(built);
-        }
-      }
-      bool? taskState;
-      if (options.gfmTaskLists && children.isNotEmpty) {
-        final RawBlock first = children.first;
-        if (first is RawParagraph) {
-          final ({bool checked, String rest})? task = _extractTaskMarker(
-            first.rawText,
-          );
-          if (task != null) {
-            taskState = task.checked;
-            children[0] = RawParagraph(
-              blockId: first.blockId,
-              span: first.span,
-              rawText: task.rest,
-              endsWithBlankLine: first.endsWithBlankLine,
-            );
-          }
-        }
-      }
-      return RawListItem(
-        blockId: block.blockId,
-        span: span,
-        taskState: taskState,
-        children: freezeList(children),
-        endsWithBlankLine: block.endsWithBlank,
-      );
-    }
-
     if (block is _FootnoteDefOpenBlock) {
       final List<RawBlock> children = <RawBlock>[];
-      for (final _OpenBlock c in block.children) {
-        final RawBlock? built = _buildBlock(c, isTopLevel: false);
+      final List<_OpenBlock> openChildren = block.children;
+      for (int i = 0; i < openChildren.length; i++) {
+        final RawBlock? built = _buildBlock(openChildren[i], isTopLevel: false);
         if (built != null) {
           children.add(built);
         }
       }
-      if (!_footnoteDefs.containsKey(block.label)) {
-        _footnoteDefs[block.label] = RawFootnoteDef(
+      final Map<String, RawFootnoteDef> fnDefs = (_footnoteDefs ??=
+          <String, RawFootnoteDef>{});
+      if (!fnDefs.containsKey(block.label)) {
+        fnDefs[block.label] = RawFootnoteDef(
           blockId: block.blockId,
           span: span,
           label: block.label,
-          children: freezeList(children),
+          children: children,
           endsWithBlankLine: block.endsWithBlank,
         );
       }
@@ -2161,13 +2882,14 @@ final class _BlockEngine {
     final List<String> lines = text.split('\n');
     final List<String> remaining = <String>[];
     for (final String line in lines) {
-      if (_abbreviations.length < _maxAbbreviations && line.contains('*[')) {
+      if ((_abbreviations?.length ?? 0) < _maxAbbreviations &&
+          line.contains('*[')) {
         final RegExpMatch? m = _abbrDefPattern.firstMatch(line.trim());
         if (m != null) {
           final String abbr = m.group(1)!.trim();
           final String title = m.group(2)!.trim();
           if (abbr.isNotEmpty) {
-            _abbreviations[abbr] = title;
+            (_abbreviations ??= <String, String>{})[abbr] = title;
             continue;
           }
         }
@@ -2182,12 +2904,13 @@ final class _BlockEngine {
 
   List<RawBlock> _postProcessBlocks(List<RawBlock> blocks) {
     List<RawBlock> current = blocks;
-    if (options.definitionLists) {
+    if (options.definitionLists && _hasPotentialDefList) {
       current = _extractDefinitionLists(current);
     }
-    if (options.detailsBlocks ||
-        options.figureBlocks ||
-        options.alignedBlocks) {
+    if (_hasTopLevelHtmlBlock &&
+        (options.detailsBlocks ||
+            options.figureBlocks ||
+            options.alignedBlocks)) {
       current = _extractHtmlContainerExtensions(current);
     }
     return current;
@@ -2221,7 +2944,7 @@ final class _BlockEngine {
               }
               defs.add(<RawBlock>[
                 RawParagraph(
-                  blockId: _nextId('defp'),
+                  blockId: _nextId(),
                   span: b.span,
                   rawText: currentDefLines.join('\n').trim(),
                 ),
@@ -2281,7 +3004,7 @@ final class _BlockEngine {
                   _blockCount++;
                   defs.add(<RawBlock>[
                     RawParagraph(
-                      blockId: _nextId('defp'),
+                      blockId: _nextId(),
                       span: next.span,
                       rawText: _stripColonPrefix(l),
                     ),
@@ -2335,7 +3058,7 @@ final class _BlockEngine {
           } else {
             out.add(
               RawDefinitionList(
-                blockId: _nextId('dl'),
+                blockId: _nextId(),
                 span: SourceSpan(
                   startOffset: b.span.startOffset,
                   endOffset: endOffset,
@@ -2400,7 +3123,7 @@ final class _BlockEngine {
           if (closed) {
             out.add(
               RawDetailsBlock(
-                blockId: _nextId('details'),
+                blockId: _nextId(),
                 span: SourceSpan(
                   startOffset: b.span.startOffset,
                   endOffset: blocks[j].span.endOffset,
@@ -2450,7 +3173,7 @@ final class _BlockEngine {
           if (closed) {
             out.add(
               RawAlignedBlock(
-                blockId: _nextId('align'),
+                blockId: _nextId(),
                 span: SourceSpan(
                   startOffset: b.span.startOffset,
                   endOffset: blocks[j].span.endOffset,
@@ -2539,7 +3262,7 @@ final class _BlockEngine {
 
     return _FigureParseAttempt(
       node: RawFigureBlock(
-        blockId: _nextId('figure'),
+        blockId: _nextId(),
         span: SourceSpan(
           startOffset: openBlock.span.startOffset,
           endOffset: closeSpan.endOffset,
@@ -2877,7 +3600,7 @@ final class _BlockEngine {
             isLastLine: toLine == lines.length - 1,
           );
     return RawHtmlBlock(
-      blockId: isFullRange ? nb.blockId : _nextId('html'),
+      blockId: isFullRange ? nb.blockId : _nextId(),
       span: span,
       literal: subLit,
       blockType: nb.blockType,
@@ -2963,7 +3686,7 @@ final class _BlockEngine {
     return null;
   }
 
-  _AtxMatch? _matchAtxHeading(_LineCursor cursor) {
+  bool _matchAtxHeading(_LineCursor cursor) {
     final int base = cursor.firstNonSpaceIndex;
     final int lineEnd = cursor.lineEnd;
     int hashes = 0;
@@ -2973,13 +3696,13 @@ final class _BlockEngine {
       hashes++;
     }
     if (hashes == 0 || hashes > 6) {
-      return null;
+      return false;
     }
     int start = base + hashes;
     if (start < lineEnd) {
       final int after = source.codeUnitAt(start);
       if (after != 0x20 && after != 0x09) {
-        return null;
+        return false;
       }
     }
     // Strip leading spaces/tabs.
@@ -3014,23 +3737,18 @@ final class _BlockEngine {
       }
     }
     final String content = start >= end ? '' : source.substring(start, end);
-    final _SetextHeadingText parsed = _extractExplicitId(
-      content,
-      enabled: options.explicitHeadingIds,
-    );
-    return _AtxMatch(
-      level: hashes,
-      content: parsed.text,
-      explicitId: parsed.explicitId,
-    );
+    _extractExplicitId(content, enabled: options.explicitHeadingIds);
+    _atxLevel = hashes;
+    _atxContent = _explicitText;
+    _atxExplicitId = _explicitId;
+    return true;
   }
 
-  _SetextHeadingText _extractExplicitId(
-    String content, {
-    required bool enabled,
-  }) {
+  void _extractExplicitId(String content, {required bool enabled}) {
     if (!enabled || content.length < 4) {
-      return _SetextHeadingText(text: content, explicitId: null);
+      _explicitText = content;
+      _explicitId = null;
+      return;
     }
     int end = content.length;
     while (end > 0) {
@@ -3041,7 +3759,9 @@ final class _BlockEngine {
       end--;
     }
     if (end < 4 || content.codeUnitAt(end - 1) != 0x7D) {
-      return _SetextHeadingText(text: content, explicitId: null);
+      _explicitText = content;
+      _explicitId = null;
+      return;
     }
     final int idEnd = end - 1;
     int i = idEnd - 1;
@@ -3052,12 +3772,12 @@ final class _BlockEngine {
         i + 1 >= idEnd ||
         content.codeUnitAt(i) != 0x23 ||
         content.codeUnitAt(i - 1) != 0x7B) {
-      return _SetextHeadingText(text: content, explicitId: null);
+      _explicitText = content;
+      _explicitId = null;
+      return;
     }
-    return _SetextHeadingText(
-      text: content.substring(0, i - 1).trimRight(),
-      explicitId: content.substring(i + 1, idEnd),
-    );
+    _explicitText = content.substring(0, i - 1).trimRight();
+    _explicitId = content.substring(i + 1, idEnd);
   }
 
   _FenceOpenMatch? _matchFenceOpen(_LineCursor cursor) {
@@ -3127,7 +3847,8 @@ final class _BlockEngine {
   }
 
   _MathOpenMatch? _matchMathOpen(
-    _LineCursor cursor, {
+    _LineCursor cursor,
+    Int32List lineRanges, {
     required int activeDepth,
     required _OpenBlock currentContainer,
   }) {
@@ -3177,6 +3898,7 @@ final class _BlockEngine {
       }
       if (!_hasClosingMathLine(
         cursor.lineIndex,
+        lineRanges,
         activeDepth,
         currentContainer,
         isBracket: false,
@@ -3225,6 +3947,7 @@ final class _BlockEngine {
       }
       if (!_hasClosingMathLine(
         cursor.lineIndex,
+        lineRanges,
         activeDepth,
         currentContainer,
         isBracket: true,
@@ -3243,6 +3966,7 @@ final class _BlockEngine {
 
   bool _hasClosingMathLine(
     int fromLineIndex,
+    Int32List lineRanges,
     int activeDepth,
     _OpenBlock currentContainer, {
     required bool isBracket,
@@ -3261,13 +3985,18 @@ final class _BlockEngine {
       }
     }
 
+    final int srcLen = source.length;
+    final int baseOff = baseOffset;
     for (int j = fromLineIndex + 1; j < lineCount; j++) {
+      final int pairIdx = j * 2;
+      final int ls = lineRanges[pairIdx];
+      final int le = lineRanges[pairIdx + 1];
       look.reset(
         lineIndex: j,
-        lineStart: _lineTextStart(j),
-        lineEnd: _lineTextEnd(j),
-        spanStartOffset: _lineStartOffset(j),
-        spanEndOffset: _lineEndOffset(j),
+        lineStart: ls,
+        lineEnd: le,
+        spanStartOffset: baseOff + ls,
+        spanEndOffset: baseOff + (le < srcLen ? le + 1 : le),
         lineNumber: _lineNumber(j),
       );
 
@@ -3498,14 +4227,15 @@ final class _BlockEngine {
     return _FootnoteStartMatch(label: label, consumedChars: afterColon - start);
   }
 
-  _ListMarkerMatch? _matchListMarker(
+  bool _matchListMarker(
     _LineCursor cursor, {
     required bool interruptingParagraph,
+    bool skipThematicCheck = false,
   }) {
     final int startIdx = cursor.firstNonSpaceIndex;
     final int end = cursor.lineEnd;
     if (startIdx >= end) {
-      return null;
+      return false;
     }
     final int first = source.codeUnitAt(startIdx);
     bool ordered = false;
@@ -3516,8 +4246,9 @@ final class _BlockEngine {
 
     if (first == 0x2D || first == 0x2B || first == 0x2A) {
       // Check that `-` or `*` isn't a thematic break on this line!
-      if (_matchThematicBreakSpan(source, startIdx, end)) {
-        return null;
+      if (!skipThematicCheck &&
+          _matchThematicBreakSpan(source, startIdx, end)) {
+        return false;
       }
       ordered = false;
       bulletChar = first;
@@ -3533,21 +4264,21 @@ final class _BlockEngine {
         digits++;
       }
       if (digits == 0 || startIdx + digits >= end) {
-        return null;
+        return false;
       }
       final int delimCu = source.codeUnitAt(startIdx + digits);
       if (delimCu != 0x2E && delimCu != 0x29) {
-        return null;
+        return false;
       }
       if (interruptingParagraph && val != 1) {
-        return null;
+        return false;
       }
       ordered = true;
       start = val;
       delimiter = delimCu == 0x2E ? '.' : ')';
       markerChars = digits + 1;
     } else {
-      return null;
+      return false;
     }
 
     // Must be followed by at least one space/tab or EOL.
@@ -3573,48 +4304,23 @@ final class _BlockEngine {
 
     final bool isBlankAfterMarker = idx >= end;
     if (!isBlankAfterMarker && spaces == 0) {
-      return null;
+      return false;
     }
     if (interruptingParagraph && isBlankAfterMarker) {
-      return null;
+      return false;
     }
 
     final int consumedSpaces = (isBlankAfterMarker || spaces >= 5) ? 1 : spaces;
-    return _ListMarkerMatch(
-      ordered: ordered,
-      start: start,
-      delimiter: delimiter,
-      bulletChar: bulletChar,
-      indent: cursor.indent,
-      markerChars: markerChars,
-      padding: markerChars + consumedSpaces,
-      spacesAfterMarkerConsumed: consumedSpaces,
-    );
+    _listOrdered = ordered;
+    _listStart = start;
+    _listDelimiter = delimiter;
+    _listBulletChar = bulletChar;
+    _listIndent = cursor.indent;
+    _listMarkerChars = markerChars;
+    _listPadding = markerChars + consumedSpaces;
+    _listSpacesConsumed = consumedSpaces;
+    return true;
   }
-}
-
-final class _TableIntercept {
-  const _TableIntercept(this.table);
-  final _TableOpenBlock table;
-}
-
-final class _AtxMatch {
-  const _AtxMatch({
-    required this.level,
-    required this.content,
-    required this.explicitId,
-  });
-
-  final int level;
-  final String content;
-  final String? explicitId;
-}
-
-final class _SetextHeadingText {
-  const _SetextHeadingText({required this.text, required this.explicitId});
-
-  final String text;
-  final String? explicitId;
 }
 
 final class _FenceOpenMatch {
@@ -3686,28 +4392,6 @@ final class _FootnoteStartMatch {
   final int consumedChars;
 }
 
-final class _ListMarkerMatch {
-  const _ListMarkerMatch({
-    required this.ordered,
-    required this.start,
-    required this.delimiter,
-    required this.bulletChar,
-    required this.indent,
-    required this.markerChars,
-    required this.padding,
-    required this.spacesAfterMarkerConsumed,
-  });
-
-  final bool ordered;
-  final int start;
-  final String delimiter;
-  final int bulletChar;
-  final int indent;
-  final int markerChars;
-  final int padding;
-  final int spacesAfterMarkerConsumed;
-}
-
 const int _maxLinkDefinitions = 65536;
 const int _maxAbbreviations = 512;
 
@@ -3721,6 +4405,17 @@ final RegExp _divAlignPattern = RegExp(
   r'''^<div\s+align\s*=\s*["']?(left|center|right)["']?\s*>$''',
   caseSensitive: false,
 );
+
+bool _isPlainSingleWordInfo(String info) {
+  final int len = info.length;
+  for (int i = 0; i < len; i++) {
+    final int cu = info.codeUnitAt(i);
+    if (cu <= 0x20 || cu >= 0x7F || cu == 0x5C || cu == 0x26) {
+      return false;
+    }
+  }
+  return true;
+}
 
 String? _firstWordBeforeSpaceOrTab(String text) {
   if (text.isEmpty) {
@@ -4730,18 +5425,6 @@ List<TableAlignment>? _matchTableDelimiterRowSpan(
   if (end <= start) {
     return null;
   }
-  bool hasDash = false;
-  for (int i = start; i < end; i++) {
-    final int cu = raw.codeUnitAt(i);
-    if (cu == 0x2D) {
-      hasDash = true;
-    } else if (cu != 0x7C && cu != 0x3A && cu != 0x20 && cu != 0x09) {
-      return null;
-    }
-  }
-  if (!hasDash) {
-    return null;
-  }
   int s = start;
   int e = end;
   if (raw.codeUnitAt(s) == 0x7C) {
@@ -4750,60 +5433,91 @@ List<TableAlignment>? _matchTableDelimiterRowSpan(
   if (e > s && raw.codeUnitAt(e - 1) == 0x7C) {
     e--;
   }
+  if (s >= e) {
+    return null;
+  }
   final List<TableAlignment> alignments = <TableAlignment>[];
-  int cellStart = s;
-  for (int i = s; i <= e; i++) {
-    if (i == e || raw.codeUnitAt(i) == 0x7C) {
-      int cs = cellStart;
-      int ce = i;
-      while (cs < ce &&
-          (raw.codeUnitAt(cs) == 0x20 || raw.codeUnitAt(cs) == 0x09)) {
-        cs++;
-      }
-      while (ce > cs &&
-          (raw.codeUnitAt(ce - 1) == 0x20 || raw.codeUnitAt(ce - 1) == 0x09)) {
-        ce--;
-      }
-      if (cs >= ce) {
-        return null;
-      }
-      final bool leftColon = raw.codeUnitAt(cs) == 0x3A;
-      final bool rightColon = raw.codeUnitAt(ce - 1) == 0x3A;
-      final int innerStart = leftColon ? cs + 1 : cs;
-      final int innerEnd = rightColon ? ce - 1 : ce;
-      if (innerEnd <= innerStart) {
-        return null;
-      }
-      for (int k = innerStart; k < innerEnd; k++) {
-        if (raw.codeUnitAt(k) != 0x2D) {
-          return null;
-        }
-      }
-      if (alignments.length >= maxColumns) {
-        return null;
-      }
-      if (leftColon && rightColon) {
-        alignments.add(TableAlignment.center);
-      } else if (leftColon) {
-        alignments.add(TableAlignment.left);
-      } else if (rightColon) {
-        alignments.add(TableAlignment.right);
+  int i = s;
+  while (i <= e) {
+    while (i < e) {
+      final int cu = raw.codeUnitAt(i);
+      if (cu == 0x20 || cu == 0x09) {
+        i++;
       } else {
-        alignments.add(TableAlignment.none);
+        break;
       }
-      cellStart = i + 1;
+    }
+    if (i >= e || raw.codeUnitAt(i) == 0x7C) {
+      return null;
+    }
+    bool leftColon = false;
+    if (raw.codeUnitAt(i) == 0x3A) {
+      leftColon = true;
+      i++;
+    }
+    final int dashStart = i;
+    while (i < e && raw.codeUnitAt(i) == 0x2D) {
+      i++;
+    }
+    if (i == dashStart) {
+      return null;
+    }
+    bool rightColon = false;
+    if (i < e && raw.codeUnitAt(i) == 0x3A) {
+      rightColon = true;
+      i++;
+    }
+    while (i < e) {
+      final int cu = raw.codeUnitAt(i);
+      if (cu == 0x20 || cu == 0x09) {
+        i++;
+      } else {
+        break;
+      }
+    }
+    if (i < e && raw.codeUnitAt(i) != 0x7C) {
+      return null;
+    }
+    if (alignments.length >= maxColumns) {
+      return null;
+    }
+    if (leftColon && rightColon) {
+      alignments.add(TableAlignment.center);
+    } else if (leftColon) {
+      alignments.add(TableAlignment.left);
+    } else if (rightColon) {
+      alignments.add(TableAlignment.right);
+    } else {
+      alignments.add(TableAlignment.none);
+    }
+    if (i == e) {
+      break;
+    }
+    i++;
+    if (i == e) {
+      // Trailing pipe wasn't stripped? Only possible if raw had empty cell after pipe.
+      return null;
     }
   }
   return alignments.isEmpty ? null : alignments;
 }
 
+@pragma('vm:prefer-inline')
 String _trimmedCellSlice(String source, int start, int end) {
   int cs = start;
   int ce = end;
-  while (cs < ce && isAsciiWhitespace(source.codeUnitAt(cs))) {
+  while (cs < ce) {
+    final int cu = source.codeUnitAt(cs);
+    if (cu != 0x20 && cu != 0x09 && cu != 0x0C) {
+      break;
+    }
     cs++;
   }
-  while (ce > cs && isAsciiWhitespace(source.codeUnitAt(ce - 1))) {
+  while (ce > cs) {
+    final int cu = source.codeUnitAt(ce - 1);
+    if (cu != 0x20 && cu != 0x09 && cu != 0x0C) {
+      break;
+    }
     ce--;
   }
   if (cs >= ce) {
@@ -4828,10 +5542,18 @@ List<String> _splitTableRowSpan(
 }) {
   int start = lineStart;
   int end = lineEnd;
-  while (start < end && isAsciiWhitespace(line.codeUnitAt(start))) {
+  while (start < end) {
+    final int cu = line.codeUnitAt(start);
+    if (cu > 0x20 || !isAsciiWhitespace(cu)) {
+      break;
+    }
     start++;
   }
-  while (end > start && isAsciiWhitespace(line.codeUnitAt(end - 1))) {
+  while (end > start) {
+    final int cu = line.codeUnitAt(end - 1);
+    if (cu > 0x20 || !isAsciiWhitespace(cu)) {
+      break;
+    }
     end--;
   }
   if (start < end && line.codeUnitAt(start) == 0x7C) {
@@ -4851,9 +5573,53 @@ List<String> _splitTableRowSpan(
   }
 
   final List<String> cells = <String>[];
-  StringBuffer? current;
   int cellSliceStart = start;
   int i = start;
+  while (i < end) {
+    final int cu = line.codeUnitAt(i);
+    if (cu == 0x7C) {
+      cells.add(_trimmedCellSlice(line, cellSliceStart, i));
+      if (maxColumns != null && cells.length >= maxColumns) {
+        return cells;
+      }
+      i++;
+      cellSliceStart = i;
+      continue;
+    }
+    if (cu == 0x5C && i + 1 < end) {
+      final int next = line.codeUnitAt(i + 1);
+      if (next == 0x7C || next == 0x5C) {
+        _splitTableRowSpanEscaped(
+          line,
+          i: i,
+          end: end,
+          cells: cells,
+          cellSliceStart: cellSliceStart,
+          unescapePipes: unescapePipes,
+          maxColumns: maxColumns,
+        );
+        return cells;
+      }
+    }
+    i++;
+  }
+  if (maxColumns == null || cells.length < maxColumns) {
+    cells.add(_trimmedCellSlice(line, cellSliceStart, end));
+  }
+  return cells;
+}
+
+@pragma('vm:never-inline')
+void _splitTableRowSpanEscaped(
+  String line, {
+  required int i,
+  required int end,
+  required List<String> cells,
+  required int cellSliceStart,
+  required bool unescapePipes,
+  required int? maxColumns,
+}) {
+  StringBuffer? current;
   while (i < end) {
     final int cu = line.codeUnitAt(i);
     if (cu == 0x5C && i + 1 < end) {
@@ -4886,7 +5652,7 @@ List<String> _splitTableRowSpan(
       }
       cells.add(cellText);
       if (maxColumns != null && cells.length >= maxColumns) {
-        return cells;
+        return;
       }
       i++;
       cellSliceStart = i;
@@ -4906,5 +5672,4 @@ List<String> _splitTableRowSpan(
     }
     cells.add(cellText);
   }
-  return cells;
 }

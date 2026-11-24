@@ -317,30 +317,47 @@ bool get _isRunningInWidgetTest {
 
 typedef _MermaidCacheKey = (String paletteKey, String trimmedCode);
 
-/// Bounded LRU cache and isolate compilation coordinator for built-in Mermaid
-/// diagram rendering.
+typedef _MermaidCacheEntry = ({BuiltInMermaidResult result, int byteSize});
+
+/// Bounded dual entry-count and retained-byte LRU cache and isolate compilation
+/// coordinator for built-in Mermaid diagram rendering.
 final class BuiltInMermaidCache {
   BuiltInMermaidCache._();
 
   /// Shared cache instance used by [BuiltInMermaidDiagram].
   static final BuiltInMermaidCache instance = BuiltInMermaidCache._();
 
-  /// Maximum number of retained compiled Mermaid diagrams.
-  static const int maxEntries = 128;
+  /// Default maximum number of retained compiled Mermaid diagrams.
+  static const int defaultMaxEntries = 128;
+
+  /// Default maximum estimated retained byte budget in the LRU cache (16 MiB).
+  static const int defaultMaxBytes = 16 * 1024 * 1024;
 
   /// Test hook forcing background `compute` compilation even under
   /// `TestWidgetsFlutterBinding` when testing async transitions via `runAsync`.
   bool debugForceAsyncInTests = false;
 
-  final LinkedHashMap<_MermaidCacheKey, BuiltInMermaidResult> _cache =
-      LinkedHashMap<_MermaidCacheKey, BuiltInMermaidResult>();
+  final LinkedHashMap<_MermaidCacheKey, _MermaidCacheEntry> _cache =
+      LinkedHashMap<_MermaidCacheKey, _MermaidCacheEntry>();
   final Map<_MermaidCacheKey, Future<BuiltInMermaidResult>> _inFlight =
       <_MermaidCacheKey, Future<BuiltInMermaidResult>>{};
 
+  int _maxEntries = defaultMaxEntries;
+  int _maxBytes = defaultMaxBytes;
+  int _currentBytes = 0;
   int _renderCount = 0;
   int _hitCount = 0;
   int _epoch = 0;
   bool _warmed = false;
+
+  /// Active maximum entry capacity before LRU eviction.
+  int get maxEntries => _maxEntries;
+
+  /// Active maximum estimated byte budget before LRU eviction.
+  int get maxBytes => _maxBytes;
+
+  /// Estimated retained bytes across all currently cached Mermaid entries.
+  int get currentBytes => _currentBytes;
 
   /// Number of cold Mermaid compilations executed.
   int get renderCount => _renderCount;
@@ -350,6 +367,40 @@ final class BuiltInMermaidCache {
 
   /// Current number of cached Mermaid diagrams.
   int get length => _cache.length;
+
+  /// Configures positive entry-count and/or byte-budget caps and immediately
+  /// evicts least-recently-used entries exceeding the updated limits.
+  void configure({int? maxEntries, int? maxBytes}) {
+    if (maxEntries != null && maxEntries <= 0) {
+      throw RangeError.value(
+        maxEntries,
+        'maxEntries',
+        'Must be greater than zero.',
+      );
+    }
+    if (maxBytes != null && maxBytes <= 0) {
+      throw RangeError.value(
+        maxBytes,
+        'maxBytes',
+        'Must be greater than zero.',
+      );
+    }
+    if (maxEntries != null) {
+      _maxEntries = maxEntries;
+    }
+    if (maxBytes != null) {
+      _maxBytes = maxBytes;
+    }
+    _evictOverBudget();
+  }
+
+  /// Restores [defaultMaxEntries] and [defaultMaxBytes], evicting any entries
+  /// exceeding the restored budgets.
+  void resetDefaults() {
+    _maxEntries = defaultMaxEntries;
+    _maxBytes = defaultMaxBytes;
+    _evictOverBudget();
+  }
 
   /// Primes `pele_dart`'s diagram registry so the first Mermaid diagram avoids
   /// lazy initialization overhead.
@@ -370,9 +421,10 @@ final class BuiltInMermaidCache {
     );
   }
 
-  /// Clears all cached diagrams and telemetry counters.
+  /// Clears all cached diagrams, retained byte count, and telemetry counters.
   void clear() {
     _cache.clear();
+    _currentBytes = 0;
     _renderCount = 0;
     _hitCount = 0;
   }
@@ -383,24 +435,62 @@ final class BuiltInMermaidCache {
     _inFlight.clear();
   }
 
+  static int _estimateEntryBytes(
+    BuiltInMermaidResult result,
+    String trimmedCode,
+  ) {
+    return switch (result) {
+      BuiltInMermaidSuccess() =>
+        result.compiledBytes.lengthInBytes +
+            result.semanticsLabel.length * 2 +
+            trimmedCode.length * 2 +
+            128,
+      BuiltInMermaidFailure() =>
+        result.code.length * 2 +
+            result.message.length * 2 +
+            trimmedCode.length * 2 +
+            128,
+    };
+  }
+
+  void _evictOverBudget() {
+    while (_cache.isNotEmpty &&
+        (_cache.length > _maxEntries || _currentBytes > _maxBytes)) {
+      final _MermaidCacheKey oldestKey = _cache.keys.first;
+      final _MermaidCacheEntry? removed = _cache.remove(oldestKey);
+      if (removed != null) {
+        _currentBytes -= removed.byteSize;
+      }
+    }
+    if (_cache.isEmpty) {
+      _currentBytes = 0;
+    }
+  }
+
   /// Looks up a cached [BuiltInMermaidResult] synchronously, promoting hits in
   /// LRU order.
   BuiltInMermaidResult? peek(String code, DerivedMermaidTheme theme) {
     final _MermaidCacheKey key = (theme.paletteKey, code.trim());
-    final BuiltInMermaidResult? hit = _cache.remove(key);
+    final _MermaidCacheEntry? hit = _cache.remove(key);
     if (hit != null) {
       _cache[key] = hit;
       _hitCount++;
+      return hit.result;
     }
-    return hit;
+    return null;
   }
 
   void _put(_MermaidCacheKey key, BuiltInMermaidResult result) {
-    _cache.remove(key);
-    if (_cache.length >= maxEntries) {
-      _cache.remove(_cache.keys.first);
+    final _MermaidCacheEntry? existing = _cache.remove(key);
+    if (existing != null) {
+      _currentBytes -= existing.byteSize;
     }
-    _cache[key] = result;
+    final int byteSize = _estimateEntryBytes(result, key.$2);
+    if (byteSize <= _maxBytes) {
+      _cache[key] = (result: result, byteSize: byteSize);
+      _currentBytes += byteSize;
+      _evictOverBudget();
+    }
   }
 
   /// Synchronously renders and compiles [code] against [theme] and caches the

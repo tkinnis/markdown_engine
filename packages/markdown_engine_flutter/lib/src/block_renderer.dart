@@ -8,6 +8,7 @@ import 'built_in_math.dart';
 import 'built_in_mermaid.dart';
 import 'controller.dart';
 import 'delegates.dart';
+import 'fast_text.dart';
 import 'inline_renderer.dart';
 import 'theme.dart';
 
@@ -25,6 +26,9 @@ final class MarkdownBlockRenderContext {
     this.remoteImagesApproved = false,
     this.onRequestLoadRemoteImages,
     this.streamingNormalizedSource,
+    this.streamingNormalizedSourceProvider,
+    this.environment,
+    this.resolvedBodyStyle,
   });
 
   /// Active visual theme.
@@ -55,14 +59,31 @@ final class MarkdownBlockRenderContext {
   /// `null` for settled or complete documents.
   final String? streamingNormalizedSource;
 
+  /// Lazy provider returning active streaming normalized source only when a
+  /// block (such as an unclosed Mermaid fence) requires it.
+  final String? Function()? streamingNormalizedSourceProvider;
+
+  /// Pre-resolved ambient Flutter environment hoisted at the document root.
+  final MarkdownRenderEnvironment? environment;
+
+  /// Optional pre-merged body text style avoiding repeated `TextStyle.merge`.
+  final TextStyle? resolvedBodyStyle;
+
   /// Returns a derived context with selected fields overridden.
   MarkdownBlockRenderContext copyWith({
     MarkdownThemeData? theme,
     TextAlign? textAlign,
     int? listDepth,
+    TextStyle? resolvedBodyStyle,
   }) {
+    final MarkdownThemeData nextTheme = theme ?? this.theme;
+    final TextStyle? nextBodyStyle =
+        resolvedBodyStyle ??
+        (theme != null && environment != null
+            ? environment!.resolveTextStyle(nextTheme.bodyTextStyle())
+            : (theme == null ? this.resolvedBodyStyle : null));
     return MarkdownBlockRenderContext(
-      theme: theme ?? this.theme,
+      theme: nextTheme,
       delegates: delegates,
       urlPolicy: urlPolicy,
       controller: controller,
@@ -71,6 +92,9 @@ final class MarkdownBlockRenderContext {
       remoteImagesApproved: remoteImagesApproved,
       onRequestLoadRemoteImages: onRequestLoadRemoteImages,
       streamingNormalizedSource: streamingNormalizedSource,
+      streamingNormalizedSourceProvider: streamingNormalizedSourceProvider,
+      environment: environment,
+      resolvedBodyStyle: nextBodyStyle,
     );
   }
 
@@ -86,7 +110,11 @@ final class MarkdownBlockRenderContext {
           listDepth == other.listDepth &&
           remoteImagesApproved == other.remoteImagesApproved &&
           onRequestLoadRemoteImages == other.onRequestLoadRemoteImages &&
-          streamingNormalizedSource == other.streamingNormalizedSource;
+          streamingNormalizedSource == other.streamingNormalizedSource &&
+          streamingNormalizedSourceProvider ==
+              other.streamingNormalizedSourceProvider &&
+          environment == other.environment &&
+          resolvedBodyStyle == other.resolvedBodyStyle;
 
   @override
   int get hashCode => Object.hash(
@@ -99,6 +127,53 @@ final class MarkdownBlockRenderContext {
     remoteImagesApproved,
     onRequestLoadRemoteImages,
     streamingNormalizedSource,
+    streamingNormalizedSourceProvider,
+    environment,
+    resolvedBodyStyle,
+  );
+}
+
+List<String> _headingSlugs(HeadingNode node) {
+  final Set<String> slugSet = <String>{
+    if (node.slug != null && node.slug!.isNotEmpty) node.slug!,
+    if (node.explicitId != null && node.explicitId!.isNotEmpty)
+      node.explicitId!,
+    slugifyHeadingText(node.text),
+  };
+  return slugSet.toList(growable: false);
+}
+
+/// Builds a top-level Markdown block widget, avoiding stateful wrapper
+/// overhead when [MarkdownBlockRenderContext.controller] is `null`.
+Widget buildTopLevelMarkdownBlockWidget(
+  BuildContext context, {
+  Key? key,
+  required MarkdownBlockNode node,
+  required MarkdownBlockRenderContext renderContext,
+  required double bottomSpacing,
+  Widget? prebuiltInner,
+}) {
+  if (renderContext.controller != null) {
+    return MarkdownTopLevelBlockWidget(
+      key: key,
+      node: node,
+      renderContext: renderContext,
+      bottomSpacing: bottomSpacing,
+      prebuiltInner: prebuiltInner,
+    );
+  }
+  final Widget inner =
+      prebuiltInner ??
+      buildMarkdownBlockWidget(context, node, renderContext, isTopLevel: true);
+  if (bottomSpacing <= 0.0 && key == null) {
+    return inner;
+  }
+  return Padding(
+    key: key,
+    padding: bottomSpacing <= 0.0
+        ? EdgeInsets.zero
+        : EdgeInsets.only(bottom: bottomSpacing),
+    child: inner,
   );
 }
 
@@ -111,6 +186,7 @@ final class MarkdownTopLevelBlockWidget extends StatefulWidget {
     required this.node,
     required this.renderContext,
     required this.bottomSpacing,
+    this.prebuiltInner,
   });
 
   /// Block AST node to render.
@@ -121,6 +197,9 @@ final class MarkdownTopLevelBlockWidget extends StatefulWidget {
 
   /// Bottom spacing applied after this block (`0.0` for the final block).
   final double bottomSpacing;
+
+  /// Optional pre-built inner block widget reused across bottom-spacing edits.
+  final Widget? prebuiltInner;
 
   @override
   State<MarkdownTopLevelBlockWidget> createState() =>
@@ -134,42 +213,41 @@ final class _MarkdownTopLevelBlockWidgetState
   MarkdownBlockNode? _cachedNode;
   MarkdownBlockRenderContext? _cachedRenderContext;
   double? _cachedBottomSpacing;
-  TextScaler? _cachedTextScaler;
-  TextDirection? _cachedTextDirection;
-  bool? _cachedHasSelectionContainer;
+  MarkdownRenderEnvironment? _cachedEnvironment;
+  List<String>? _registeredHeadingSlugs;
 
   @override
   void initState() {
     super.initState();
-    widget.renderContext.controller?.registerBlock(
-      widget.node.blockId,
-      context,
-    );
+    _registerWithController(widget.renderContext.controller, widget.node);
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _cachedInnerBlock = null;
-    _cachedPaddedBlock = null;
+    if (widget.renderContext.environment == null) {
+      _cachedInnerBlock = null;
+      _cachedPaddedBlock = null;
+    }
   }
 
   @override
   void didUpdateWidget(MarkdownTopLevelBlockWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(
-          oldWidget.renderContext.controller,
-          widget.renderContext.controller,
-        ) ||
-        oldWidget.node.blockId != widget.node.blockId) {
-      oldWidget.renderContext.controller?.unregisterBlock(
-        oldWidget.node.blockId,
-        context,
+    final bool ctrlChanged = !identical(
+      oldWidget.renderContext.controller,
+      widget.renderContext.controller,
+    );
+    final bool blockIdChanged = oldWidget.node.blockId != widget.node.blockId;
+    final bool headingChanged =
+        (oldWidget.node is HeadingNode || widget.node is HeadingNode) &&
+        !identical(oldWidget.node, widget.node);
+    if (ctrlChanged || blockIdChanged || headingChanged) {
+      _unregisterFromController(
+        oldWidget.renderContext.controller,
+        oldWidget.node,
       );
-      widget.renderContext.controller?.registerBlock(
-        widget.node.blockId,
-        context,
-      );
+      _registerWithController(widget.renderContext.controller, widget.node);
     }
   }
 
@@ -177,27 +255,62 @@ final class _MarkdownTopLevelBlockWidgetState
   void dispose() {
     _cachedInnerBlock = null;
     _cachedPaddedBlock = null;
-    widget.renderContext.controller?.unregisterBlock(
-      widget.node.blockId,
-      context,
-    );
+    _unregisterFromController(widget.renderContext.controller, widget.node);
     super.dispose();
+  }
+
+  void _registerWithController(
+    MarkdownController? controller,
+    MarkdownBlockNode node,
+  ) {
+    if (controller == null) {
+      return;
+    }
+    controller.registerBlock(node.blockId, context);
+    if (node is HeadingNode) {
+      final List<String> slugs = _headingSlugs(node);
+      _registeredHeadingSlugs = slugs;
+      for (final String slug in slugs) {
+        if (slug.isNotEmpty) {
+          controller.registerAnchor(slug, context);
+        }
+      }
+    } else {
+      _registeredHeadingSlugs = null;
+    }
+  }
+
+  void _unregisterFromController(
+    MarkdownController? controller,
+    MarkdownBlockNode node,
+  ) {
+    if (controller == null) {
+      _registeredHeadingSlugs = null;
+      return;
+    }
+    controller.unregisterBlock(node.blockId, context);
+    final List<String>? slugs = _registeredHeadingSlugs;
+    if (slugs != null) {
+      for (final String slug in slugs) {
+        if (slug.isNotEmpty) {
+          controller.unregisterAnchor(slug, context);
+        }
+      }
+      _registeredHeadingSlugs = null;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final TextScaler? textScaler = MediaQuery.maybeTextScalerOf(context);
-    final TextDirection? textDirection = Directionality.maybeOf(context);
-    final bool hasSelectionContainer =
-        SelectionContainer.maybeOf(context) != null;
+    final MarkdownRenderEnvironment env =
+        widget.renderContext.environment ??
+        MarkdownRenderEnvironment.resolve(context);
 
     final bool innerValid =
         _cachedInnerBlock != null &&
         identical(widget.node, _cachedNode) &&
         widget.renderContext == _cachedRenderContext &&
-        textScaler == _cachedTextScaler &&
-        textDirection == _cachedTextDirection &&
-        hasSelectionContainer == _cachedHasSelectionContainer;
+        env == _cachedEnvironment;
 
     if (innerValid &&
         _cachedPaddedBlock != null &&
@@ -205,25 +318,30 @@ final class _MarkdownTopLevelBlockWidgetState
       return _cachedPaddedBlock!;
     }
 
-    final Widget blockWidget = innerValid
-        ? _cachedInnerBlock!
-        : buildMarkdownBlockWidget(context, widget.node, widget.renderContext);
+    final Widget blockWidget =
+        widget.prebuiltInner ??
+        (innerValid
+            ? _cachedInnerBlock!
+            : buildMarkdownBlockWidget(
+                context,
+                widget.node,
+                widget.renderContext,
+                isTopLevel: true,
+              ));
 
-    final Widget result = widget.bottomSpacing <= 0.0
-        ? blockWidget
-        : Padding(
-            padding: EdgeInsets.only(bottom: widget.bottomSpacing),
-            child: blockWidget,
-          );
+    final Widget result = Padding(
+      padding: widget.bottomSpacing <= 0.0
+          ? EdgeInsets.zero
+          : EdgeInsets.only(bottom: widget.bottomSpacing),
+      child: blockWidget,
+    );
 
     _cachedInnerBlock = blockWidget;
     _cachedPaddedBlock = result;
     _cachedNode = widget.node;
     _cachedRenderContext = widget.renderContext;
     _cachedBottomSpacing = widget.bottomSpacing;
-    _cachedTextScaler = textScaler;
-    _cachedTextDirection = textDirection;
-    _cachedHasSelectionContainer = hasSelectionContainer;
+    _cachedEnvironment = env;
     return result;
   }
 }
@@ -232,15 +350,21 @@ final class _MarkdownTopLevelBlockWidgetState
 Widget buildMarkdownBlockWidget(
   BuildContext context,
   MarkdownBlockNode node,
-  MarkdownBlockRenderContext renderContext,
-) {
+  MarkdownBlockRenderContext renderContext, {
+  bool isTopLevel = false,
+}) {
   final MarkdownThemeData theme = renderContext.theme;
 
   switch (node) {
     case FrontmatterNode():
       return _buildFrontmatterCard(node, theme);
     case HeadingNode():
-      return _buildHeading(node, renderContext);
+      return _buildHeading(
+        context,
+        node,
+        renderContext,
+        isTopLevel: isTopLevel,
+      );
     case ParagraphNode():
       return _buildParagraph(context, node, renderContext);
     case CodeBlockNode():
@@ -263,11 +387,14 @@ Widget buildMarkdownBlockWidget(
         tight: false,
       );
     case TableNode():
-      return _buildTable(node, renderContext);
+      return _buildTable(context, node, renderContext);
     case ThematicBreakNode():
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 8.0),
-        child: Container(height: 1.0, color: theme.border),
+        child: ColoredBox(
+          color: theme.border,
+          child: const SizedBox(width: double.infinity, height: 1.0),
+        ),
       );
     case HtmlBlockNode():
       return _buildHtmlBlockFallback(context, node, renderContext);
@@ -302,16 +429,25 @@ Widget _buildBlockColumn(
   if (blocks.isEmpty) {
     return const SizedBox.shrink();
   }
+  if (blocks.length == 1) {
+    return buildMarkdownBlockWidget(context, blocks.first, renderContext);
+  }
   final double gap = spacing ?? renderContext.theme.blockSpacing * 0.75;
   return Column(
     crossAxisAlignment: crossAxisAlignment,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
       for (int i = 0; i < blocks.length; i++)
-        Padding(
-          padding: EdgeInsets.only(bottom: i == blocks.length - 1 ? 0.0 : gap),
-          child: buildMarkdownBlockWidget(context, blocks[i], renderContext),
-        ),
+        i < blocks.length - 1
+            ? Padding(
+                padding: EdgeInsets.only(bottom: gap),
+                child: buildMarkdownBlockWidget(
+                  context,
+                  blocks[i],
+                  renderContext,
+                ),
+              )
+            : buildMarkdownBlockWidget(context, blocks[i], renderContext),
     ],
   );
 }
@@ -442,50 +578,84 @@ Widget _buildFrontmatterRow(
 }
 
 Widget _buildHeading(
+  BuildContext context,
   HeadingNode node,
-  MarkdownBlockRenderContext renderContext,
-) {
+  MarkdownBlockRenderContext renderContext, {
+  bool isTopLevel = false,
+}) {
   final MarkdownThemeData theme = renderContext.theme;
-  final Set<String> slugSet = <String>{
-    if (node.slug != null && node.slug!.isNotEmpty) node.slug!,
-    if (node.explicitId != null && node.explicitId!.isNotEmpty)
-      node.explicitId!,
-    slugifyHeadingText(node.text),
-  };
-
-  final Widget headingContent = Column(
-    crossAxisAlignment: _crossAxisForTextAlign(renderContext.textAlign),
-    mainAxisSize: MainAxisSize.min,
-    children: <Widget>[
-      MarkdownInlineText(
-        nodes: node.children,
-        baseStyle: theme.headingTextStyle(node.level),
-        theme: theme,
-        delegates: renderContext.delegates,
-        urlPolicy: renderContext.urlPolicy,
-        controller: renderContext.controller,
-        textAlign: renderContext.textAlign,
-        remoteImagesApproved: renderContext.remoteImagesApproved,
-        onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+  final Widget headingContent;
+  if (canBuildFastSimpleInlines(node.children)) {
+    final MarkdownRenderEnvironment env =
+        renderContext.environment ?? MarkdownRenderEnvironment.resolve(context);
+    final TextStyle effectiveStyle = env.resolveTextStyle(
+      theme.headingTextStyle(node.level),
+    );
+    final ({InlineSpan span, String plainText}) built =
+        buildFastSimpleInlineSpan(node.children, effectiveStyle, theme);
+    headingContent = Semantics(
+      header: true,
+      headingLevel: node.level.clamp(1, 6),
+      child: FastMarkdownText(
+        span: built.span,
+        plainText: built.plainText,
+        effectiveStyle: effectiveStyle,
+        resolvedTextAlign: renderContext.textAlign,
+        resolvedTextDirection: env.textDirection,
+        resolvedTextScaler: env.textScaler,
+        resolvedLocale: env.locale,
+        selectionRegistrar: env.selectionRegistrar,
+        selectionColor: env.selectionColor,
+        useLeafRenderBox: true,
+        topPadding: node.level <= 2 ? 8.0 : 4.0,
+        dividerSpacing: node.level <= 2 ? 6.0 : 0.0,
+        dividerColor: node.level <= 2 ? theme.border : null,
       ),
-      if (node.level <= 2) ...<Widget>[
-        const SizedBox(height: 6.0),
-        Container(height: 1.0, color: theme.border),
-      ],
-    ],
-  );
-
-  return MarkdownAnchorTarget(
-    slugs: slugSet.toList(growable: false),
-    controller: renderContext.controller,
-    child: Semantics(
+    );
+  } else {
+    headingContent = Semantics(
       header: true,
       headingLevel: node.level.clamp(1, 6),
       child: Padding(
         padding: EdgeInsets.only(top: node.level <= 2 ? 8.0 : 4.0),
-        child: headingContent,
+        child: Column(
+          crossAxisAlignment: _crossAxisForTextAlign(renderContext.textAlign),
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            MarkdownInlineText(
+              nodes: node.children,
+              baseStyle: theme.headingTextStyle(node.level),
+              theme: theme,
+              delegates: renderContext.delegates,
+              urlPolicy: renderContext.urlPolicy,
+              controller: renderContext.controller,
+              textAlign: renderContext.textAlign,
+              remoteImagesApproved: renderContext.remoteImagesApproved,
+              onRequestLoadRemoteImages:
+                  renderContext.onRequestLoadRemoteImages,
+              environment: renderContext.environment,
+            ),
+            if (node.level <= 2) ...<Widget>[
+              const SizedBox(height: 6.0),
+              ColoredBox(
+                color: theme.border,
+                child: const SizedBox(width: double.infinity, height: 1.0),
+              ),
+            ],
+          ],
+        ),
       ),
-    ),
+    );
+  }
+
+  if (isTopLevel || renderContext.controller == null) {
+    return headingContent;
+  }
+
+  return MarkdownAnchorTarget(
+    slugs: _headingSlugs(node),
+    controller: renderContext.controller,
+    child: headingContent,
   );
 }
 
@@ -538,7 +708,8 @@ Widget _buildParagraph(
     }
   }
 
-  return MarkdownInlineText(
+  return buildFastOrRichInlineText(
+    context,
     nodes: node.children,
     baseStyle: theme.bodyTextStyle(),
     theme: theme,
@@ -548,6 +719,8 @@ Widget _buildParagraph(
     textAlign: renderContext.textAlign,
     remoteImagesApproved: renderContext.remoteImagesApproved,
     onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+    environment: renderContext.environment,
+    effectiveStyleOverride: renderContext.resolvedBodyStyle,
   );
 }
 
@@ -567,7 +740,9 @@ Widget _buildCodeBlock(
 
   if (renderContext.delegates.enableBuiltInMermaid &&
       node.language?.toLowerCase() == 'mermaid') {
-    final String? streamSource = renderContext.streamingNormalizedSource;
+    final String? streamSource =
+        renderContext.streamingNormalizedSourceProvider?.call() ??
+        renderContext.streamingNormalizedSource;
     final bool isStreamingIncomplete =
         streamSource != null && !isFencedCodeBlockClosed(streamSource, node);
     return BuiltInMermaidDiagram(
@@ -588,6 +763,7 @@ Widget _buildCodeBlock(
     key: ValueKey<String>('code-${node.blockId}'),
     node: node,
     theme: renderContext.theme,
+    environment: renderContext.environment,
   );
 }
 
@@ -596,10 +772,12 @@ final class _MarkdownCodeBlock extends StatefulWidget {
     super.key,
     required this.node,
     required this.theme,
+    this.environment,
   });
 
   final CodeBlockNode node;
   final MarkdownThemeData theme;
+  final MarkdownRenderEnvironment? environment;
 
   @override
   State<_MarkdownCodeBlock> createState() => _MarkdownCodeBlockState();
@@ -608,6 +786,16 @@ final class _MarkdownCodeBlock extends StatefulWidget {
 final class _MarkdownCodeBlockState extends State<_MarkdownCodeBlock> {
   bool _copied = false;
   Timer? _resetTimer;
+
+  Widget? _cachedHeader;
+  MarkdownThemeData? _headerTheme;
+  String? _headerBadgeText;
+  bool? _headerCopied;
+  TextDirection? _headerDir;
+  TextScaler? _headerScaler;
+  Locale? _headerLocale;
+  TextStyle? _headerDefaultStyle;
+  bool? _headerBoldText;
 
   @override
   void dispose() {
@@ -630,14 +818,127 @@ final class _MarkdownCodeBlockState extends State<_MarkdownCodeBlock> {
     });
   }
 
+  Widget _buildHeader(
+    MarkdownThemeData theme,
+    MarkdownRenderEnvironment env,
+    String badgeText,
+  ) {
+    final Widget? cached = _cachedHeader;
+    if (cached != null &&
+        _headerTheme == theme &&
+        _headerBadgeText == badgeText &&
+        _headerCopied == _copied &&
+        _headerDir == env.textDirection &&
+        _headerScaler == env.textScaler &&
+        _headerLocale == env.locale &&
+        _headerDefaultStyle == env.defaultTextStyle &&
+        _headerBoldText == env.boldText) {
+      return cached;
+    }
+
+    final TextStyle badgeStyle = env.resolveTextStyle(
+      TextStyle(
+        color: theme.muted,
+        fontSize: theme.codeFontSize * 0.8,
+        fontWeight: FontWeight.w600,
+        fontFamily: theme.effectiveCodeFontFamily,
+        fontFamilyFallback: MarkdownThemeData.defaultCodeFontFallback,
+      ),
+    );
+    final String copyLabel = _copied ? 'Copied' : 'Copy';
+    final TextStyle copyStyle = env.resolveTextStyle(
+      TextStyle(
+        color: _copied ? theme.accent : theme.muted,
+        fontSize: theme.fontSize * 0.78,
+        fontWeight: FontWeight.w600,
+        fontFamily: theme.fontFamily,
+      ),
+    );
+
+    final Widget header = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: theme.border, width: 1.0)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: <Widget>[
+          SelectionContainer.disabled(
+            child: ExcludeSemantics(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: theme.border.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(4.0),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6.0,
+                    vertical: 2.0,
+                  ),
+                  child: FastMarkdownText(
+                    span: TextSpan(text: badgeText, style: badgeStyle),
+                    plainText: badgeText,
+                    effectiveStyle: badgeStyle,
+                    resolvedTextAlign: TextAlign.start,
+                    resolvedTextDirection: env.textDirection,
+                    resolvedTextScaler: env.textScaler,
+                    resolvedLocale: env.locale,
+                    selectionRegistrar: null,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          SelectionContainer.disabled(
+            child: MarkdownInteractiveAction(
+              onActivate: _copyCode,
+              semanticLabel: _copied ? 'Copied' : 'Copy code',
+              focusBorderColor: theme.accent,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 6.0,
+                  vertical: 2.0,
+                ),
+                child: FastMarkdownText(
+                  span: TextSpan(text: copyLabel, style: copyStyle),
+                  plainText: copyLabel,
+                  effectiveStyle: copyStyle,
+                  resolvedTextAlign: TextAlign.start,
+                  resolvedTextDirection: env.textDirection,
+                  resolvedTextScaler: env.textScaler,
+                  resolvedLocale: env.locale,
+                  selectionRegistrar: null,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    _cachedHeader = header;
+    _headerTheme = theme;
+    _headerBadgeText = badgeText;
+    _headerCopied = _copied;
+    _headerDir = env.textDirection;
+    _headerScaler = env.textScaler;
+    _headerLocale = env.locale;
+    _headerDefaultStyle = env.defaultTextStyle;
+    _headerBoldText = env.boldText;
+    return header;
+  }
+
   @override
   Widget build(BuildContext context) {
     final MarkdownThemeData theme = widget.theme;
+    final MarkdownRenderEnvironment env =
+        widget.environment ?? MarkdownRenderEnvironment.resolve(context);
     final String? lang = widget.node.language;
     final String badgeText = (lang != null && lang.isNotEmpty) ? lang : 'code';
     final String trimmed = widget.node.literal.endsWith('\n')
         ? widget.node.literal.substring(0, widget.node.literal.length - 1)
         : widget.node.literal;
+    final TextStyle codeStyle = env.resolveTextStyle(theme.codeTextStyle());
 
     return Container(
       width: double.infinity,
@@ -650,73 +951,20 @@ final class _MarkdownCodeBlockState extends State<_MarkdownCodeBlock> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12.0,
-              vertical: 6.0,
-            ),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: theme.border, width: 1.0),
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: <Widget>[
-                SelectionContainer.disabled(
-                  child: ExcludeSemantics(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6.0,
-                        vertical: 2.0,
-                      ),
-                      decoration: BoxDecoration(
-                        color: theme.border.withValues(alpha: 0.45),
-                        borderRadius: BorderRadius.circular(4.0),
-                      ),
-                      child: Text(
-                        badgeText,
-                        style: TextStyle(
-                          color: theme.muted,
-                          fontSize: theme.codeFontSize * 0.8,
-                          fontWeight: FontWeight.w600,
-                          fontFamily: theme.effectiveCodeFontFamily,
-                          fontFamilyFallback:
-                              MarkdownThemeData.defaultCodeFontFallback,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                SelectionContainer.disabled(
-                  child: MarkdownInteractiveAction(
-                    onActivate: _copyCode,
-                    semanticLabel: _copied ? 'Copied' : 'Copy code',
-                    focusBorderColor: theme.accent,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6.0,
-                        vertical: 2.0,
-                      ),
-                      child: Text(
-                        _copied ? 'Copied' : 'Copy',
-                        style: TextStyle(
-                          color: _copied ? theme.accent : theme.muted,
-                          fontSize: theme.fontSize * 0.78,
-                          fontWeight: FontWeight.w600,
-                          fontFamily: theme.fontFamily,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
+          _buildHeader(theme, env, badgeText),
+          MarkdownHorizontalOverflowBox(
             padding: const EdgeInsets.all(12.0),
-            child: Text(trimmed, style: theme.codeTextStyle()),
+            child: FastMarkdownText(
+              span: TextSpan(text: trimmed, style: codeStyle),
+              plainText: trimmed,
+              effectiveStyle: codeStyle,
+              resolvedTextAlign: TextAlign.start,
+              resolvedTextDirection: env.textDirection,
+              resolvedTextScaler: env.textScaler,
+              resolvedLocale: env.locale,
+              selectionRegistrar: env.selectionRegistrar,
+              selectionColor: env.selectionColor,
+            ),
           ),
         ],
       ),
@@ -730,6 +978,38 @@ Widget _buildBlockQuote(
   MarkdownBlockRenderContext renderContext,
 ) {
   final MarkdownThemeData theme = renderContext.theme;
+  if (node.children.length == 1 && node.children.first is ParagraphNode) {
+    final ParagraphNode para = node.children.first as ParagraphNode;
+    if (canBuildFastSimpleInlines(para.children)) {
+      final MarkdownRenderEnvironment env =
+          renderContext.environment ??
+          MarkdownRenderEnvironment.resolve(context);
+      final MarkdownThemeData quoteTheme = theme.copyWith(
+        foreground: theme.muted,
+      );
+      final TextStyle effectiveStyle = env.resolveTextStyle(
+        quoteTheme.bodyTextStyle(),
+      );
+      final ({InlineSpan span, String plainText}) built =
+          buildFastSimpleInlineSpan(para.children, effectiveStyle, quoteTheme);
+      return FastMarkdownText(
+        span: built.span,
+        plainText: built.plainText,
+        effectiveStyle: effectiveStyle,
+        resolvedTextAlign: renderContext.textAlign,
+        resolvedTextDirection: env.textDirection,
+        resolvedTextScaler: env.textScaler,
+        resolvedLocale: env.locale,
+        selectionRegistrar: env.selectionRegistrar,
+        selectionColor: env.selectionColor,
+        contentPadding: const EdgeInsets.fromLTRB(18.0, 10.0, 12.0, 10.0),
+        backgroundColor: theme.effectiveBlockquoteBackground,
+        leftBorderColor: theme.effectiveBlockquoteBorder,
+        leftBorderWidth: 4.0,
+        expandWidth: true,
+      );
+    }
+  }
   final MarkdownBlockRenderContext quoteContext = renderContext.copyWith(
     theme: theme.copyWith(foreground: theme.muted),
   );
@@ -844,27 +1124,87 @@ Widget _buildList(
   if (items.isEmpty) {
     return const SizedBox.shrink();
   }
+  final MarkdownThemeData theme = renderContext.theme;
+  final MarkdownBlockRenderContext childContext = renderContext.copyWith(
+    listDepth: renderContext.listDepth + 1,
+  );
+  final MarkdownRenderEnvironment env =
+      renderContext.environment ?? MarkdownRenderEnvironment.resolve(context);
+  final TextStyle markerStyle = env.resolveTextStyle(
+    theme.bodyTextStyle(color: theme.muted),
+  );
+  final String? sharedBullet;
+  final TextSpan? sharedBulletSpan;
+  if (!node.ordered) {
+    sharedBullet = switch (renderContext.listDepth % 3) {
+      0 => '•',
+      1 => '◦',
+      _ => '▪',
+    };
+    sharedBulletSpan = TextSpan(text: sharedBullet, style: markerStyle);
+  } else {
+    sharedBullet = null;
+    sharedBulletSpan = null;
+  }
+
+  if (items.length == 1) {
+    return _buildListItem(
+      context,
+      items.first,
+      renderContext,
+      ordered: node.ordered,
+      index: 0,
+      start: node.start,
+      delimiter: node.delimiter,
+      tight: node.tight,
+      childContextOverride: childContext,
+      envOverride: env,
+      markerStyleOverride: markerStyle,
+      sharedBullet: sharedBullet,
+      sharedBulletSpan: sharedBulletSpan,
+    );
+  }
+
   final double itemGap = node.tight ? 4.0 : 8.0;
   return Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
       for (int i = 0; i < items.length; i++)
-        Padding(
-          padding: EdgeInsets.only(
-            bottom: i == items.length - 1 ? 0.0 : itemGap,
-          ),
-          child: _buildListItem(
-            context,
-            items[i],
-            renderContext,
-            ordered: node.ordered,
-            index: i,
-            start: node.start,
-            delimiter: node.delimiter,
-            tight: node.tight,
-          ),
-        ),
+        i < items.length - 1
+            ? Padding(
+                padding: EdgeInsets.only(bottom: itemGap),
+                child: _buildListItem(
+                  context,
+                  items[i],
+                  renderContext,
+                  ordered: node.ordered,
+                  index: i,
+                  start: node.start,
+                  delimiter: node.delimiter,
+                  tight: node.tight,
+                  childContextOverride: childContext,
+                  envOverride: env,
+                  markerStyleOverride: markerStyle,
+                  sharedBullet: sharedBullet,
+                  sharedBulletSpan: sharedBulletSpan,
+                ),
+              )
+            : _buildListItem(
+                context,
+                items[i],
+                renderContext,
+                ordered: node.ordered,
+                index: i,
+                start: node.start,
+                delimiter: node.delimiter,
+                tight: node.tight,
+                childContextOverride: childContext,
+                envOverride: env,
+                markerStyleOverride: markerStyle,
+                sharedBullet: sharedBullet,
+                sharedBulletSpan: sharedBulletSpan,
+              ),
     ],
   );
 }
@@ -878,11 +1218,16 @@ Widget _buildListItem(
   required int start,
   required String delimiter,
   required bool tight,
+  MarkdownBlockRenderContext? childContextOverride,
+  MarkdownRenderEnvironment? envOverride,
+  TextStyle? markerStyleOverride,
+  String? sharedBullet,
+  TextSpan? sharedBulletSpan,
 }) {
   final MarkdownThemeData theme = renderContext.theme;
-  final MarkdownBlockRenderContext childContext = renderContext.copyWith(
-    listDepth: renderContext.listDepth + 1,
-  );
+  final MarkdownBlockRenderContext childContext =
+      childContextOverride ??
+      renderContext.copyWith(listDepth: renderContext.listDepth + 1);
 
   final Widget marker;
   if (item.isTaskItem) {
@@ -928,30 +1273,59 @@ Widget _buildListItem(
       ),
     );
   } else if (ordered) {
+    final MarkdownRenderEnvironment env =
+        envOverride ??
+        renderContext.environment ??
+        MarkdownRenderEnvironment.resolve(context);
+    final String label = '${start + index}$delimiter';
+    final TextStyle markerStyle =
+        markerStyleOverride ??
+        env.resolveTextStyle(theme.bodyTextStyle(color: theme.muted));
     marker = SelectionContainer.disabled(
       child: SizedBox(
         width: 26.0,
-        child: Text(
-          '${start + index}$delimiter',
-          textAlign: TextAlign.right,
-          style: theme.bodyTextStyle(color: theme.muted),
+        child: FastMarkdownText(
+          span: TextSpan(text: label, style: markerStyle),
+          plainText: label,
+          effectiveStyle: markerStyle,
+          resolvedTextAlign: TextAlign.right,
+          resolvedTextDirection: env.textDirection,
+          resolvedTextScaler: env.textScaler,
+          resolvedLocale: env.locale,
+          selectionRegistrar: null,
         ),
       ),
     );
   } else {
-    final String bullet = switch (renderContext.listDepth % 3) {
-      0 => '•',
-      1 => '◦',
-      _ => '▪',
-    };
+    final MarkdownRenderEnvironment env =
+        envOverride ??
+        renderContext.environment ??
+        MarkdownRenderEnvironment.resolve(context);
+    final String bullet =
+        sharedBullet ??
+        switch (renderContext.listDepth % 3) {
+          0 => '•',
+          1 => '◦',
+          _ => '▪',
+        };
+    final TextStyle markerStyle =
+        markerStyleOverride ??
+        env.resolveTextStyle(theme.bodyTextStyle(color: theme.muted));
+    final TextSpan bulletSpan =
+        sharedBulletSpan ?? TextSpan(text: bullet, style: markerStyle);
     marker = SelectionContainer.disabled(
       child: ExcludeSemantics(
         child: SizedBox(
           width: 18.0,
-          child: Text(
-            bullet,
-            textAlign: TextAlign.center,
-            style: theme.bodyTextStyle(color: theme.muted),
+          child: FastMarkdownText(
+            span: bulletSpan,
+            plainText: bullet,
+            effectiveStyle: markerStyle,
+            resolvedTextAlign: TextAlign.center,
+            resolvedTextDirection: env.textDirection,
+            resolvedTextScaler: env.textScaler,
+            resolvedLocale: env.locale,
+            selectionRegistrar: null,
           ),
         ),
       ),
@@ -975,7 +1349,11 @@ Widget _buildListItem(
   );
 }
 
-Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
+Widget _buildTable(
+  BuildContext context,
+  TableNode node,
+  MarkdownBlockRenderContext renderContext,
+) {
   final MarkdownThemeData theme = renderContext.theme;
   final List<TableCellNode> headers = node.headers;
   final List<List<TableCellNode>> rows = node.rows;
@@ -1010,35 +1388,72 @@ Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
     return TableAlignment.none;
   }
 
+  const EdgeInsets cellPadding = EdgeInsets.symmetric(
+    horizontal: 12.0,
+    vertical: 8.0,
+  );
+  final MarkdownRenderEnvironment? env = renderContext.environment;
+  final TextStyle baseBody = theme.bodyTextStyle();
+  final TextStyle headerStyle = baseBody.copyWith(fontWeight: FontWeight.w700);
+  final TextStyle bodyStyle = baseBody.copyWith(fontWeight: FontWeight.w400);
+  final TextStyle? resolvedHeaderStyle = env?.resolveTextStyle(headerStyle);
+  final TextStyle? resolvedBodyStyle = env?.resolveTextStyle(bodyStyle);
+
   Widget buildCell(TableCellNode cell, int col, {required bool isHeader}) {
     final TableAlignment alignment = resolveAlignment(cell, col);
     final TextAlign textAlign = _textAlignForTableAlignment(alignment);
-    final Alignment boxAlign = _boxAlignmentForTableAlignment(alignment);
-    final TextStyle style = theme.bodyTextStyle().copyWith(
-      fontWeight: isHeader ? FontWeight.w700 : FontWeight.w400,
-    );
-    return Semantics(
-      container: true,
-      header: isHeader ? true : null,
-      child: ConstrainedBox(
+    final Widget cellContent;
+    if (canBuildFastSimpleInlines(cell.children)) {
+      cellContent = buildFastOrRichInlineText(
+        context,
+        nodes: cell.children,
+        baseStyle: isHeader ? headerStyle : bodyStyle,
+        theme: theme,
+        delegates: renderContext.delegates,
+        urlPolicy: renderContext.urlPolicy,
+        controller: renderContext.controller,
+        textAlign: textAlign,
+        remoteImagesApproved: renderContext.remoteImagesApproved,
+        onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+        environment: env,
+        effectiveStyleOverride: isHeader
+            ? resolvedHeaderStyle
+            : resolvedBodyStyle,
+        contentPadding: cellPadding,
+        maxWidth: 420.0,
+      );
+    } else {
+      final Alignment boxAlign = _boxAlignmentForTableAlignment(alignment);
+      final Widget textWidget = buildFastOrRichInlineText(
+        context,
+        nodes: cell.children,
+        baseStyle: isHeader ? headerStyle : bodyStyle,
+        theme: theme,
+        delegates: renderContext.delegates,
+        urlPolicy: renderContext.urlPolicy,
+        controller: renderContext.controller,
+        textAlign: textAlign,
+        remoteImagesApproved: renderContext.remoteImagesApproved,
+        onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+        environment: env,
+      );
+      cellContent = ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 420.0),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
-          alignment: boxAlign,
-          child: MarkdownInlineText(
-            nodes: cell.children,
-            baseStyle: style,
-            theme: theme,
-            delegates: renderContext.delegates,
-            urlPolicy: renderContext.urlPolicy,
-            controller: renderContext.controller,
-            textAlign: textAlign,
-            remoteImagesApproved: renderContext.remoteImagesApproved,
-            onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+        child: Padding(
+          padding: cellPadding,
+          child: Align(
+            alignment: boxAlign,
+            widthFactor: 1.0,
+            heightFactor: 1.0,
+            child: textWidget,
           ),
         ),
-      ),
-    );
+      );
+    }
+    if (!isHeader) {
+      return cellContent;
+    }
+    return Semantics(container: true, header: true, child: cellContent);
   }
 
   final List<TableRow> tableRows = <TableRow>[
@@ -1061,8 +1476,7 @@ Widget _buildTable(TableNode node, MarkdownBlockRenderContext renderContext) {
       ),
   ];
 
-  return SingleChildScrollView(
-    scrollDirection: Axis.horizontal,
+  return MarkdownHorizontalOverflowBox(
     child: Table(
       defaultColumnWidth: const IntrinsicColumnWidth(),
       defaultVerticalAlignment: TableCellVerticalAlignment.middle,
@@ -1163,7 +1577,8 @@ final class _MarkdownDetailsBlockState extends State<_MarkdownDetailsBlock> {
                   ),
                   const SizedBox(width: 4.0),
                   Expanded(
-                    child: MarkdownInlineText(
+                    child: buildFastOrRichInlineText(
+                      context,
                       nodes: summaryNodes,
                       baseStyle: theme.bodyTextStyle().copyWith(
                         fontWeight: FontWeight.w600,
@@ -1176,6 +1591,7 @@ final class _MarkdownDetailsBlockState extends State<_MarkdownDetailsBlock> {
                           widget.renderContext.remoteImagesApproved,
                       onRequestLoadRemoteImages:
                           widget.renderContext.onRequestLoadRemoteImages,
+                      environment: widget.renderContext.environment,
                     ),
                   ),
                 ],
@@ -1254,7 +1670,8 @@ Widget _buildFigureBlock(
         ),
         if (captionNodes.isNotEmpty) ...<Widget>[
           const SizedBox(height: 8.0),
-          MarkdownInlineText(
+          buildFastOrRichInlineText(
+            context,
             nodes: captionNodes,
             baseStyle: theme
                 .bodyTextStyle(color: theme.muted)
@@ -1269,6 +1686,7 @@ Widget _buildFigureBlock(
             textAlign: TextAlign.center,
             remoteImagesApproved: renderContext.remoteImagesApproved,
             onRequestLoadRemoteImages: renderContext.onRequestLoadRemoteImages,
+            environment: renderContext.environment,
           ),
         ],
       ],
@@ -1293,6 +1711,8 @@ Widget _buildMathBlock(
       theme: renderContext.theme,
       delegates: renderContext.delegates,
       urlPolicy: renderContext.urlPolicy,
+      hasAncestorSelection:
+          renderContext.environment?.selectionRegistrar != null,
     );
   }
   final MarkdownThemeData theme = renderContext.theme;
@@ -1343,7 +1763,8 @@ Widget _buildDefinitionList(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              MarkdownInlineText(
+              buildFastOrRichInlineText(
+                context,
                 nodes: groups[g].term,
                 baseStyle: theme.bodyTextStyle().copyWith(
                   fontWeight: FontWeight.w700,
@@ -1355,6 +1776,7 @@ Widget _buildDefinitionList(
                 remoteImagesApproved: renderContext.remoteImagesApproved,
                 onRequestLoadRemoteImages:
                     renderContext.onRequestLoadRemoteImages,
+                environment: renderContext.environment,
               ),
               for (final List<MarkdownBlockNode> def in groups[g].definitions)
                 Padding(

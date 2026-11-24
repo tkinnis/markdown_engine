@@ -22,7 +22,15 @@ final class ParsedFrontmatter {
 /// Attempts to parse leading YAML (`---`) or TOML (`+++`) frontmatter at the
 /// very beginning of normalized [source].
 ParsedFrontmatter? tryParseFrontmatter(String source) {
-  if (source.isEmpty) {
+  final int len = source.length;
+  if (len < 3) {
+    return null;
+  }
+  final int c0 = source.codeUnitAt(0);
+  if (c0 != 0x2D && c0 != 0x2B) {
+    return null;
+  }
+  if (source.codeUnitAt(1) != c0 || source.codeUnitAt(2) != c0) {
     return null;
   }
   final int firstNl = source.indexOf('\n');

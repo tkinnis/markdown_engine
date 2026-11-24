@@ -11,29 +11,18 @@ import 'slugs.dart';
 import 'unicode.dart';
 import 'url_utils.dart';
 
-/// Phase 2 resolution output containing finalized immutable AST blocks,
-/// document outline, ordered footnotes, and remote image addresses.
+/// Phase 2 resolution output containing finalized immutable AST blocks and
+/// ordered footnotes.
 final class Phase2Result {
   /// Creates a [Phase2Result].
-  const Phase2Result({
-    required this.blocks,
-    required this.outline,
-    required this.footnotes,
-    required this.remoteImageAddresses,
-  });
+  const Phase2Result({required this.blocks, required this.footnotes});
 
   /// Finalized top-level block AST nodes.
   final List<MarkdownBlockNode> blocks;
 
-  /// Extracted heading outline items.
-  final List<MarkdownOutlineItem> outline;
-
   /// Referenced footnotes in first-citation order (followed by any unreferenced
   /// definitions if inspected via `MarkdownDocument.footnotes`).
   final List<FootnoteDefinitionNode> footnotes;
-
-  /// Deduplicated `http:`/`https:` image URLs referenced in the document.
-  final List<String> remoteImageAddresses;
 }
 
 /// Resolves inline syntax, links, images, emphasis, autolinks, math, footnotes,
@@ -42,6 +31,8 @@ Phase2Result parseInlines(
   Phase1Result phase1,
   MarkdownOptions options, {
   HeadingSlugGenerator? slugGenerator,
+  List<String>? seedHeadingTexts,
+  int seedHeadingCount = 0,
 }) {
   final _InlineResolver resolver = _InlineResolver(
     options: options,
@@ -50,28 +41,103 @@ Phase2Result parseInlines(
     rawFootnotes: phase1.footnoteDefinitions,
     abbreviations: phase1.abbreviations,
     idPrefix: phase1.idPrefix,
-    slugs: slugGenerator ?? HeadingSlugGenerator(),
+    seedSlugs: slugGenerator,
+    seedHeadingTexts: seedHeadingTexts,
+    seedHeadingCount: seedHeadingCount,
   );
   return resolver.resolveDocument(phase1.blocks);
 }
 
+/// Reusable inline resolver for single-paragraph streaming updates without
+/// reallocating resolver/scanner state on every chunk.
+final class ReusableParagraphInlineResolver {
+  /// Creates a reusable paragraph inline resolver for fixed `options`.
+  ReusableParagraphInlineResolver(MarkdownOptions options)
+    : _resolver = _InlineResolver(
+        options: options,
+        budgets: options.effectiveBudgets,
+        linkDefinitions: const <String, MarkdownLinkDefinition>{},
+        rawFootnotes: const <String, RawFootnoteDef>{},
+        abbreviations: const <String, String>{},
+        idPrefix: '',
+      );
+
+  final _InlineResolver _resolver;
+
+  /// Parses inline children of a single paragraph using cached scratch buffers.
+  List<MarkdownInlineNode> parse(String input, SourceSpan span) {
+    _resolver.resetCounters();
+    return _resolver._parseInlineString(input, span);
+  }
+}
+
+/// Reusable document-level inline resolver for streaming active-tail parses,
+/// avoiding re-allocating scanner buffers on every non-paragraph chunk.
+final class ReusableBlockInlineResolver {
+  /// Creates a reusable document-level inline resolver for fixed `options`.
+  ReusableBlockInlineResolver(MarkdownOptions options)
+    : _resolver = _InlineResolver(
+        options: options,
+        budgets: options.effectiveBudgets,
+        linkDefinitions: const <String, MarkdownLinkDefinition>{},
+        rawFootnotes: const <String, RawFootnoteDef>{},
+        abbreviations: const <String, String>{},
+        idPrefix: '',
+      );
+
+  final _InlineResolver _resolver;
+
+  /// Resolves all inlines across [phase1] reusing internal scratch buffers.
+  Phase2Result parse(
+    Phase1Result phase1, {
+    HeadingSlugGenerator? slugGenerator,
+    List<String>? seedHeadingTexts,
+    int seedHeadingCount = 0,
+  }) {
+    _resolver.resetForDocument(
+      phase1,
+      seedSlugs: slugGenerator,
+      seedHeadingTexts: seedHeadingTexts,
+      seedHeadingCount: seedHeadingCount,
+    );
+    return _resolver.resolveDocument(phase1.blocks);
+  }
+
+  /// Resolves inline nodes for a single paragraph string reusing internal
+  /// scratch buffers.
+  List<MarkdownInlineNode> parseParagraph(String input, SourceSpan span) {
+    _resolver.resetForParagraph();
+    return _resolver._parseInlineString(input, span);
+  }
+}
+
 const int _maxAbbrPatternKeys = 512;
 
-final Uint8List _postCharFlags = _buildPostCharFlags();
+// 128-byte ASCII LUT cached per structural feature-bit combination:
+//   0 = plain ASCII byte (never starts an inline construct or post-pass)
+//   1 = structural inline delimiter / trigger
+//   2 = post-pass candidate (':', '@', '.', '"', '\'', '-')
+final List<Uint8List?> _structuralLutCache = List<Uint8List?>.filled(16, null);
 
-Uint8List _buildPostCharFlags() {
-  final Uint8List flags = Uint8List(128);
-  flags[0x3A] = 1; // ':' (emoji or ://)
-  flags[0x40] = 2; // '@' (email autolink)
-  flags[0x2E] = 4; // '.' (www. or ...)
-  flags[0x22] = 8; // '"' (smart quote)
-  flags[0x27] = 8; // '\'' (smart quote)
-  flags[0x2D] = 16; // '-' (-- / ---)
-  return flags;
+Uint8List _getStructuralLut(MarkdownOptions options) {
+  final int key =
+      ((options.gfmStrikethrough || options.subscript) ? 1 : 0) |
+      (options.highlight ? 2 : 0) |
+      (options.superscript ? 4 : 0) |
+      (options.math ? 8 : 0);
+  return _structuralLutCache[key] ??= _buildStructuralLut(options);
 }
 
 Uint8List _buildStructuralLut(MarkdownOptions options) {
   final Uint8List lut = Uint8List(128);
+  // Post-processing trigger bytes (disjoint from all structural bytes).
+  lut[0x3A] = 2; // ':' (emoji or ://)
+  lut[0x40] = 2; // '@' (email autolink)
+  lut[0x2E] = 2; // '.' (www. or ...)
+  lut[0x22] = 2; // '"' (smart quote)
+  lut[0x27] = 2; // '\'' (smart quote)
+  lut[0x2D] = 2; // '-' (-- / ---)
+  // Structural inline bytes.
   lut[0x0A] = 1; // '\n'
   lut[0x5C] = 1; // '\\'
   lut[0x60] = 1; // '`'
@@ -97,6 +163,56 @@ Uint8List _buildStructuralLut(MarkdownOptions options) {
   return lut;
 }
 
+final Uint8List _asciiFlankLut = _buildAsciiFlankLut();
+
+Uint8List _buildAsciiFlankLut() {
+  final Uint8List lut = Uint8List(128);
+  lut[0x20] = 1;
+  lut[0x09] = 1;
+  lut[0x0A] = 1;
+  lut[0x0C] = 1;
+  lut[0x0D] = 1;
+  for (int cu = 0x21; cu <= 0x2F; cu++) {
+    lut[cu] = 2;
+  }
+  for (int cu = 0x3A; cu <= 0x40; cu++) {
+    lut[cu] = 2;
+  }
+  for (int cu = 0x5B; cu <= 0x60; cu++) {
+    lut[cu] = 2;
+  }
+  for (int cu = 0x7B; cu <= 0x7E; cu++) {
+    lut[cu] = 2;
+  }
+  return lut;
+}
+
+bool _isEmojiShortcodeChar(int cu) =>
+    (cu >= 0x61 && cu <= 0x7A) ||
+    (cu >= 0x30 && cu <= 0x39) ||
+    cu == 0x5F ||
+    cu == 0x2B ||
+    cu == 0x2D;
+
+bool _hasEmojiShortcodeCandidate(String input, int colonPos, int len) {
+  if (colonPos + 2 >= len ||
+      !_isEmojiShortcodeChar(input.codeUnitAt(colonPos + 1))) {
+    return false;
+  }
+  int j = colonPos + 2;
+  while (j < len) {
+    final int c = input.codeUnitAt(j);
+    if (c == 0x3A) {
+      return true;
+    }
+    if (!_isEmojiShortcodeChar(c)) {
+      return false;
+    }
+    j++;
+  }
+  return false;
+}
+
 final class _InlineResolver {
   _InlineResolver({
     required this.options,
@@ -105,37 +221,83 @@ final class _InlineResolver {
     required this.rawFootnotes,
     required this.abbreviations,
     required this.idPrefix,
-    required HeadingSlugGenerator slugs,
-  }) : _slugs = slugs,
-       structuralLut = _buildStructuralLut(options) {
-    _scanner = _InlineScanner(resolver: this);
-  }
+    HeadingSlugGenerator? seedSlugs,
+    List<String>? seedHeadingTexts,
+    int seedHeadingCount = 0,
+  }) : _seedSlugs = seedSlugs,
+       _seedHeadingTexts = seedHeadingTexts ?? _emptySeedHeadingTexts,
+       _seedHeadingCount = seedHeadingCount,
+       structuralLut = _getStructuralLut(options);
+
+  static final List<String> _emptySeedHeadingTexts = <String>[];
 
   final MarkdownOptions options;
   final MarkdownBudgets budgets;
-  final Map<String, MarkdownLinkDefinition> linkDefinitions;
-  final Map<String, RawFootnoteDef> rawFootnotes;
-  final Map<String, String> abbreviations;
-  final String idPrefix;
+  Map<String, MarkdownLinkDefinition> linkDefinitions;
+  Map<String, RawFootnoteDef> rawFootnotes;
+  Map<String, String> abbreviations;
+  String idPrefix;
   final Uint8List structuralLut;
-  late final _InlineScanner _scanner;
+  _InlineScanner? _scanner;
 
-  final HeadingSlugGenerator _slugs;
-  final List<MarkdownOutlineItem> _outline = <MarkdownOutlineItem>[];
-  final List<String> _remoteImages = <String>[];
-  final Set<String> _remoteImageSet = <String>{};
+  HeadingSlugGenerator? _seedSlugs;
+  List<String> _seedHeadingTexts;
+  int _seedHeadingCount;
+  HeadingSlugBatch? _slugBatch;
 
-  // Footnote citation tracking in order of first reference.
-  final List<String> _citedFootnoteOrder = <String>[];
-  final Map<String, int> _footnoteIndexByLabel = <String, int>{};
-  final Map<String, int> _footnoteRefCountByLabel = <String, int>{};
-  final Map<String, FootnoteDefinitionNode> _resolvedFootnotes =
-      <String, FootnoteDefinitionNode>{};
+  // Footnote citation tracking in order of first reference (lazy).
+  List<String>? _citedFootnoteOrder;
+  Map<String, int>? _footnoteIndexByLabel;
+  Map<String, int>? _footnoteRefCountByLabel;
+  Map<String, FootnoteDefinitionNode>? _resolvedFootnotes;
 
   int _synthCounter = 0;
   int _totalTokens = 0;
   int _expandedOutputBytes = 0;
   RegExp? _cachedAbbrPattern;
+
+  void resetCounters() {
+    _synthCounter = 0;
+    _totalTokens = 0;
+    _expandedOutputBytes = 0;
+  }
+
+  void resetForDocument(
+    Phase1Result phase1, {
+    HeadingSlugGenerator? seedSlugs,
+    List<String>? seedHeadingTexts,
+    int seedHeadingCount = 0,
+  }) {
+    linkDefinitions = phase1.linkDefinitions;
+    rawFootnotes = phase1.footnoteDefinitions;
+    abbreviations = phase1.abbreviations;
+    idPrefix = phase1.idPrefix;
+    _seedSlugs = seedSlugs;
+    _seedHeadingTexts = seedHeadingTexts ?? _emptySeedHeadingTexts;
+    _seedHeadingCount = seedHeadingCount;
+    _slugBatch = null;
+    _citedFootnoteOrder?.clear();
+    _footnoteIndexByLabel?.clear();
+    _footnoteRefCountByLabel?.clear();
+    _resolvedFootnotes?.clear();
+    _cachedAbbrPattern = null;
+    resetCounters();
+  }
+
+  void resetForParagraph() {
+    linkDefinitions = const <String, MarkdownLinkDefinition>{};
+    rawFootnotes = const <String, RawFootnoteDef>{};
+    abbreviations = const <String, String>{};
+    idPrefix = '';
+    _seedSlugs = null;
+    _seedHeadingTexts = _emptySeedHeadingTexts;
+    _seedHeadingCount = 0;
+    _slugBatch = null;
+    _cachedAbbrPattern = null;
+    resetCounters();
+  }
+
+  _InlineScanner get scanner => _scanner ??= _InlineScanner(resolver: this);
 
   RegExp? get abbrPattern {
     if (_cachedAbbrPattern != null) {
@@ -169,50 +331,64 @@ final class _InlineResolver {
 
   Phase2Result resolveDocument(List<RawBlock> rawBlocks) {
     final List<MarkdownBlockNode> resolvedBlocks = _resolveBlockList(rawBlocks);
+    if (rawFootnotes.isEmpty) {
+      return Phase2Result(
+        blocks: resolvedBlocks,
+        footnotes: const <FootnoteDefinitionNode>[],
+      );
+    }
+
+    final List<String>? citedOrder = _citedFootnoteOrder;
+    final Map<String, int>? indexByLabel = _footnoteIndexByLabel;
+    final Map<String, int>? refCountByLabel = _footnoteRefCountByLabel;
+    final Map<String, FootnoteDefinitionNode> resolvedFootnotes =
+        _resolvedFootnotes ??= <String, FootnoteDefinitionNode>{};
 
     // Resolve cited footnotes iteratively so footnote-in-footnote references
     // are discovered in citation order without risking cycles.
-    int queueIdx = 0;
-    while (queueIdx < _citedFootnoteOrder.length) {
-      final String label = _citedFootnoteOrder[queueIdx];
-      queueIdx++;
-      final RawFootnoteDef? rawDef = rawFootnotes[label];
-      if (rawDef == null) {
-        continue;
+    if (citedOrder != null) {
+      int queueIdx = 0;
+      while (queueIdx < citedOrder.length) {
+        final String label = citedOrder[queueIdx];
+        queueIdx++;
+        final RawFootnoteDef? rawDef = rawFootnotes[label];
+        if (rawDef == null) {
+          continue;
+        }
+        final List<MarkdownBlockNode> body = _resolveBlockList(rawDef.children);
+        resolvedFootnotes[label] = createFrozenFootnoteDefinitionNode(
+          blockId: rawDef.blockId,
+          span: rawDef.span,
+          label: rawDef.label,
+          index: indexByLabel![label]!,
+          referenceCount: refCountByLabel![label] ?? 1,
+          children: body,
+        );
       }
-      final List<MarkdownBlockNode> body = _resolveBlockList(rawDef.children);
-      _resolvedFootnotes[label] = FootnoteDefinitionNode(
-        blockId: rawDef.blockId,
-        span: rawDef.span,
-        label: rawDef.label,
-        index: _footnoteIndexByLabel[label]!,
-        referenceCount: _footnoteRefCountByLabel[label] ?? 1,
-        children: body,
-      );
     }
 
     // Update final referenceCounts in case footnotes referenced earlier ones.
     final List<FootnoteDefinitionNode> orderedCited =
         <FootnoteDefinitionNode>[];
-    for (final String label in _citedFootnoteOrder) {
-      final FootnoteDefinitionNode? def = _resolvedFootnotes[label];
-      if (def != null) {
-        orderedCited.add(
-          FootnoteDefinitionNode(
-            blockId: def.blockId,
-            span: def.span,
-            label: def.label,
-            index: _footnoteIndexByLabel[label]!,
-            referenceCount: _footnoteRefCountByLabel[label] ?? 1,
-            children: def.children,
-          ),
-        );
+    if (citedOrder != null) {
+      for (final String label in citedOrder) {
+        final FootnoteDefinitionNode? def = resolvedFootnotes[label];
+        if (def != null) {
+          orderedCited.add(
+            createFrozenFootnoteDefinitionNode(
+              blockId: def.blockId,
+              span: def.span,
+              label: def.label,
+              index: indexByLabel![label]!,
+              referenceCount: refCountByLabel![label] ?? 1,
+              children: def.children,
+            ),
+          );
+        }
       }
     }
 
-    final List<MarkdownBlockNode> finalBlocks = <MarkdownBlockNode>[
-      ...resolvedBlocks,
-    ];
+    final List<MarkdownBlockNode> finalBlocks;
     if (orderedCited.isNotEmpty) {
       int minStartOffset = orderedCited.first.span.startOffset;
       int maxEndOffset = orderedCited.first.span.endOffset;
@@ -233,10 +409,11 @@ final class _InlineResolver {
           maxEndLine = s.endLine;
         }
       }
-      finalBlocks.add(
-        FootnoteSectionNode(
+      finalBlocks = freezeFreshList(<MarkdownBlockNode>[
+        ...resolvedBlocks,
+        createFrozenFootnoteSectionNode(
           blockId: '${idPrefix}footnote-section',
-          definitions: freezeList(orderedCited),
+          definitions: freezeFreshList(orderedCited),
           span: SourceSpan(
             startOffset: minStartOffset,
             endOffset: maxEndOffset,
@@ -244,7 +421,9 @@ final class _InlineResolver {
             endLine: maxEndLine,
           ),
         ),
-      );
+      ]);
+    } else {
+      finalBlocks = resolvedBlocks;
     }
 
     // Also resolve unreferenced footnote definitions for `document.footnotes`.
@@ -252,10 +431,10 @@ final class _InlineResolver {
       ...orderedCited,
     ];
     for (final MapEntry<String, RawFootnoteDef> entry in rawFootnotes.entries) {
-      if (!_footnoteIndexByLabel.containsKey(entry.key)) {
+      if (indexByLabel == null || !indexByLabel.containsKey(entry.key)) {
         final RawFootnoteDef rawDef = entry.value;
         allFootnotes.add(
-          FootnoteDefinitionNode(
+          createFrozenFootnoteDefinitionNode(
             blockId: rawDef.blockId,
             span: rawDef.span,
             label: rawDef.label,
@@ -268,21 +447,59 @@ final class _InlineResolver {
     }
 
     return Phase2Result(
-      blocks: freezeList(finalBlocks),
-      outline: freezeList(_outline),
-      footnotes: freezeList(allFootnotes),
-      remoteImageAddresses: freezeList(_remoteImages),
+      blocks: finalBlocks,
+      footnotes: freezeFreshList(allFootnotes),
     );
   }
 
   List<MarkdownBlockNode> _resolveBlockList(List<RawBlock> rawBlocks) {
-    if (rawBlocks.isEmpty) {
-      return const <MarkdownBlockNode>[];
+    final int len = rawBlocks.length;
+    if (len == 0) {
+      return emptyFrozenBlockList;
+    }
+    if (len == 1) {
+      return freezeFreshList(<MarkdownBlockNode>[_resolveBlock(rawBlocks[0])]);
     }
     final List<MarkdownBlockNode> out = <MarkdownBlockNode>[
-      for (final RawBlock raw in rawBlocks) _resolveBlock(raw),
+      for (int i = 0; i < len; i++) _resolveBlock(rawBlocks[i]),
     ];
-    return freezeList(out);
+    return freezeFreshList(out);
+  }
+
+  HeadingNode _buildResolvedHeading({
+    required String blockId,
+    required SourceSpan span,
+    required int level,
+    required String rawText,
+    String? explicitId,
+    required bool isSetext,
+  }) {
+    final List<MarkdownInlineNode> children = _parseInlineString(rawText, span);
+    final String plain = children.length == 1 && children[0] is TextNode
+        ? (children[0] as TextNode).text
+        : _extractPlainText(children);
+    String? slug;
+    HeadingSlugBatch? slugBatch;
+    if (options.explicitHeadingIds && explicitId != null) {
+      slug = explicitId;
+    } else if (options.headingSlugs) {
+      slugBatch = _slugBatch ??= HeadingSlugBatch(
+        _seedSlugs,
+        _seedHeadingTexts,
+        _seedHeadingCount,
+      );
+    }
+    return createFrozenHeadingNode(
+      blockId: blockId,
+      span: span,
+      level: level,
+      text: plain,
+      slug: slug,
+      slugBatch: slugBatch,
+      explicitId: explicitId,
+      children: children,
+      isSetext: isSetext,
+    );
   }
 
   MarkdownBlockNode _resolveBlock(RawBlock raw) {
@@ -290,42 +507,18 @@ final class _InlineResolver {
       case RawFrontmatter():
         return raw.node;
       case RawParagraph():
-        return ParagraphNode(
+        return createFrozenParagraphNode(
           blockId: raw.blockId,
           span: raw.span,
           children: _parseInlineString(raw.rawText, raw.span),
         );
       case RawHeading():
-        final List<MarkdownInlineNode> children = _parseInlineString(
-          raw.rawText,
-          raw.span,
-        );
-        final String plain = _extractPlainText(children);
-        String? slug;
-        if (options.explicitHeadingIds && raw.explicitId != null) {
-          slug = raw.explicitId;
-        } else if (options.headingSlugs) {
-          slug = _slugs.generate(plain);
-        }
-        if (options.headingSlugs || raw.explicitId != null) {
-          _outline.add(
-            MarkdownOutlineItem(
-              text: plain,
-              level: raw.level,
-              line: raw.span.startLine,
-              slug: slug ?? slugifyHeadingText(plain),
-              span: raw.span,
-            ),
-          );
-        }
-        return HeadingNode(
+        return _buildResolvedHeading(
           blockId: raw.blockId,
           span: raw.span,
           level: raw.level,
-          text: plain,
-          slug: slug,
+          rawText: raw.rawText,
           explicitId: raw.explicitId,
-          children: children,
           isSetext: raw.isSetext,
         );
       case RawCodeBlock():
@@ -354,13 +547,13 @@ final class _InlineResolver {
           latex: raw.latex,
         );
       case RawBlockQuote():
-        return BlockQuoteNode(
+        return createFrozenBlockQuoteNode(
           blockId: raw.blockId,
           span: raw.span,
           children: _resolveBlockList(raw.children),
         );
       case RawAlert():
-        return AlertNode(
+        return createFrozenAlertNode(
           blockId: raw.blockId,
           span: raw.span,
           kind: raw.kind,
@@ -368,124 +561,197 @@ final class _InlineResolver {
           children: _resolveBlockList(raw.children),
         );
       case RawList():
-        return ListNode(
+        return createFrozenListNode(
           blockId: raw.blockId,
           span: raw.span,
           ordered: raw.ordered,
           start: raw.start,
           tight: raw.tight,
           delimiter: raw.delimiter,
-          items: freezeList(<ListItemNode>[
-            for (final RawListItem item in raw.items)
-              ListItemNode(
-                blockId: item.blockId,
-                span: item.span,
-                taskState: item.taskState,
-                children: _resolveBlockList(item.children),
+          items: freezeFreshList(<ListItemNode>[
+            for (int i = 0; i < raw.items.length; i++)
+              createFrozenListItemNode(
+                blockId: raw.items[i].blockId,
+                span: raw.items[i].span,
+                taskState: raw.items[i].taskStateCode < 0
+                    ? null
+                    : raw.items[i].taskStateCode != 0,
+                children: _resolveBlockList(raw.items[i].children),
               ),
           ]),
         );
       case RawListItem():
-        return ListItemNode(
+        return createFrozenListItemNode(
           blockId: raw.blockId,
           span: raw.span,
-          taskState: raw.taskState,
+          taskState: raw.taskStateCode < 0 ? null : raw.taskStateCode != 0,
           children: _resolveBlockList(raw.children),
         );
       case RawTable():
-        final int colCount = raw.alignments.length;
-        final List<TableCellNode> headers = <TableCellNode>[];
-        for (int c = 0; c < colCount; c++) {
-          final String cellText = c < raw.headerCells.length
-              ? raw.headerCells[c]
-              : '';
-          headers.add(
-            TableCellNode(
-              children: _parseInlineString(cellText, raw.span),
-              alignment: raw.alignments[c],
-              span: raw.span,
-            ),
-          );
-        }
-        final List<List<TableCellNode>> rows = <List<TableCellNode>>[];
-        for (final List<String> rawRow in raw.rows) {
-          final List<TableCellNode> row = <TableCellNode>[];
-          for (int c = 0; c < colCount; c++) {
-            final String cellText = c < rawRow.length ? rawRow[c] : '';
-            row.add(
-              TableCellNode(
-                children: _parseInlineString(cellText, raw.span),
-                alignment: raw.alignments[c],
-                span: raw.span,
-              ),
-            );
-          }
-          rows.add(freezeList(row));
-        }
-        return TableNode(
-          blockId: raw.blockId,
-          span: raw.span,
-          alignments: raw.alignments,
-          headers: freezeList(headers),
-          rows: freezeList(rows),
-        );
+        return _resolveTable(raw);
       case RawDefinitionList():
-        final List<DefinitionGroup> groups = <DefinitionGroup>[
-          for (final RawDefGroup g in raw.groups)
-            DefinitionGroup(
-              term: _parseInlineString(g.termRaw, g.span),
-              definitions: freezeList(<List<MarkdownBlockNode>>[
-                for (final List<RawBlock> d in g.definitions)
-                  _resolveBlockList(d),
-              ]),
-              span: g.span,
-            ),
-        ];
-        return DefinitionListNode(
-          blockId: raw.blockId,
-          span: raw.span,
-          groups: freezeList(groups),
-        );
+        return _resolveDefinitionList(raw);
       case RawFootnoteDef():
-        return FootnoteDefinitionNode(
+        return createFrozenFootnoteDefinitionNode(
           blockId: raw.blockId,
           span: raw.span,
           label: raw.label,
+          index: 0,
+          referenceCount: 0,
           children: _resolveBlockList(raw.children),
         );
       case RawDetailsBlock():
-        final List<MarkdownInlineNode> sumInlines = _parseInlineString(
-          raw.summaryRaw,
-          raw.span,
-        );
-        return DetailsBlockNode(
-          blockId: raw.blockId,
-          span: raw.span,
-          summary: _extractPlainText(sumInlines),
-          summaryInlines: sumInlines,
-          initiallyOpen: raw.initiallyOpen,
-          children: _resolveBlockList(raw.children),
-        );
+        return _resolveDetailsBlock(raw);
       case RawAlignedBlock():
-        return AlignedBlockNode(
+        return createFrozenAlignedBlockNode(
           blockId: raw.blockId,
           span: raw.span,
           alignment: raw.alignment,
           children: _resolveBlockList(raw.children),
         );
       case RawFigureBlock():
-        final String? cap = raw.captionRaw;
-        final List<MarkdownInlineNode> capInlines = cap == null
-            ? const <MarkdownInlineNode>[]
-            : _parseInlineString(cap, raw.span);
-        return FigureBlockNode(
-          blockId: raw.blockId,
-          span: raw.span,
-          children: _resolveBlockList(raw.children),
-          caption: cap == null ? null : _extractPlainText(capInlines),
-          captionInlines: capInlines,
-        );
+        return _resolveFigureBlock(raw);
     }
+  }
+
+  static final List<List<TableCellNode>> _emptyTableRows =
+      <List<TableCellNode>>[];
+
+  TableNode _resolveTable(RawTable raw) {
+    final int colCount = raw.alignments.length;
+    final List<TableCellNode> headers;
+    if (colCount == 0) {
+      headers = emptyFrozenTableCellList;
+    } else if (colCount == 1) {
+      final String cellText = raw.headerCells.isNotEmpty
+          ? raw.headerCells[0]
+          : '';
+      headers = freezeSingleton<TableCellNode>(
+        createFrozenTableCellNode(
+          children: _parseInlineString(cellText, raw.span),
+          alignment: raw.alignments[0],
+          span: raw.span,
+        ),
+      );
+    } else {
+      headers = freezeFreshList(<TableCellNode>[
+        for (int c = 0; c < colCount; c++)
+          createFrozenTableCellNode(
+            children: _parseInlineString(
+              c < raw.headerCells.length ? raw.headerCells[c] : '',
+              raw.span,
+            ),
+            alignment: raw.alignments[c],
+            span: raw.span,
+          ),
+      ]);
+    }
+    final int rowCount = raw.rows.length;
+    final List<List<TableCellNode>> rows;
+    if (rowCount == 0) {
+      rows = freezeFreshList(_emptyTableRows);
+    } else {
+      final List<List<TableCellNode>> builtRows = <List<TableCellNode>>[
+        for (int r = 0; r < rowCount; r++)
+          if (colCount == 0)
+            emptyFrozenTableCellList
+          else if (colCount == 1)
+            freezeSingleton<TableCellNode>(
+              createFrozenTableCellNode(
+                children: _parseInlineString(
+                  raw.rows[r].isNotEmpty ? raw.rows[r][0] : '',
+                  raw.span,
+                ),
+                alignment: raw.alignments[0],
+                span: raw.span,
+              ),
+            )
+          else
+            freezeFreshList(<TableCellNode>[
+              for (int c = 0; c < colCount; c++)
+                createFrozenTableCellNode(
+                  children: _parseInlineString(
+                    c < raw.rows[r].length ? raw.rows[r][c] : '',
+                    raw.span,
+                  ),
+                  alignment: raw.alignments[c],
+                  span: raw.span,
+                ),
+            ]),
+      ];
+      rows = freezeFreshList(builtRows);
+    }
+    return createFrozenTableNode(
+      blockId: raw.blockId,
+      span: raw.span,
+      alignments: raw.alignments,
+      headers: headers,
+      rows: rows,
+    );
+  }
+
+  DefinitionListNode _resolveDefinitionList(RawDefinitionList raw) {
+    final List<DefinitionGroup> groups = <DefinitionGroup>[
+      for (final RawDefGroup g in raw.groups)
+        createFrozenDefinitionGroup(
+          term: _parseInlineString(g.termRaw, g.span),
+          definitions: freezeFreshList(<List<MarkdownBlockNode>>[
+            for (final List<RawBlock> d in g.definitions) _resolveBlockList(d),
+          ]),
+          span: g.span,
+        ),
+    ];
+    return createFrozenDefinitionListNode(
+      blockId: raw.blockId,
+      span: raw.span,
+      groups: freezeFreshList(groups),
+    );
+  }
+
+  DetailsBlockNode _resolveDetailsBlock(RawDetailsBlock raw) {
+    final List<MarkdownInlineNode> sumInlines = _parseInlineString(
+      raw.summaryRaw,
+      raw.span,
+    );
+    return createFrozenDetailsBlockNode(
+      blockId: raw.blockId,
+      span: raw.span,
+      summary: _extractPlainText(sumInlines),
+      summaryInlines: sumInlines,
+      initiallyOpen: raw.initiallyOpen,
+      children: _resolveBlockList(raw.children),
+    );
+  }
+
+  FigureBlockNode _resolveFigureBlock(RawFigureBlock raw) {
+    final String? cap = raw.captionRaw;
+    final List<MarkdownInlineNode> capInlines = cap == null
+        ? emptyFrozenInlineList
+        : _parseInlineString(cap, raw.span);
+    return createFrozenFigureBlockNode(
+      blockId: raw.blockId,
+      span: raw.span,
+      children: _resolveBlockList(raw.children),
+      caption: cap == null ? null : _extractPlainText(capInlines),
+      captionInlines: capInlines,
+    );
+  }
+
+  @pragma('vm:never-inline')
+  static String _normalizeCodeSpanSpaces(String raw) {
+    if (raw.contains('\n')) {
+      raw = raw.replaceAll('\n', ' ');
+    }
+    if (raw.length >= 2 &&
+        raw.codeUnitAt(0) == 0x20 &&
+        raw.codeUnitAt(raw.length - 1) == 0x20) {
+      for (int k = 0; k < raw.length; k++) {
+        if (raw.codeUnitAt(k) != 0x20) {
+          return raw.substring(1, raw.length - 1);
+        }
+      }
+    }
+    return raw;
   }
 
   List<MarkdownInlineNode> _parseInlineString(
@@ -493,118 +759,323 @@ final class _InlineResolver {
     SourceSpan blockSpan,
   ) {
     if (input.isEmpty) {
-      return const <MarkdownInlineNode>[];
+      return emptyFrozenInlineList;
     }
     if (_totalTokens >= budgets.maxTokens) {
-      return freezeList(<MarkdownInlineNode>[TextNode(input, span: blockSpan)]);
+      return freezeSingleton<MarkdownInlineNode>(
+        TextNode(input, span: blockSpan),
+      );
     }
 
     // Zero-alloc plain-text pre-scan: skip _InlineScanner when no structural
     // delimiter/marker exists and detect exact post-processing triggers in 1 pass.
     final int len = input.length;
-    bool hasStructural = false;
+    final Uint8List lut = structuralLut;
+    int firstStructPos = -1;
+    int btStart = -1;
+    int btEnd = -1;
+    List<int>? btSpans;
     bool hasAutolink = false;
     bool hasEmojiColon = false;
     bool hasSmartPunct = false;
     for (int i = 0; i < len; i++) {
       final int cu = input.codeUnitAt(i);
       if (cu < 128) {
-        if (structuralLut[cu] != 0) {
-          hasStructural = true;
+        final int cls = lut[cu];
+        if (cls == 0) {
+          continue;
+        }
+        if (cls == 1) {
+          // Single '=' in prose never forms highlight (`==`); skip false hits.
+          if (cu == 0x3D && !(i + 1 < len && input.codeUnitAt(i + 1) == 0x3D)) {
+            continue;
+          }
+          // '&' followed by non-entity starter (e.g. '& ') never decodes.
+          if (cu == 0x26) {
+            if (i + 2 >= len) {
+              continue;
+            }
+            final int next = input.codeUnitAt(i + 1);
+            if (next != 0x23 &&
+                !((next >= 0x41 && next <= 0x5A) ||
+                    (next >= 0x61 && next <= 0x7A))) {
+              continue;
+            }
+          }
+          // Track isolated single-backtick spans inline so prose with code
+          // spans avoids _InlineScanner + _InlineItem allocations.
+          if (cu == 0x60 && i + 1 < len && input.codeUnitAt(i + 1) != 0x60) {
+            final int close = input.indexOf('`', i + 1);
+            if (close != -1 &&
+                (close + 1 >= len || input.codeUnitAt(close + 1) != 0x60)) {
+              if (btStart == -1) {
+                btStart = i;
+                btEnd = close;
+              } else {
+                btSpans ??= <int>[btStart, btEnd];
+                btSpans.add(i);
+                btSpans.add(close);
+              }
+              i = close;
+              continue;
+            }
+          }
+          firstStructPos = btStart != -1 ? btStart : i;
           break;
         }
-        final int pf = _postCharFlags[cu];
-        if (pf != 0) {
-          if (cu == 0x40) {
+        if (cu == 0x40) {
+          hasAutolink = true;
+        } else if (cu == 0x3A) {
+          if (i + 2 < len &&
+              input.codeUnitAt(i + 1) == 0x2F &&
+              input.codeUnitAt(i + 2) == 0x2F) {
             hasAutolink = true;
-          } else if (cu == 0x3A) {
+          } else if (!hasEmojiColon &&
+              _hasEmojiShortcodeCandidate(input, i, len)) {
             hasEmojiColon = true;
-            if (i + 2 < len &&
-                input.codeUnitAt(i + 1) == 0x2F &&
-                input.codeUnitAt(i + 2) == 0x2F) {
-              hasAutolink = true;
-            }
-          } else if (cu == 0x2E) {
-            if (i >= 3 && _matchesWwwPrefixBeforeDot(input, i)) {
-              hasAutolink = true;
-            }
-            if (i + 2 < len &&
-                input.codeUnitAt(i + 1) == 0x2E &&
-                input.codeUnitAt(i + 2) == 0x2E) {
-              hasSmartPunct = true;
-            }
-          } else if (cu == 0x22 || cu == 0x27) {
+          }
+        } else if (cu == 0x2E) {
+          if (!hasAutolink && i >= 3 && _matchesWwwPrefixBeforeDot(input, i)) {
+            hasAutolink = true;
+          }
+          if (!hasSmartPunct &&
+              i + 2 < len &&
+              input.codeUnitAt(i + 1) == 0x2E &&
+              input.codeUnitAt(i + 2) == 0x2E) {
             hasSmartPunct = true;
-          } else if (cu == 0x2D) {
-            if (i + 1 < len && input.codeUnitAt(i + 1) == 0x2D) {
-              hasSmartPunct = true;
-            }
+          }
+        } else if (cu == 0x22 || cu == 0x27) {
+          hasSmartPunct = true;
+        } else if (cu == 0x2D) {
+          if (!hasSmartPunct &&
+              i + 1 < len &&
+              input.codeUnitAt(i + 1) == 0x2D) {
+            hasSmartPunct = true;
           }
         }
       }
     }
 
-    if (!hasStructural) {
-      _totalTokens++;
+    if (firstStructPos == -1) {
       final bool runAutolinks = options.gfmAutolinks && hasAutolink;
       final bool runEmoji = options.emoji && hasEmojiColon;
       final bool runSmart = options.smartPunctuation && hasSmartPunct;
       final bool runAbbr = options.abbreviations && abbreviations.isNotEmpty;
-      if (!runAutolinks && !runEmoji && !runSmart && !runAbbr) {
-        return freezeList(<MarkdownInlineNode>[
-          TextNode(input, span: blockSpan),
-        ]);
+      final bool noPost = !runAutolinks && !runEmoji && !runSmart && !runAbbr;
+      if (btStart == -1) {
+        _totalTokens++;
+        final List<MarkdownInlineNode> singleList =
+            freezeSingleton<MarkdownInlineNode>(
+              TextNode(input, span: blockSpan),
+            );
+        if (noPost) {
+          return singleList;
+        }
+        return (scanner..reset(input, blockSpan))._finishPostPasses(
+          singleList,
+          runAutolinks: runAutolinks,
+          runEmoji: runEmoji,
+          runSmart: runSmart,
+          runAbbr: runAbbr,
+        );
       }
-      _scanner.reset(input, blockSpan);
-      List<MarkdownInlineNode> nodes = <MarkdownInlineNode>[
-        TextNode(input, span: blockSpan),
-      ];
-      if (runAutolinks) {
-        nodes = _scanner._applyGfmAutolinks(nodes);
+      if (btSpans != null) {
+        final List<MarkdownInlineNode>? multi = _tryBuildMultiBacktickNodes(
+          input,
+          blockSpan,
+          btSpans,
+          len,
+        );
+        if (multi != null) {
+          if (noPost) {
+            return freezeFreshList(multi);
+          }
+          return (scanner..reset(input, blockSpan))._finishPostPasses(
+            multi,
+            runAutolinks: runAutolinks,
+            runEmoji: runEmoji,
+            runSmart: runSmart,
+            runAbbr: runAbbr,
+          );
+        }
+        firstStructPos = btStart;
+      } else {
+        final int neededTokens =
+            1 + (btStart > 0 ? 1 : 0) + (btEnd + 1 < len ? 1 : 0);
+        if (_totalTokens + neededTokens <= budgets.maxTokens) {
+          _totalTokens += neededTokens;
+          String raw = input.substring(btStart + 1, btEnd);
+          if (raw.contains('\n') ||
+              (raw.length >= 2 &&
+                  raw.codeUnitAt(0) == 0x20 &&
+                  raw.codeUnitAt(raw.length - 1) == 0x20)) {
+            raw = _normalizeCodeSpanSpaces(raw);
+          }
+          if (btStart == 0 && btEnd + 1 >= len) {
+            return freezeSingleton<MarkdownInlineNode>(
+              CodeSpanNode(raw, span: blockSpan),
+            );
+          }
+          final int base = blockSpan.startOffset;
+          final int sLine = blockSpan.startLine;
+          final int eLine = blockSpan.endLine;
+          final List<MarkdownInlineNode> nodes = <MarkdownInlineNode>[
+            if (btStart > 0)
+              TextNode(
+                input.substring(0, btStart),
+                span: createUncheckedSpan(
+                  startOffset: base,
+                  endOffset: base + btStart,
+                  startLine: sLine,
+                  endLine: eLine,
+                ),
+              ),
+            CodeSpanNode(
+              raw,
+              span: createUncheckedSpan(
+                startOffset: base + btStart,
+                endOffset: base + btEnd + 1,
+                startLine: sLine,
+                endLine: eLine,
+              ),
+            ),
+            if (btEnd + 1 < len)
+              TextNode(
+                input.substring(btEnd + 1),
+                span: createUncheckedSpan(
+                  startOffset: base + btEnd + 1,
+                  endOffset: base + len,
+                  startLine: sLine,
+                  endLine: eLine,
+                ),
+              ),
+          ];
+          if (noPost) {
+            return freezeFreshList(nodes);
+          }
+          return (scanner..reset(input, blockSpan))._finishPostPasses(
+            nodes,
+            runAutolinks: runAutolinks,
+            runEmoji: runEmoji,
+            runSmart: runSmart,
+            runAbbr: runAbbr,
+          );
+        }
+        firstStructPos = btStart;
       }
-      if (runEmoji) {
-        nodes = _scanner._applyEmojiShortcodes(nodes);
-      }
-      if (runSmart) {
-        nodes = _scanner._applySmartPunctuation(nodes);
-      }
-      if (runAbbr) {
-        nodes = _scanner._applyAbbreviations(nodes);
-      }
-      return freezeList(_coalesceTextNodes(nodes));
     }
 
-    _scanner.reset(input, blockSpan);
-    return _scanner.parse();
+    final _InlineScanner sc = scanner..reset(input, blockSpan);
+    return sc.parse(
+      firstStructPos: firstStructPos,
+      sawAutolinkCandidate: hasAutolink,
+      sawEmojiColon: hasEmojiColon,
+      sawSmartPunct: hasSmartPunct,
+    );
+  }
+
+  List<MarkdownInlineNode>? _tryBuildMultiBacktickNodes(
+    String input,
+    SourceSpan blockSpan,
+    List<int> btSpans,
+    int len,
+  ) {
+    final int pairCount = btSpans.length;
+    int neededTokens = pairCount >> 1;
+    int cursor = 0;
+    for (int k = 0; k < pairCount; k += 2) {
+      if (btSpans[k] > cursor) {
+        neededTokens++;
+      }
+      cursor = btSpans[k + 1] + 1;
+    }
+    if (cursor < len) {
+      neededTokens++;
+    }
+    if (_totalTokens + neededTokens > budgets.maxTokens) {
+      return null;
+    }
+    _totalTokens += neededTokens;
+    final int base = blockSpan.startOffset;
+    final int sLine = blockSpan.startLine;
+    final int eLine = blockSpan.endLine;
+    final List<MarkdownInlineNode> nodes = <MarkdownInlineNode>[];
+    cursor = 0;
+    for (int k = 0; k < pairCount; k += 2) {
+      final int s = btSpans[k];
+      final int e = btSpans[k + 1];
+      if (s > cursor) {
+        nodes.add(
+          TextNode(
+            input.substring(cursor, s),
+            span: createUncheckedSpan(
+              startOffset: base + cursor,
+              endOffset: base + s,
+              startLine: sLine,
+              endLine: eLine,
+            ),
+          ),
+        );
+      }
+      String raw = input.substring(s + 1, e);
+      if (raw.contains('\n') ||
+          (raw.length >= 2 &&
+              raw.codeUnitAt(0) == 0x20 &&
+              raw.codeUnitAt(raw.length - 1) == 0x20)) {
+        raw = _normalizeCodeSpanSpaces(raw);
+      }
+      nodes.add(
+        CodeSpanNode(
+          raw,
+          span: createUncheckedSpan(
+            startOffset: base + s,
+            endOffset: base + e + 1,
+            startLine: sLine,
+            endLine: eLine,
+          ),
+        ),
+      );
+      cursor = e + 1;
+    }
+    if (cursor < len) {
+      nodes.add(
+        TextNode(
+          input.substring(cursor),
+          span: createUncheckedSpan(
+            startOffset: base + cursor,
+            endOffset: base + len,
+            startLine: sLine,
+            endLine: eLine,
+          ),
+        ),
+      );
+    }
+    return nodes;
   }
 
   FootnoteRefNode? _registerFootnoteRef(String label, SourceSpan span) {
     if (!rawFootnotes.containsKey(label)) {
       return null;
     }
-    int? index = _footnoteIndexByLabel[label];
+    final List<String> citedOrder = _citedFootnoteOrder ??= <String>[];
+    final Map<String, int> indexByLabel = _footnoteIndexByLabel ??=
+        <String, int>{};
+    final Map<String, int> refCountByLabel = _footnoteRefCountByLabel ??=
+        <String, int>{};
+    int? index = indexByLabel[label];
     if (index == null) {
-      _citedFootnoteOrder.add(label);
-      index = _citedFootnoteOrder.length;
-      _footnoteIndexByLabel[label] = index;
+      citedOrder.add(label);
+      index = citedOrder.length;
+      indexByLabel[label] = index;
     }
-    final int occurrence = (_footnoteRefCountByLabel[label] ?? 0) + 1;
-    _footnoteRefCountByLabel[label] = occurrence;
+    final int occurrence = (refCountByLabel[label] ?? 0) + 1;
+    refCountByLabel[label] = occurrence;
     return FootnoteRefNode(
       label: label,
       index: index,
       occurrenceIndex: occurrence,
       span: span,
     );
-  }
-
-  ({String destination, bool blocked}) _resolveDestination(String url) {
-    if (!options.sanitizeUrls) {
-      return (destination: url, blocked: false);
-    }
-    final String safe = options.urlPolicy.sanitize(url);
-    final bool blocked = safe.isEmpty && url.trim().isNotEmpty;
-    return (destination: safe, blocked: blocked);
   }
 
   String _sanitizeDestination(String url) {
@@ -621,19 +1092,26 @@ final class _InlineResolver {
     required bool isAutolink,
     required SourceSpan span,
   }) {
-    final ({String destination, bool blocked}) resolved = _resolveDestination(
-      rawDestination,
-    );
-    if (resolved.blocked) {
-      return createBlockedLinkNode(
+    if (!options.sanitizeUrls || options.urlPolicy.isAllowed(rawDestination)) {
+      return createFrozenLinkNode(
+        destination: rawDestination,
         title: title,
         children: children,
         isAutolink: isAutolink,
         span: span,
       );
     }
-    return LinkNode(
-      destination: resolved.destination,
+    if (rawDestination.trim().isNotEmpty) {
+      return createBlockedLinkNode(
+        title: title,
+        children: children,
+        isAutolink: isAutolink,
+        span: span,
+        frozen: true,
+      );
+    }
+    return createFrozenLinkNode(
+      destination: '',
       title: title,
       children: children,
       isAutolink: isAutolink,
@@ -650,11 +1128,9 @@ final class _InlineResolver {
     required List<MarkdownInlineNode> children,
     required SourceSpan span,
   }) {
-    final ({String destination, bool blocked}) resolved = _resolveDestination(
-      rawDestination,
-    );
-    if (resolved.blocked) {
-      return createBlockedImageNode(
+    if (!options.sanitizeUrls || options.urlPolicy.isAllowed(rawDestination)) {
+      return createFrozenImageNode(
+        destination: rawDestination,
         alt: alt,
         title: title,
         width: width,
@@ -663,9 +1139,19 @@ final class _InlineResolver {
         span: span,
       );
     }
-    _recordImageUrl(resolved.destination);
-    return ImageNode(
-      destination: resolved.destination,
+    if (rawDestination.trim().isNotEmpty) {
+      return createBlockedImageNode(
+        alt: alt,
+        title: title,
+        width: width,
+        height: height,
+        children: children,
+        span: span,
+        frozen: true,
+      );
+    }
+    return createFrozenImageNode(
+      destination: '',
       alt: alt,
       title: title,
       width: width,
@@ -673,26 +1159,6 @@ final class _InlineResolver {
       children: children,
       span: span,
     );
-  }
-
-  void _recordImageUrl(String url) {
-    if (url.isEmpty) {
-      return;
-    }
-    final String cleaned = stripControlAndWhitespaceForUrl(url);
-    if (cleaned.isEmpty) {
-      return;
-    }
-    if (options.sanitizeUrls && !options.urlPolicy.isAllowed(cleaned)) {
-      return;
-    }
-    final String lower = cleaned.toLowerCase();
-    if ((lower.startsWith('http://') ||
-            lower.startsWith('https://') ||
-            lower.startsWith('//')) &&
-        _remoteImageSet.add(cleaned)) {
-      _remoteImages.add(cleaned);
-    }
   }
 
   String nextId(String prefix) {
@@ -711,8 +1177,10 @@ bool _matchesWwwPrefixBeforeDot(String s, int dotIdx) {
 }
 
 final class _InlineItem {
-  _InlineItem.node(this.node, {this.inlineDepth = 0})
-    : isText = node is TextNode;
+  _InlineItem.node(MarkdownInlineNode node, {this.inlineDepth = 0})
+    : _node = node,
+      itemSpan = node.span,
+      isText = node is TextNode;
 
   _InlineItem.delim({
     required this.delimChar,
@@ -721,10 +1189,12 @@ final class _InlineItem {
     required this.canOpen,
     required this.canClose,
     required SourceSpan span,
-  }) : isText = true,
-       node = TextNode(_repeatDelimChar(delimChar, delimCount), span: span);
+  }) : _node = null,
+       itemSpan = span,
+       isText = true;
 
-  MarkdownInlineNode node;
+  MarkdownInlineNode? _node;
+  final SourceSpan itemSpan;
   bool isText;
   int delimChar = 0;
   int delimCount = 0;
@@ -741,23 +1211,6 @@ final class _InlineItem {
   int inlineDepth = 0;
   int prevActive = -1;
   int nextActive = -1;
-  StringBuffer? textBuffer;
-  SourceSpan? textBufferSpan;
-
-  MarkdownInlineNode materializeNode() {
-    final StringBuffer? buf = textBuffer;
-    if (buf == null) {
-      return node;
-    }
-    final TextNode materialized = TextNode(
-      buf.toString(),
-      span: textBufferSpan ?? node.span,
-    );
-    node = materialized;
-    textBuffer = null;
-    textBufferSpan = null;
-    return materialized;
-  }
 }
 
 String _repeatDelimChar(int delimChar, int count) {
@@ -809,8 +1262,13 @@ final class _InlineScanner {
   int _activeHead = -1;
   int _activeTail = -1;
 
-  final List<int> _bracketIndices = <int>[];
-  final Set<int> _unmatchedBacktickLengths = <int>{};
+  List<int>? _bracketIndices;
+  Set<int>? _unmatchedBacktickLengths;
+  Int32List? _openersBottom;
+  String _parsedLinkDest = '';
+  String _parsedLinkTitle = '';
+  bool _hasParsedLinkTitle = false;
+  String _parsedBracketLabel = '';
 
   int? _cachedLastGtPos;
   int _noClosingSingleQuoteFrom = 0;
@@ -821,9 +1279,12 @@ final class _InlineScanner {
   bool _noCdataClose = false;
   bool _noValidClosingDollar = false;
   bool _noClosingParenMath = false;
+  bool _hasUnmatchedBackticks = false;
+  bool _sawClosingDelim = false;
   bool _sawAutolinkCandidate = false;
   bool _sawEmojiColon = false;
   bool _sawSmartPunct = false;
+  int _lastCollectedMaxDepth = 0;
 
   MarkdownOptions get options => resolver.options;
   MarkdownBudgets get budgets => resolver.budgets;
@@ -833,18 +1294,23 @@ final class _InlineScanner {
     blockSpan = nextSpan;
     if (_items.length > 1024) {
       _items.length = 0;
-    } else {
+    } else if (_items.isNotEmpty) {
       _items.clear();
     }
-    _delimiterIndices.clear();
-    _prevDelim.clear();
-    _nextDelim.clear();
+    if (_delimiterIndices.isNotEmpty) {
+      _delimiterIndices.clear();
+      _prevDelim.clear();
+      _nextDelim.clear();
+    }
     _delimHead = -1;
     _delimTail = -1;
     _activeHead = -1;
     _activeTail = -1;
-    _bracketIndices.clear();
-    _unmatchedBacktickLengths.clear();
+    _bracketIndices?.clear();
+    if (_hasUnmatchedBackticks) {
+      _unmatchedBacktickLengths?.clear();
+      _hasUnmatchedBackticks = false;
+    }
     _cachedLastGtPos = null;
     final int guardPos = nextInput.length + 1;
     _noClosingSingleQuoteFrom = guardPos;
@@ -855,16 +1321,18 @@ final class _InlineScanner {
     _noCdataClose = false;
     _noValidClosingDollar = false;
     _noClosingParenMath = false;
+    _sawClosingDelim = false;
     _sawAutolinkCandidate = false;
     _sawEmojiColon = false;
     _sawSmartPunct = false;
+    _lastCollectedMaxDepth = 0;
   }
 
   int get _lastGtPos => _cachedLastGtPos ??= input.lastIndexOf('>');
 
   SourceSpan _span(int start, int end) {
     final int base = blockSpan.startOffset;
-    return SourceSpan(
+    return createUncheckedSpan(
       startOffset: base + start,
       endOffset: base + end,
       startLine: blockSpan.startLine,
@@ -933,10 +1401,31 @@ final class _InlineScanner {
     _nextDelim[dPos] = -1;
   }
 
-  List<MarkdownInlineNode> parse() {
+  List<MarkdownInlineNode> parse({
+    int firstStructPos = 0,
+    bool sawAutolinkCandidate = false,
+    bool sawEmojiColon = false,
+    bool sawSmartPunct = false,
+  }) {
     final int len = input.length;
     final Uint8List lut = resolver.structuralLut;
     int pos = 0;
+    if (firstStructPos > 0) {
+      resolver._totalTokens++;
+      if (resolver._totalTokens > budgets.maxTokens) {
+        _appendText(input, blockSpan);
+        return _collectActiveSliceCoalesced(
+          _activeHead,
+          -1,
+          freezeResult: true,
+        );
+      }
+      _sawAutolinkCandidate = sawAutolinkCandidate;
+      _sawEmojiColon = sawEmojiColon;
+      _sawSmartPunct = sawSmartPunct;
+      _appendText(input.substring(0, firstStructPos), _span(0, firstStructPos));
+      pos = firstStructPos;
+    }
 
     while (pos < len) {
       resolver._totalTokens++;
@@ -946,7 +1435,7 @@ final class _InlineScanner {
       }
 
       final int cu = input.codeUnitAt(pos);
-      if (cu >= 128 || lut[cu] == 0) {
+      if (cu >= 128 || lut[cu] != 1) {
         pos = _scanPlainText(pos);
         continue;
       }
@@ -965,25 +1454,7 @@ final class _InlineScanner {
         case 0x5B: // '['
           pos = _handleOpenBracket(pos, isImage: false);
         case 0x21: // '!'
-          if (pos + 1 < len && input.codeUnitAt(pos + 1) == 0x5B) {
-            if (options.footnotes &&
-                pos + 3 < len &&
-                input.codeUnitAt(pos + 2) == 0x5E) {
-              final int closeFn = _findFootnoteClose(pos + 3);
-              if (closeFn != -1 &&
-                  resolver.rawFootnotes.containsKey(
-                    input.substring(pos + 3, closeFn),
-                  )) {
-                _appendText('!', _span(pos, pos + 1));
-                pos++;
-                break;
-              }
-            }
-            pos = _handleOpenBracket(pos, isImage: true);
-          } else {
-            _appendText('!', _span(pos, pos + 1));
-            pos++;
-          }
+          pos = _tryHandleBang(pos, len);
         case 0x5D: // ']'
           pos = _handleCloseBracket(pos);
         case 0x2A: // '*'
@@ -1007,7 +1478,7 @@ final class _InlineScanner {
       }
     }
 
-    if (_delimHead != -1) {
+    if (_delimHead != -1 && _sawClosingDelim) {
       _processEmphasis(
         bottomDelimPos: -1,
         firstCandidateDelimPos: _delimHead,
@@ -1015,20 +1486,67 @@ final class _InlineScanner {
       );
     }
 
-    List<MarkdownInlineNode> nodes = _collectActiveNodesCoalesced(_activeHead);
-    if (options.gfmAutolinks && _sawAutolinkCandidate) {
+    final bool runAutolinks = options.gfmAutolinks && _sawAutolinkCandidate;
+    final bool runEmoji = options.emoji && _sawEmojiColon;
+    final bool runSmart = options.smartPunctuation && _sawSmartPunct;
+    final bool runAbbr =
+        options.abbreviations && resolver.abbreviations.isNotEmpty;
+    if (!runAutolinks && !runEmoji && !runSmart && !runAbbr) {
+      return _collectActiveSliceCoalesced(_activeHead, -1, freezeResult: true);
+    }
+
+    return _finishPostPasses(
+      _collectActiveSliceCoalesced(_activeHead, -1, freezeResult: false),
+      runAutolinks: runAutolinks,
+      runEmoji: runEmoji,
+      runSmart: runSmart,
+      runAbbr: runAbbr,
+    );
+  }
+
+  @pragma('vm:never-inline')
+  int _tryHandleBang(int pos, int len) {
+    if (pos + 1 < len && input.codeUnitAt(pos + 1) == 0x5B) {
+      if (options.footnotes &&
+          resolver.rawFootnotes.isNotEmpty &&
+          pos + 3 < len &&
+          input.codeUnitAt(pos + 2) == 0x5E) {
+        final int closeFn = _findFootnoteClose(pos + 3);
+        if (closeFn != -1 &&
+            resolver.rawFootnotes.containsKey(
+              input.substring(pos + 3, closeFn),
+            )) {
+          _appendText('!', _span(pos, pos + 1));
+          return pos + 1;
+        }
+      }
+      return _handleOpenBracket(pos, isImage: true);
+    }
+    _appendText('!', _span(pos, pos + 1));
+    return pos + 1;
+  }
+
+  @pragma('vm:never-inline')
+  List<MarkdownInlineNode> _finishPostPasses(
+    List<MarkdownInlineNode> nodes, {
+    required bool runAutolinks,
+    required bool runEmoji,
+    required bool runSmart,
+    required bool runAbbr,
+  }) {
+    if (runAutolinks) {
       nodes = _applyGfmAutolinks(nodes);
     }
-    if (options.emoji && _sawEmojiColon) {
+    if (runEmoji) {
       nodes = _applyEmojiShortcodes(nodes);
     }
-    if (options.smartPunctuation && _sawSmartPunct) {
+    if (runSmart) {
       nodes = _applySmartPunctuation(nodes);
     }
-    if (options.abbreviations && resolver.abbreviations.isNotEmpty) {
+    if (runAbbr) {
       nodes = _applyAbbreviations(nodes);
     }
-    return freezeList(_coalesceTextNodes(nodes));
+    return freezeFreshList(_coalesceTextNodes(nodes));
   }
 
   int _scanPlainText(int start) {
@@ -1038,43 +1556,63 @@ final class _InlineScanner {
     while (i < len) {
       final int cu = input.codeUnitAt(i);
       if (cu < 128) {
-        if (lut[cu] != 0) {
+        final int cls = lut[cu];
+        if (cls == 0) {
+          i++;
+          continue;
+        }
+        if (cls == 1) {
+          if (cu == 0x3D && !(i + 1 < len && input.codeUnitAt(i + 1) == 0x3D)) {
+            i++;
+            continue;
+          }
+          if (cu == 0x26) {
+            if (i + 2 >= len) {
+              i++;
+              continue;
+            }
+            final int next = input.codeUnitAt(i + 1);
+            if (next != 0x23 &&
+                !((next >= 0x41 && next <= 0x5A) ||
+                    (next >= 0x61 && next <= 0x7A))) {
+              i++;
+              continue;
+            }
+          }
           if (i > start) {
             break;
           }
         } else {
-          final int pf = _postCharFlags[cu];
-          if (pf != 0) {
-            if (cu == 0x40) {
+          if (cu == 0x40) {
+            _sawAutolinkCandidate = true;
+          } else if (cu == 0x3A) {
+            if (i + 2 < len &&
+                input.codeUnitAt(i + 1) == 0x2F &&
+                input.codeUnitAt(i + 2) == 0x2F) {
               _sawAutolinkCandidate = true;
-            } else if (cu == 0x3A) {
+            } else if (!_sawEmojiColon &&
+                _hasEmojiShortcodeCandidate(input, i, len)) {
               _sawEmojiColon = true;
-              if (!_sawAutolinkCandidate &&
-                  i + 2 < len &&
-                  input.codeUnitAt(i + 1) == 0x2F &&
-                  input.codeUnitAt(i + 2) == 0x2F) {
-                _sawAutolinkCandidate = true;
-              }
-            } else if (cu == 0x2E) {
-              if (!_sawAutolinkCandidate &&
-                  i >= 3 &&
-                  _matchesWwwPrefixBeforeDot(input, i)) {
-                _sawAutolinkCandidate = true;
-              }
-              if (!_sawSmartPunct &&
-                  i + 2 < len &&
-                  input.codeUnitAt(i + 1) == 0x2E &&
-                  input.codeUnitAt(i + 2) == 0x2E) {
-                _sawSmartPunct = true;
-              }
-            } else if (cu == 0x22 || cu == 0x27) {
+            }
+          } else if (cu == 0x2E) {
+            if (!_sawAutolinkCandidate &&
+                i >= 3 &&
+                _matchesWwwPrefixBeforeDot(input, i)) {
+              _sawAutolinkCandidate = true;
+            }
+            if (!_sawSmartPunct &&
+                i + 2 < len &&
+                input.codeUnitAt(i + 1) == 0x2E &&
+                input.codeUnitAt(i + 2) == 0x2E) {
               _sawSmartPunct = true;
-            } else if (cu == 0x2D) {
-              if (!_sawSmartPunct &&
-                  i + 1 < len &&
-                  input.codeUnitAt(i + 1) == 0x2D) {
-                _sawSmartPunct = true;
-              }
+            }
+          } else if (cu == 0x22 || cu == 0x27) {
+            _sawSmartPunct = true;
+          } else if (cu == 0x2D) {
+            if (!_sawSmartPunct &&
+                i + 1 < len &&
+                input.codeUnitAt(i + 1) == 0x2D) {
+              _sawSmartPunct = true;
             }
           }
         }
@@ -1089,64 +1627,42 @@ final class _InlineScanner {
     if (text.isEmpty) {
       return;
     }
-    if (_activeTail != -1) {
-      final _InlineItem last = _items[_activeTail];
-      if (last.isText && !last.isDelimiter && !last.isBracket) {
-        final StringBuffer buf = last.textBuffer ??= StringBuffer(
-          (last.node as TextNode).text,
-        );
-        buf.write(text);
-        final SourceSpan prevSpan = last.textBufferSpan ?? last.node.span;
-        last.textBufferSpan = SourceSpan(
-          startOffset: prevSpan.startOffset,
-          endOffset: span.endOffset,
-          startLine: prevSpan.startLine,
-          endLine: span.endLine,
-        );
-        return;
-      }
-    }
     _appendActiveItem(_InlineItem.node(TextNode(text, span: span)));
   }
 
   int _handleNewline(int pos) {
-    if (_activeTail != -1) {
-      final _InlineItem last = _items[_activeTail];
-      if (last.isText && !last.isDelimiter && !last.isBracket) {
-        final TextNode prev = last.materializeNode() as TextNode;
-        int trailingSpaces = 0;
-        for (int k = prev.text.length - 1; k >= 0; k--) {
-          if (prev.text.codeUnitAt(k) == 0x20) {
-            trailingSpaces++;
-          } else {
-            break;
-          }
-        }
-        if (trailingSpaces > 0) {
-          final String trimmed = prev.text.substring(
-            0,
-            prev.text.length - trailingSpaces,
-          );
-          if (trimmed.isEmpty) {
-            _popActiveTail();
-          } else {
-            last.node = TextNode(trimmed, span: prev.span);
-          }
-          if (trailingSpaces >= 2) {
-            _appendActiveItem(
-              _InlineItem.node(HardBreakNode(span: _span(pos, pos + 1))),
-            );
-          } else {
-            _appendActiveItem(
-              _InlineItem.node(SoftBreakNode(span: _span(pos, pos + 1))),
-            );
-          }
-          return _skipLeadingSpacesAfterNewline(pos + 1);
-        }
+    int trailingSpaces = 0;
+    int cur = _activeTail;
+    while (cur != -1) {
+      final _InlineItem item = _items[cur];
+      if (!item.isText || item.isDelimiter || item.isBracket) {
+        break;
       }
+      final MarkdownInlineNode? rawNode = item._node;
+      if (rawNode is! TextNode) {
+        break;
+      }
+      final String text = rawNode.text;
+      int k = text.length - 1;
+      while (k >= 0 && text.codeUnitAt(k) == 0x20) {
+        trailingSpaces++;
+        k--;
+      }
+      if (k >= 0) {
+        if (k + 1 < text.length) {
+          item._node = TextNode(text.substring(0, k + 1), span: item.itemSpan);
+        }
+        break;
+      }
+      _popActiveTail();
+      cur = _activeTail;
     }
     _appendActiveItem(
-      _InlineItem.node(SoftBreakNode(span: _span(pos, pos + 1))),
+      _InlineItem.node(
+        trailingSpaces >= 2
+            ? HardBreakNode(span: _span(pos, pos + 1))
+            : SoftBreakNode(span: _span(pos, pos + 1)),
+      ),
     );
     return _skipLeadingSpacesAfterNewline(pos + 1);
   }
@@ -1202,38 +1718,64 @@ final class _InlineScanner {
   int _handleBackticks(int pos) {
     int count = 0;
     int i = pos;
-    while (i < input.length && input.codeUnitAt(i) == 0x60) {
+    final int len = input.length;
+    while (i < len && input.codeUnitAt(i) == 0x60) {
       count++;
       i++;
     }
-    if (_unmatchedBacktickLengths.contains(count)) {
+    if (_hasUnmatchedBackticks && _unmatchedBacktickLengths!.contains(count)) {
       _appendText(input.substring(pos, i), _span(pos, i));
       return i;
     }
+    if (count == 1) {
+      final int closeStart = input.indexOf('`', i);
+      if (closeStart == -1) {
+        _hasUnmatchedBackticks = true;
+        (_unmatchedBacktickLengths ??= <int>{}).add(1);
+        _appendText('`', _span(pos, i));
+        return i;
+      }
+      if (closeStart + 1 >= len || input.codeUnitAt(closeStart + 1) != 0x60) {
+        String raw = input.substring(i, closeStart);
+        if (raw.contains('\n') ||
+            (raw.length >= 2 &&
+                raw.codeUnitAt(0) == 0x20 &&
+                raw.codeUnitAt(raw.length - 1) == 0x20)) {
+          raw = _InlineResolver._normalizeCodeSpanSpaces(raw);
+        }
+        _appendActiveItem(
+          _InlineItem.node(CodeSpanNode(raw, span: _span(pos, closeStart + 1))),
+        );
+        return closeStart + 1;
+      }
+    }
+    return _handleMultiBackticks(pos, i, count);
+  }
+
+  @pragma('vm:never-inline')
+  int _handleMultiBackticks(int pos, int i, int count) {
+    final int len = input.length;
     int search = i;
-    while (search < input.length) {
-      if (input.codeUnitAt(search) == 0x60) {
+    bool sawNewline = false;
+    while (search < len) {
+      final int sc = input.codeUnitAt(search);
+      if (sc == 0x0A) {
+        sawNewline = true;
+        search++;
+      } else if (sc == 0x60) {
         int closeCount = 0;
         final int closeStart = search;
-        while (search < input.length && input.codeUnitAt(search) == 0x60) {
+        while (search < len && input.codeUnitAt(search) == 0x60) {
           closeCount++;
           search++;
         }
         if (closeCount == count) {
-          String raw = input.substring(i, closeStart).replaceAll('\n', ' ');
-          if (raw.length >= 2 &&
-              raw.codeUnitAt(0) == 0x20 &&
-              raw.codeUnitAt(raw.length - 1) == 0x20) {
-            bool hasNonSpace = false;
-            for (int k = 0; k < raw.length; k++) {
-              if (raw.codeUnitAt(k) != 0x20) {
-                hasNonSpace = true;
-                break;
-              }
-            }
-            if (hasNonSpace) {
-              raw = raw.substring(1, raw.length - 1);
-            }
+          String raw = input.substring(i, closeStart);
+          if (sawNewline ||
+              (raw.length >= 2 &&
+                  raw.codeUnitAt(0) == 0x20 &&
+                  raw.codeUnitAt(raw.length - 1) == 0x20)) {
+            raw = _InlineResolver._normalizeCodeSpanSpaces(raw);
           }
           _appendActiveItem(
             _InlineItem.node(CodeSpanNode(raw, span: _span(pos, search))),
@@ -1244,7 +1786,8 @@ final class _InlineScanner {
         search++;
       }
     }
-    _unmatchedBacktickLengths.add(count);
+    _hasUnmatchedBackticks = true;
+    (_unmatchedBacktickLengths ??= <int>{}).add(count);
     _appendText(input.substring(pos, i), _span(pos, i));
     return i;
   }
@@ -1347,9 +1890,9 @@ final class _InlineScanner {
           resolver._makeLinkNode(
             rawDestination: auto.href,
             isAutolink: true,
-            children: <MarkdownInlineNode>[
+            children: freezeSingleton<MarkdownInlineNode>(
               TextNode(auto.label, span: _span(pos + 1, auto.nextIndex - 1)),
-            ],
+            ),
             span: _span(pos, auto.nextIndex),
           ),
         ),
@@ -1361,13 +1904,19 @@ final class _InlineScanner {
     final int? htmlEnd = _matchRawHtmlInline(pos);
     if (htmlEnd != null) {
       final String rawHtml = input.substring(pos, htmlEnd);
-      if (options.inlineBreaks && _isBrTag(rawHtml)) {
+      final int tagHint = rawHtml.length > 2
+          ? (rawHtml.codeUnitAt(1) | 0x20)
+          : 0;
+      if (tagHint == 0x62 && options.inlineBreaks && _isBrTag(rawHtml)) {
         _appendActiveItem(
           _InlineItem.node(InlineBreakNode(span: _span(pos, htmlEnd))),
         );
         return htmlEnd;
       }
-      if (options.explicitHeadingIds || options.headingSlugs) {
+      if (tagHint == 0x61 &&
+          (options.explicitHeadingIds || options.headingSlugs) &&
+          rawHtml.length >= 4 &&
+          rawHtml.codeUnitAt(2) <= 0x20) {
         final RegExpMatch? anchorMatch = _anchorTagPattern.firstMatch(rawHtml);
         if (anchorMatch != null &&
             _matchesCaseInsensitiveAt(input, htmlEnd, '</a>')) {
@@ -1384,7 +1933,8 @@ final class _InlineScanner {
           }
         }
       }
-      if (options.figureBlocks &&
+      if (tagHint == 0x70 &&
+          options.figureBlocks &&
           _matchesCaseInsensitiveAt(rawHtml, 0, '<picture')) {
         final int closePic = _indexOfAsciiIgnoreCase(input, '</picture>', pos);
         if (closePic != -1) {
@@ -1394,14 +1944,13 @@ final class _InlineScanner {
             _span(pos, closePic + 10),
           );
           if (picNode != null) {
-            resolver._recordImageUrl(picNode.lightSource);
-            resolver._recordImageUrl(picNode.darkSource);
             _appendActiveItem(_InlineItem.node(picNode));
             return closePic + 10;
           }
         }
       }
-      if ((options.figureBlocks || options.kbd || options.headingSlugs) &&
+      if (tagHint == 0x69 &&
+          (options.figureBlocks || options.kbd || options.headingSlugs) &&
           rawHtml.length >= 6 &&
           _matchesCaseInsensitiveAt(rawHtml, 0, '<img')) {
         final int afterName = rawHtml.codeUnitAt(4);
@@ -1419,16 +1968,18 @@ final class _InlineScanner {
           }
         }
       }
-      if (options.kbd && _equalsAsciiIgnoreCase(rawHtml, '<kbd>')) {
+      if (tagHint == 0x6B &&
+          options.kbd &&
+          _equalsAsciiIgnoreCase(rawHtml, '<kbd>')) {
         final int closeKbd = _indexOfAsciiIgnoreCase(input, '</kbd>', htmlEnd);
         if (closeKbd != -1) {
           final String inner = input.substring(htmlEnd, closeKbd);
           _appendActiveItem(
             _InlineItem.node(
-              KbdInlineNode(
-                children: <MarkdownInlineNode>[
+              createFrozenKbdInlineNode(
+                children: freezeSingleton<MarkdownInlineNode>(
                   TextNode(inner, span: _span(htmlEnd, closeKbd)),
-                ],
+                ),
                 span: _span(pos, closeKbd + 6),
               ),
             ),
@@ -1562,8 +2113,8 @@ final class _InlineScanner {
       width: width,
       height: height,
       children: alt.isEmpty
-          ? const <MarkdownInlineNode>[]
-          : <MarkdownInlineNode>[TextNode(alt, span: span)],
+          ? emptyFrozenInlineList
+          : freezeSingleton<MarkdownInlineNode>(TextNode(alt, span: span)),
       span: span,
     );
   }
@@ -1821,6 +2372,7 @@ final class _InlineScanner {
     // Check footnote reference `[^label]` when enabled and not an image.
     if (!isImage &&
         options.footnotes &&
+        resolver.rawFootnotes.isNotEmpty &&
         pos + 2 < input.length &&
         input.codeUnitAt(pos + 1) == 0x5E) {
       final int close = _findFootnoteClose(pos + 2);
@@ -1839,7 +2391,8 @@ final class _InlineScanner {
 
     final int markerLen = isImage ? 2 : 1;
     // Enforce maxNestingDepth on bracket stack to guard against hostile deep nesting.
-    if (_bracketIndices.length >= budgets.maxNestingDepth) {
+    final List<int> brackets = _bracketIndices ??= <int>[];
+    if (brackets.length >= budgets.maxNestingDepth) {
       _appendText(isImage ? '![' : '[', _span(pos, pos + markerLen));
       return pos + markerLen;
     }
@@ -1854,7 +2407,7 @@ final class _InlineScanner {
           ..delimStackLen = _delimiterIndices.length
           ..savedDelimTail = _delimTail;
     final int idx = _appendActiveItem(item);
-    _bracketIndices.add(idx);
+    brackets.add(idx);
     return pos + markerLen;
   }
 
@@ -1874,12 +2427,13 @@ final class _InlineScanner {
   }
 
   int _handleCloseBracket(int pos) {
-    if (_bracketIndices.isEmpty) {
+    final List<int>? brackets = _bracketIndices;
+    if (brackets == null || brackets.isEmpty) {
       _appendText(']', _span(pos, pos + 1));
       return pos + 1;
     }
 
-    final int openerItemIdx = _bracketIndices.removeLast();
+    final int openerItemIdx = brackets.removeLast();
     final _InlineItem opener = _items[openerItemIdx];
     if (!opener.bracketActive) {
       _appendText(']', _span(pos, pos + 1));
@@ -1895,28 +2449,26 @@ final class _InlineScanner {
 
     // Case 1: Inline link/image `(dest "title")`.
     if (afterBracket < input.length && input.codeUnitAt(afterBracket) == 0x28) {
-      final ({String destination, String? title, int nextIndex})? inlineTarget =
-          _parseInlineLinkTarget(afterBracket);
-      if (inlineTarget != null) {
-        destination = inlineTarget.destination;
-        title = inlineTarget.title;
-        afterBracket = inlineTarget.nextIndex;
+      final int inlineNext = _parseInlineLinkTarget(afterBracket);
+      if (inlineNext != -1) {
+        destination = _parsedLinkDest;
+        title = _hasParsedLinkTitle ? _parsedLinkTitle : null;
+        afterBracket = inlineNext;
         matched = true;
       }
     }
 
     // Case 2: Reference link/image (`[foo][bar]`, `[foo][]`, or `[foo]`).
-    if (!matched) {
+    if (!matched && resolver.linkDefinitions.isNotEmpty) {
       String? refLabel;
       int nextAfterRef = afterBracket;
 
       if (afterBracket < input.length &&
           input.codeUnitAt(afterBracket) == 0x5B) {
-        final ({String label, int nextIndex})? explicitRef = _parseBracketLabel(
-          afterBracket,
-        );
-        if (explicitRef != null) {
-          if (explicitRef.label.isEmpty) {
+        final int explicitNext = _parseBracketLabel(afterBracket);
+        if (explicitNext != -1) {
+          final String explicitLabel = _parsedBracketLabel;
+          if (explicitLabel.isEmpty) {
             // Collapsed reference `[foo][]`.
             refLabel = input.substring(
               opener.bracketSourcePos + (isImage ? 2 : 1),
@@ -1924,9 +2476,9 @@ final class _InlineScanner {
             );
           } else {
             // Full reference `[foo][bar]`.
-            refLabel = explicitRef.label;
+            refLabel = explicitLabel;
           }
-          nextAfterRef = explicitRef.nextIndex;
+          nextAfterRef = explicitNext;
         }
       }
 
@@ -1966,14 +2518,13 @@ final class _InlineScanner {
       return pos + 1;
     }
 
-    final int maxAllowedInside =
-        budgets.maxNestingDepth - _bracketIndices.length - 1;
+    final int maxAllowedInside = budgets.maxNestingDepth - brackets.length - 1;
 
     // Process emphasis strictly inside `[openerItemIdx + 1 ..]` in O(active).
     final int firstInsideDelim = opener.savedDelimTail == -1
         ? _delimHead
         : _nextDelim[opener.savedDelimTail];
-    if (firstInsideDelim != -1) {
+    if (firstInsideDelim != -1 && _sawClosingDelim) {
       _processEmphasis(
         bottomDelimPos: opener.savedDelimTail,
         firstCandidateDelimPos: firstInsideDelim,
@@ -1982,23 +2533,12 @@ final class _InlineScanner {
     }
 
     // Collect active nodes strictly after `opener` and measure depth.
-    int maxChildDepth = 0;
-    final List<MarkdownInlineNode> rawChildren = <MarkdownInlineNode>[];
-    int cur = opener.nextActive;
-    while (cur != -1) {
-      final _InlineItem childItem = _items[cur];
-      final MarkdownInlineNode n = childItem.materializeNode();
-      if (childItem.inlineDepth > maxChildDepth) {
-        maxChildDepth = childItem.inlineDepth;
-      }
-      if (n is! TextNode || n.text.isNotEmpty) {
-        rawChildren.add(n);
-      }
-      cur = childItem.nextActive;
-    }
-    final List<MarkdownInlineNode> children = freezeList(
-      _coalesceTextNodes(rawChildren),
+    final List<MarkdownInlineNode> children = _collectActiveSliceCoalesced(
+      opener.nextActive,
+      -1,
+      freezeResult: true,
     );
+    final int maxChildDepth = _lastCollectedMaxDepth;
 
     // Truncate delimiter lists in O(1) back to opener.delimStackLen.
     _delimiterIndices.length = opener.delimStackLen;
@@ -2038,7 +2578,8 @@ final class _InlineScanner {
       );
     } else {
       // Links cannot contain other links: deactivate all ancestor non-image brackets.
-      for (final int bIdx in _bracketIndices) {
+      for (int i = 0; i < brackets.length; i++) {
+        final int bIdx = brackets[i];
         if (!_items[bIdx].bracketIsImage) {
           _items[bIdx].bracketActive = false;
         }
@@ -2059,52 +2600,35 @@ final class _InlineScanner {
     return afterBracket;
   }
 
-  ({String destination, String? title, int nextIndex})? _parseInlineLinkTarget(
-    int openParenPos,
-  ) {
+  int _parseInlineLinkTarget(int openParenPos) {
     final int len = input.length;
     int i = openParenPos + 1;
     while (i < len && isAsciiWhitespace(input.codeUnitAt(i))) {
       i++;
     }
     if (i >= len) {
-      return null;
+      return -1;
     }
 
-    String dest = '';
-    if (input.codeUnitAt(i) == 0x29) {
-      return (destination: '', title: null, nextIndex: i + 1);
+    String dest;
+    final int firstCu = input.codeUnitAt(i);
+    if (firstCu == 0x29) {
+      _parsedLinkDest = '';
+      _parsedLinkTitle = '';
+      _hasParsedLinkTitle = false;
+      return i + 1;
     }
 
-    if (input.codeUnitAt(i) == 0x3C) {
-      i++;
-      final int dStart = i;
-      bool foundClose = false;
-      while (i < len) {
-        final int cu = input.codeUnitAt(i);
-        if (cu == 0x0A || cu == 0x3C) {
-          return null;
-        }
-        if (cu == 0x5C &&
-            i + 1 < len &&
-            isAsciiPunctuation(input.codeUnitAt(i + 1))) {
-          i += 2;
-          continue;
-        }
-        if (cu == 0x3E) {
-          dest = unescapeMarkdownString(input.substring(dStart, i));
-          i++;
-          foundClose = true;
-          break;
-        }
-        i++;
+    if (firstCu == 0x3C) {
+      i = _parseAngleBracketDestination(i);
+      if (i == -1) {
+        return -1;
       }
-      if (!foundClose) {
-        return null;
-      }
+      dest = _parsedLinkDest;
     } else {
       final int dStart = i;
       int parenDepth = 0;
+      bool needsUnescape = false;
       while (i < len) {
         final int cu = input.codeUnitAt(i);
         if (isAsciiControl(cu) || cu == 0x20) {
@@ -2113,13 +2637,17 @@ final class _InlineScanner {
         if (cu == 0x5C &&
             i + 1 < len &&
             isAsciiPunctuation(input.codeUnitAt(i + 1))) {
+          needsUnescape = true;
           i += 2;
           continue;
+        }
+        if (cu == 0x26) {
+          needsUnescape = true;
         }
         if (cu == 0x28) {
           parenDepth++;
           if (parenDepth > 32) {
-            return null;
+            return -1;
           }
         } else if (cu == 0x29) {
           if (parenDepth == 0) {
@@ -2130,9 +2658,10 @@ final class _InlineScanner {
         i++;
       }
       if (parenDepth != 0 || i == dStart) {
-        return null;
+        return -1;
       }
-      dest = unescapeMarkdownString(input.substring(dStart, i));
+      final String slice = input.substring(dStart, i);
+      dest = needsUnescape ? unescapeMarkdownString(slice) : slice;
     }
 
     int wsCount = 0;
@@ -2141,48 +2670,104 @@ final class _InlineScanner {
       i++;
     }
     if (i >= len) {
-      return null;
+      return -1;
     }
-    String? title;
     final int nextCu = input.codeUnitAt(i);
     if (wsCount > 0 && (nextCu == 0x22 || nextCu == 0x27 || nextCu == 0x28)) {
-      final int closeChar = nextCu == 0x28 ? 0x29 : nextCu;
-      i++;
-      final int tStart = i;
-      bool closedTitle = false;
-      while (i < len) {
-        final int cu = input.codeUnitAt(i);
-        if (cu == 0x5C &&
-            i + 1 < len &&
-            isAsciiPunctuation(input.codeUnitAt(i + 1))) {
-          i += 2;
-          continue;
-        }
-        if (cu == closeChar) {
-          title = unescapeMarkdownString(input.substring(tStart, i));
-          i++;
-          closedTitle = true;
-          break;
-        }
-        if (nextCu == 0x28 && cu == 0x28) {
-          return null;
-        }
-        i++;
-      }
-      if (!closedTitle) {
-        return null;
-      }
-      while (i < len && isAsciiWhitespace(input.codeUnitAt(i))) {
-        i++;
-      }
+      return _parseLinkTitleAndCloseParen(i, dest);
     }
-    if (i >= len || input.codeUnitAt(i) != 0x29) {
-      return null;
+    if (nextCu != 0x29) {
+      return -1;
     }
-    return (destination: dest, title: title, nextIndex: i + 1);
+    _parsedLinkDest = dest;
+    _parsedLinkTitle = '';
+    _hasParsedLinkTitle = false;
+    return i + 1;
   }
 
-  ({String label, int nextIndex})? _parseBracketLabel(int openPos) {
+  @pragma('vm:never-inline')
+  int _parseAngleBracketDestination(int openAnglePos) {
+    final int len = input.length;
+    int i = openAnglePos + 1;
+    final int dStart = i;
+    bool needsUnescape = false;
+    while (i < len) {
+      final int cu = input.codeUnitAt(i);
+      if (cu == 0x0A || cu == 0x3C) {
+        return -1;
+      }
+      if (cu == 0x5C &&
+          i + 1 < len &&
+          isAsciiPunctuation(input.codeUnitAt(i + 1))) {
+        needsUnescape = true;
+        i += 2;
+        continue;
+      }
+      if (cu == 0x26) {
+        needsUnescape = true;
+      }
+      if (cu == 0x3E) {
+        final String slice = input.substring(dStart, i);
+        _parsedLinkDest = needsUnescape ? unescapeMarkdownString(slice) : slice;
+        return i + 1;
+      }
+      i++;
+    }
+    return -1;
+  }
+
+  @pragma('vm:never-inline')
+  int _parseLinkTitleAndCloseParen(int openQuotePos, String dest) {
+    final int len = input.length;
+    final int openCu = input.codeUnitAt(openQuotePos);
+    final int closeChar = openCu == 0x28 ? 0x29 : openCu;
+    int i = openQuotePos + 1;
+    final int tStart = i;
+    bool closedTitle = false;
+    bool needsUnescapeTitle = false;
+    String title = '';
+    while (i < len) {
+      final int cu = input.codeUnitAt(i);
+      if (cu == 0x5C &&
+          i + 1 < len &&
+          isAsciiPunctuation(input.codeUnitAt(i + 1))) {
+        needsUnescapeTitle = true;
+        i += 2;
+        continue;
+      }
+      if (cu == 0x26) {
+        needsUnescapeTitle = true;
+      }
+      if (cu == closeChar) {
+        final String rawTitle = input.substring(tStart, i);
+        title = needsUnescapeTitle
+            ? unescapeMarkdownString(rawTitle)
+            : rawTitle;
+        i++;
+        closedTitle = true;
+        break;
+      }
+      if (openCu == 0x28 && cu == 0x28) {
+        return -1;
+      }
+      i++;
+    }
+    if (!closedTitle) {
+      return -1;
+    }
+    while (i < len && isAsciiWhitespace(input.codeUnitAt(i))) {
+      i++;
+    }
+    if (i >= len || input.codeUnitAt(i) != 0x29) {
+      return -1;
+    }
+    _parsedLinkDest = dest;
+    _parsedLinkTitle = title;
+    _hasParsedLinkTitle = true;
+    return i + 1;
+  }
+
+  int _parseBracketLabel(int openPos) {
     final int len = input.length;
     int i = openPos + 1;
     int chars = 0;
@@ -2194,28 +2779,30 @@ final class _InlineScanner {
         chars += 2;
         i += 2;
         if (chars > 999) {
-          return null;
+          return -1;
         }
         continue;
       }
       if (cu == 0x5B) {
-        return null;
+        return -1;
       }
       if (cu == 0x5D) {
-        return (label: input.substring(openPos + 1, i), nextIndex: i + 1);
+        _parsedBracketLabel = input.substring(openPos + 1, i);
+        return i + 1;
       }
       chars++;
       if (chars > 999) {
-        return null;
+        return -1;
       }
       i++;
     }
-    return null;
+    return -1;
   }
 
   int _handleDelimiterRun(int pos, int delimCu) {
-    int end = pos;
-    while (end < input.length && input.codeUnitAt(end) == delimCu) {
+    final int len = input.length;
+    int end = pos + 1;
+    while (end < len && input.codeUnitAt(end) == delimCu) {
       end++;
     }
     final int count = end - pos;
@@ -2233,13 +2820,45 @@ final class _InlineScanner {
       return end;
     }
 
-    final int beforeCp = pos == 0 ? 0x0A : codePointBefore(input, pos);
-    final int afterCp = end >= input.length ? 0x0A : codePointAt(input, end);
+    final bool beforeWs;
+    final bool beforePunct;
+    if (pos == 0) {
+      beforeWs = true;
+      beforePunct = false;
+    } else {
+      final int bcu = input.codeUnitAt(pos - 1);
+      if (bcu < 128) {
+        final int cls = _asciiFlankLut[bcu];
+        beforeWs = cls == 1;
+        beforePunct = cls == 2;
+      } else {
+        final int beforeCp = (bcu >= 0xDC00 && bcu <= 0xDFFF)
+            ? codePointBefore(input, pos)
+            : bcu;
+        beforeWs = isUnicodeWhitespace(beforeCp);
+        beforePunct = !beforeWs && isUnicodePunctuation(beforeCp);
+      }
+    }
 
-    final bool beforeWs = isUnicodeWhitespace(beforeCp);
-    final bool afterWs = isUnicodeWhitespace(afterCp);
-    final bool beforePunct = isUnicodePunctuation(beforeCp);
-    final bool afterPunct = isUnicodePunctuation(afterCp);
+    final bool afterWs;
+    final bool afterPunct;
+    if (end >= len) {
+      afterWs = true;
+      afterPunct = false;
+    } else {
+      final int acu = input.codeUnitAt(end);
+      if (acu < 128) {
+        final int cls = _asciiFlankLut[acu];
+        afterWs = cls == 1;
+        afterPunct = cls == 2;
+      } else {
+        final int afterCp = (acu >= 0xD800 && acu <= 0xDBFF)
+            ? codePointAt(input, end)
+            : acu;
+        afterWs = isUnicodeWhitespace(afterCp);
+        afterPunct = !afterWs && isUnicodePunctuation(afterCp);
+      }
+    }
 
     final bool leftFlanking =
         !afterWs && (!afterPunct || beforeWs || beforePunct);
@@ -2252,12 +2871,12 @@ final class _InlineScanner {
     if (delimCu == 0x5F) {
       canOpen = leftFlanking && (!rightFlanking || beforePunct);
       canClose = rightFlanking && (!leftFlanking || afterPunct);
-    } else if (delimCu == 0x7E) {
-      canOpen = leftFlanking;
-      canClose = rightFlanking;
     } else {
       canOpen = leftFlanking;
       canClose = rightFlanking;
+    }
+    if (canClose) {
+      _sawClosingDelim = true;
     }
 
     final _InlineItem item = _InlineItem.delim(
@@ -2277,10 +2896,15 @@ final class _InlineScanner {
     required int firstCandidateDelimPos,
     required int maxAllowedDepth,
   }) {
-    final Map<int, int> openersBottom = <int, int>{};
+    final int secondCandidate = _nextDelim[firstCandidateDelimPos];
+    if (secondCandidate == -1) {
+      return;
+    }
+    final Int32List openersBottom = _openersBottom ??= Int32List(30);
+    bool openersBottomInitialized = false;
     int depthFloorDelimPos = bottomDelimPos;
 
-    int currentPos = firstCandidateDelimPos;
+    int currentPos = secondCandidate;
     while (currentPos != -1) {
       final int closerItemIdx = _delimiterIndices[currentPos];
       final _InlineItem closer = _items[closerItemIdx];
@@ -2289,13 +2913,26 @@ final class _InlineScanner {
         continue;
       }
 
-      final int key =
-          (closer.delimChar << 4) |
-          ((closer.origCount % 3) << 1) |
-          (closer.canOpen ? 1 : 0);
-      int bottomLimit = openersBottom[key] ?? bottomDelimPos;
-      if (depthFloorDelimPos > bottomLimit) {
-        bottomLimit = depthFloorDelimPos;
+      int key = 0;
+      int bottomLimit = depthFloorDelimPos;
+      if (openersBottomInitialized) {
+        final int delimSlot = switch (closer.delimChar) {
+          0x2A => 0,
+          0x5F => 1,
+          0x7E => 2,
+          0x3D => 3,
+          _ => 4,
+        };
+        key =
+            delimSlot * 6 +
+            (closer.origCount % 3) * 2 +
+            (closer.canOpen ? 1 : 0);
+        final int ob = openersBottom[key];
+        if (ob > bottomLimit) {
+          bottomLimit = ob;
+        }
+      } else if (bottomDelimPos > bottomLimit) {
+        bottomLimit = bottomDelimPos;
       }
 
       int openerPos = _prevDelim[currentPos];
@@ -2334,6 +2971,21 @@ final class _InlineScanner {
       }
 
       if (foundOpenerPos == -1) {
+        if (!openersBottomInitialized) {
+          openersBottom.fillRange(0, 30, bottomDelimPos);
+          openersBottomInitialized = true;
+          final int delimSlot = switch (closer.delimChar) {
+            0x2A => 0,
+            0x5F => 1,
+            0x7E => 2,
+            0x3D => 3,
+            _ => 4,
+          };
+          key =
+              delimSlot * 6 +
+              (closer.origCount % 3) * 2 +
+              (closer.canOpen ? 1 : 0);
+        }
         openersBottom[key] = currentPos - 1;
         final int nextPos = _nextDelim[currentPos];
         if (!closer.canOpen) {
@@ -2368,6 +3020,21 @@ final class _InlineScanner {
         if (foundOpenerPos > depthFloorDelimPos) {
           depthFloorDelimPos = foundOpenerPos;
         }
+        if (!openersBottomInitialized) {
+          openersBottom.fillRange(0, 30, bottomDelimPos);
+          openersBottomInitialized = true;
+          final int delimSlot = switch (closer.delimChar) {
+            0x2A => 0,
+            0x5F => 1,
+            0x7E => 2,
+            0x3D => 3,
+            _ => 4,
+          };
+          key =
+              delimSlot * 6 +
+              (closer.origCount % 3) * 2 +
+              (closer.canOpen ? 1 : 0);
+        }
         openersBottom[key] = currentPos - 1;
         final int nextPos = _nextDelim[currentPos];
         if (!closer.canOpen) {
@@ -2392,63 +3059,49 @@ final class _InlineScanner {
       opener.delimCount -= useCount;
       closer.delimCount -= useCount;
 
-      final String delimStr = _repeatDelimChar(opener.delimChar, useCount);
-      opener.node = TextNode(
-        _repeatDelimChar(opener.delimChar, opener.delimCount),
-        span: opener.node.span,
-      );
-      closer.node = TextNode(
-        _repeatDelimChar(closer.delimChar, closer.delimCount),
-        span: closer.node.span,
-      );
-
       // Drop all interior delimiters strictly between foundOpenerPos and
       // currentPos in O(1) via doubly-linked delimiter chain.
       _nextDelim[foundOpenerPos] = currentPos;
       _prevDelim[currentPos] = foundOpenerPos;
 
       // Collect interior active nodes between openerItemIdx and closerItemIdx.
-      final List<MarkdownInlineNode> rawChildren = <MarkdownInlineNode>[];
-      cur = opener.nextActive;
-      while (cur != -1 && cur != closerItemIdx) {
-        final MarkdownInlineNode n = _items[cur].materializeNode();
-        if (n is! TextNode || n.text.isNotEmpty) {
-          rawChildren.add(n);
-        }
-        cur = _items[cur].nextActive;
-      }
-      final List<MarkdownInlineNode> children = freezeList(
-        _coalesceTextNodes(rawChildren),
+      final List<MarkdownInlineNode> children = _collectActiveSliceCoalesced(
+        opener.nextActive,
+        closerItemIdx,
+        freezeResult: true,
       );
 
-      final SourceSpan emSpan = SourceSpan(
-        startOffset: opener.node.span.startOffset,
-        endOffset: closer.node.span.endOffset,
-        startLine: opener.node.span.startLine,
-        endLine: closer.node.span.endLine,
+      final SourceSpan emSpan = createUncheckedSpan(
+        startOffset: opener.itemSpan.startOffset,
+        endOffset: closer.itemSpan.endOffset,
+        startLine: opener.itemSpan.startLine,
+        endLine: closer.itemSpan.endLine,
       );
 
       final MarkdownInlineNode wrapped;
       if (opener.delimChar == 0x7E) {
         if (options.subscript && useCount == 1) {
-          wrapped = SubscriptNode(children: children, span: emSpan);
+          wrapped = createFrozenSubscriptNode(children: children, span: emSpan);
         } else {
-          wrapped = StrikethroughNode(children: children, span: emSpan);
+          wrapped = createFrozenStrikethroughNode(
+            children: children,
+            span: emSpan,
+          );
         }
       } else if (opener.delimChar == 0x3D) {
-        wrapped = HighlightNode(children: children, span: emSpan);
+        wrapped = createFrozenHighlightNode(children: children, span: emSpan);
       } else if (opener.delimChar == 0x5E) {
-        wrapped = SuperscriptNode(children: children, span: emSpan);
+        wrapped = createFrozenSuperscriptNode(children: children, span: emSpan);
       } else if (useCount == 2) {
-        wrapped = StrongNode(
+        wrapped = createFrozenStrongNode(
           children: children,
-          delimiter: delimStr,
+          delimiter: _repeatDelimChar(opener.delimChar, 2),
           span: emSpan,
         );
       } else {
-        wrapped = EmphasisNode(
+        wrapped = createFrozenEmphasisNode(
           children: children,
-          delimiter: delimStr,
+          delimiter: _repeatDelimChar(opener.delimChar, 1),
           span: emSpan,
         );
       }
@@ -2479,18 +3132,113 @@ final class _InlineScanner {
     }
   }
 
-  List<MarkdownInlineNode> _collectActiveNodesCoalesced(int headIdx) {
-    final List<MarkdownInlineNode> result = <MarkdownInlineNode>[];
-    int cur = headIdx;
-    while (cur != -1) {
+  List<MarkdownInlineNode> _collectActiveSliceCoalesced(
+    int startIdx,
+    int stopIdx, {
+    required bool freezeResult,
+  }) {
+    int maxDepth = 0;
+    TextNode? pending;
+    StringBuffer? buf;
+    SourceSpan? pendingSpan;
+    List<MarkdownInlineNode>? out;
+
+    int cur = startIdx;
+    while (cur != -1 && cur != stopIdx) {
       final _InlineItem item = _items[cur];
-      final MarkdownInlineNode n = item.materializeNode();
-      if (n is! TextNode || n.text.isNotEmpty) {
-        result.add(n);
+      if (item.inlineDepth > maxDepth) {
+        maxDepth = item.inlineDepth;
+      }
+      String? addText;
+      SourceSpan? addSpan;
+      TextNode? addTextNode;
+      MarkdownInlineNode? nonTextNode;
+      final MarkdownInlineNode? node = item._node;
+      if (node == null) {
+        final int dCount = item.delimCount;
+        if (dCount > 0) {
+          addText = _repeatDelimChar(item.delimChar, dCount);
+          addSpan = item.itemSpan;
+        }
+      } else if (node is TextNode) {
+        if (node.text.isNotEmpty) {
+          addTextNode = node;
+          addText = node.text;
+          addSpan = node.span;
+        }
+      } else {
+        nonTextNode = node;
+      }
+      if (addText != null) {
+        final SourceSpan span = addSpan!;
+        if (buf != null) {
+          buf.write(addText);
+          final SourceSpan prev = pendingSpan!;
+          pendingSpan = createUncheckedSpan(
+            startOffset: prev.startOffset,
+            endOffset: span.endOffset,
+            startLine: prev.startLine,
+            endLine: span.endLine,
+          );
+        } else if (pending != null) {
+          buf = StringBuffer(pending.text)..write(addText);
+          final SourceSpan prev = pendingSpan!;
+          pendingSpan = createUncheckedSpan(
+            startOffset: prev.startOffset,
+            endOffset: span.endOffset,
+            startLine: prev.startLine,
+            endLine: span.endLine,
+          );
+          pending = null;
+        } else {
+          pending = addTextNode ?? TextNode(addText, span: span);
+          pendingSpan = span;
+        }
+      } else if (nonTextNode != null) {
+        if (buf != null) {
+          out ??= <MarkdownInlineNode>[];
+          out.add(TextNode(buf.toString(), span: pendingSpan!));
+          buf = null;
+          pending = null;
+          pendingSpan = null;
+        } else if (pending != null) {
+          out ??= <MarkdownInlineNode>[];
+          out.add(pending);
+          pending = null;
+          pendingSpan = null;
+        }
+        out ??= <MarkdownInlineNode>[];
+        out.add(nonTextNode);
       }
       cur = item.nextActive;
     }
-    return _coalesceTextNodes(result);
+
+    _lastCollectedMaxDepth = maxDepth;
+
+    if (out == null) {
+      final TextNode? only = buf != null
+          ? TextNode(buf.toString(), span: pendingSpan!)
+          : pending;
+      if (only == null) {
+        return emptyFrozenInlineList;
+      }
+      return freezeResult
+          ? freezeSingleton<MarkdownInlineNode>(only)
+          : <MarkdownInlineNode>[only];
+    }
+
+    if (buf != null) {
+      out.add(TextNode(buf.toString(), span: pendingSpan!));
+    } else if (pending != null) {
+      out.add(pending);
+    }
+    if (!freezeResult) {
+      return out;
+    }
+    if (out.length == 1) {
+      return freezeSingleton<MarkdownInlineNode>(out[0]);
+    }
+    return freezeFreshList<MarkdownInlineNode>(out);
   }
 
   // ===========================================================================
@@ -2498,66 +3246,115 @@ final class _InlineScanner {
   // ===========================================================================
 
   List<MarkdownInlineNode> _applyGfmAutolinks(List<MarkdownInlineNode> nodes) {
-    final List<MarkdownInlineNode> out = <MarkdownInlineNode>[];
-    for (final MarkdownInlineNode node in nodes) {
+    List<MarkdownInlineNode>? out;
+    final int len = nodes.length;
+    for (int idx = 0; idx < len; idx++) {
+      final MarkdownInlineNode node = nodes[idx];
       if (node is TextNode) {
-        out.addAll(_autolinkTextNode(node));
+        final List<MarkdownInlineNode>? autolinked = _autolinkTextNodeOrNull(
+          node,
+        );
+        if (autolinked != null) {
+          out ??= nodes.sublist(0, idx);
+          out.addAll(autolinked);
+          continue;
+        }
       } else if (node is EmphasisNode) {
-        out.add(
-          EmphasisNode(
-            children: _applyGfmAutolinks(node.children),
-            delimiter: node.delimiter,
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _applyGfmAutolinks(
+          node.children,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, idx);
+          out.add(
+            createFrozenEmphasisNode(
+              children: freezeFreshList(mapped),
+              delimiter: node.delimiter,
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is StrongNode) {
-        out.add(
-          StrongNode(
-            children: _applyGfmAutolinks(node.children),
-            delimiter: node.delimiter,
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _applyGfmAutolinks(
+          node.children,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, idx);
+          out.add(
+            createFrozenStrongNode(
+              children: freezeFreshList(mapped),
+              delimiter: node.delimiter,
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is StrikethroughNode) {
-        out.add(
-          StrikethroughNode(
-            children: _applyGfmAutolinks(node.children),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _applyGfmAutolinks(
+          node.children,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, idx);
+          out.add(
+            createFrozenStrikethroughNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is HighlightNode) {
-        out.add(
-          HighlightNode(
-            children: _applyGfmAutolinks(node.children),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _applyGfmAutolinks(
+          node.children,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, idx);
+          out.add(
+            createFrozenHighlightNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is SubscriptNode) {
-        out.add(
-          SubscriptNode(
-            children: _applyGfmAutolinks(node.children),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _applyGfmAutolinks(
+          node.children,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, idx);
+          out.add(
+            createFrozenSubscriptNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is SuperscriptNode) {
-        out.add(
-          SuperscriptNode(
-            children: _applyGfmAutolinks(node.children),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _applyGfmAutolinks(
+          node.children,
         );
-      } else {
-        // Skip LinkNode, ImageNode, CodeSpanNode, RawHtmlInlineNode, etc.
-        out.add(node);
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, idx);
+          out.add(
+            createFrozenSuperscriptNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       }
+      out?.add(node);
     }
-    return out;
+    return out ?? nodes;
   }
 
-  List<MarkdownInlineNode> _autolinkTextNode(TextNode node) {
+  List<MarkdownInlineNode>? _autolinkTextNodeOrNull(TextNode node) {
     final String text = node.text;
     final int len = text.length;
-    final List<MarkdownInlineNode> out = <MarkdownInlineNode>[];
+    List<MarkdownInlineNode>? out;
     int lastEmit = 0;
     int i = 0;
 
@@ -2565,6 +3362,8 @@ final class _InlineScanner {
       final int cu = text.codeUnitAt(i);
       // 1. Check `www.`
       if ((cu == 0x77 || cu == 0x57) &&
+          i + 3 < len &&
+          text.codeUnitAt(i + 3) == 0x2E &&
           _matchesCaseInsensitiveAt(text, i, 'www.') &&
           _isValidAutolinkStart(text, i)) {
         final ({String url, String label, int end})? match =
@@ -2576,6 +3375,7 @@ final class _InlineScanner {
               allowSingleSegmentDomain: false,
             );
         if (match != null) {
+          out ??= <MarkdownInlineNode>[];
           if (i > lastEmit) {
             out.add(TextNode(text.substring(lastEmit, i), span: node.span));
           }
@@ -2583,7 +3383,9 @@ final class _InlineScanner {
             resolver._makeLinkNode(
               rawDestination: match.url,
               isAutolink: true,
-              children: <MarkdownInlineNode>[TextNode(match.label)],
+              children: freezeSingleton<MarkdownInlineNode>(
+                TextNode(match.label),
+              ),
               span: node.span,
             ),
           );
@@ -2594,7 +3396,12 @@ final class _InlineScanner {
       }
 
       // 2. Check `http://`, `https://`, `ftp://`
-      if (cu == 0x68 || cu == 0x48 || cu == 0x66 || cu == 0x46) {
+      if (((cu == 0x68 || cu == 0x48) &&
+              i + 6 < len &&
+              (text.codeUnitAt(i + 1) | 0x20) == 0x74) ||
+          ((cu == 0x66 || cu == 0x46) &&
+              i + 5 < len &&
+              text.codeUnitAt(i + 3) == 0x3A)) {
         int? schemeLen;
         if (_matchesCaseInsensitiveAt(text, i, 'https://')) {
           schemeLen = 8;
@@ -2613,6 +3420,7 @@ final class _InlineScanner {
                 allowSingleSegmentDomain: true,
               );
           if (match != null) {
+            out ??= <MarkdownInlineNode>[];
             if (i > lastEmit) {
               out.add(TextNode(text.substring(lastEmit, i), span: node.span));
             }
@@ -2620,7 +3428,9 @@ final class _InlineScanner {
               resolver._makeLinkNode(
                 rawDestination: match.url,
                 isAutolink: true,
-                children: <MarkdownInlineNode>[TextNode(match.label)],
+                children: freezeSingleton<MarkdownInlineNode>(
+                  TextNode(match.label),
+                ),
                 span: node.span,
               ),
             );
@@ -2636,6 +3446,7 @@ final class _InlineScanner {
         final ({String href, String label, int start, int end})? emailMatch =
             _scanGfmEmailAt(text, i, minStart: lastEmit);
         if (emailMatch != null) {
+          out ??= <MarkdownInlineNode>[];
           if (emailMatch.start > lastEmit) {
             out.add(
               TextNode(
@@ -2648,7 +3459,9 @@ final class _InlineScanner {
             resolver._makeLinkNode(
               rawDestination: emailMatch.href,
               isAutolink: true,
-              children: <MarkdownInlineNode>[TextNode(emailMatch.label)],
+              children: freezeSingleton<MarkdownInlineNode>(
+                TextNode(emailMatch.label),
+              ),
               span: node.span,
             ),
           );
@@ -2661,8 +3474,8 @@ final class _InlineScanner {
       i++;
     }
 
-    if (lastEmit == 0) {
-      return <MarkdownInlineNode>[node];
+    if (out == null) {
+      return null;
     }
     if (lastEmit < len) {
       out.add(TextNode(text.substring(lastEmit), span: node.span));
@@ -2936,16 +3749,18 @@ final class _InlineScanner {
   ) {
     return _mapTextNodes(nodes, (TextNode t) {
       if (!t.text.contains(':')) {
-        return <MarkdownInlineNode>[t];
+        return null;
       }
       final String replaced = t.text.replaceAllMapped(
         _emojiShortcodePattern,
         (Match m) => emojiShortcodes[m.group(1)!] ?? m.group(0)!,
       );
       if (identical(replaced, t.text)) {
-        return <MarkdownInlineNode>[t];
+        return null;
       }
-      return <MarkdownInlineNode>[TextNode(replaced, span: t.span)];
+      return freezeSingleton<MarkdownInlineNode>(
+        TextNode(replaced, span: t.span),
+      );
     });
   }
 
@@ -2968,9 +3783,9 @@ final class _InlineScanner {
         changed = true;
       }
       if (!changed) {
-        return <MarkdownInlineNode>[t];
+        return null;
       }
-      return <MarkdownInlineNode>[TextNode(s, span: t.span)];
+      return freezeSingleton<MarkdownInlineNode>(TextNode(s, span: t.span));
     });
   }
 
@@ -3012,7 +3827,7 @@ final class _InlineScanner {
       return nodes;
     }
     return _mapTextNodes(nodes, (TextNode t) {
-      final List<MarkdownInlineNode> out = <MarkdownInlineNode>[];
+      List<MarkdownInlineNode>? out;
       int last = 0;
       for (final Match m in abbrPattern.allMatches(t.text)) {
         final String abbr = m.group(1)!;
@@ -3020,20 +3835,23 @@ final class _InlineScanner {
         if (title == null || !resolver.tryConsumeExpandedBytes(title.length)) {
           break;
         }
+        out ??= <MarkdownInlineNode>[];
         if (m.start > last) {
           out.add(TextNode(t.text.substring(last, m.start), span: t.span));
         }
         out.add(
-          AbbrInlineNode(
+          createFrozenAbbrInlineNode(
             title: title,
-            children: <MarkdownInlineNode>[TextNode(abbr, span: t.span)],
+            children: freezeSingleton<MarkdownInlineNode>(
+              TextNode(abbr, span: t.span),
+            ),
             span: t.span,
           ),
         );
         last = m.end;
       }
-      if (last == 0) {
-        return <MarkdownInlineNode>[t];
+      if (out == null) {
+        return null;
       }
       if (last < t.text.length) {
         out.add(TextNode(t.text.substring(last), span: t.span));
@@ -3044,72 +3862,130 @@ final class _InlineScanner {
 
   List<MarkdownInlineNode> _mapTextNodes(
     List<MarkdownInlineNode> nodes,
-    List<MarkdownInlineNode> Function(TextNode) fn,
+    List<MarkdownInlineNode>? Function(TextNode) fn,
   ) {
-    final List<MarkdownInlineNode> out = <MarkdownInlineNode>[];
-    for (final MarkdownInlineNode node in nodes) {
+    List<MarkdownInlineNode>? out;
+    final int len = nodes.length;
+    for (int i = 0; i < len; i++) {
+      final MarkdownInlineNode node = nodes[i];
       if (node is TextNode) {
-        out.addAll(fn(node));
+        final List<MarkdownInlineNode>? replacement = fn(node);
+        if (replacement != null) {
+          out ??= nodes.sublist(0, i);
+          out.addAll(replacement);
+          continue;
+        }
       } else if (node is EmphasisNode) {
-        out.add(
-          EmphasisNode(
-            children: _mapTextNodes(node.children, fn),
-            delimiter: node.delimiter,
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _mapTextNodes(
+          node.children,
+          fn,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, i);
+          out.add(
+            createFrozenEmphasisNode(
+              children: freezeFreshList(mapped),
+              delimiter: node.delimiter,
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is StrongNode) {
-        out.add(
-          StrongNode(
-            children: _mapTextNodes(node.children, fn),
-            delimiter: node.delimiter,
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _mapTextNodes(
+          node.children,
+          fn,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, i);
+          out.add(
+            createFrozenStrongNode(
+              children: freezeFreshList(mapped),
+              delimiter: node.delimiter,
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is StrikethroughNode) {
-        out.add(
-          StrikethroughNode(
-            children: _mapTextNodes(node.children, fn),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _mapTextNodes(
+          node.children,
+          fn,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, i);
+          out.add(
+            createFrozenStrikethroughNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is HighlightNode) {
-        out.add(
-          HighlightNode(
-            children: _mapTextNodes(node.children, fn),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _mapTextNodes(
+          node.children,
+          fn,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, i);
+          out.add(
+            createFrozenHighlightNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is SubscriptNode) {
-        out.add(
-          SubscriptNode(
-            children: _mapTextNodes(node.children, fn),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _mapTextNodes(
+          node.children,
+          fn,
         );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, i);
+          out.add(
+            createFrozenSubscriptNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
       } else if (node is SuperscriptNode) {
-        out.add(
-          SuperscriptNode(
-            children: _mapTextNodes(node.children, fn),
-            span: node.span,
-          ),
+        final List<MarkdownInlineNode> mapped = _mapTextNodes(
+          node.children,
+          fn,
         );
-      } else if (node is LinkNode) {
-        if (node.isAutolink) {
-          out.add(node);
-        } else {
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, i);
+          out.add(
+            createFrozenSuperscriptNode(
+              children: freezeFreshList(mapped),
+              span: node.span,
+            ),
+          );
+          continue;
+        }
+      } else if (node is LinkNode && !node.isAutolink) {
+        final List<MarkdownInlineNode> mapped = _mapTextNodes(
+          node.children,
+          fn,
+        );
+        if (!identical(mapped, node.children)) {
+          out ??= nodes.sublist(0, i);
           out.add(
             createBlockedLinkNodeFromExisting(
               node,
-              children: _mapTextNodes(node.children, fn),
+              children: freezeFreshList(mapped),
             ),
           );
+          continue;
         }
-      } else {
-        out.add(node);
       }
+      out?.add(node);
     }
-    return out;
+    return out ?? nodes;
   }
 }
 
@@ -3123,9 +3999,10 @@ LinkNode createBlockedLinkNodeFromExisting(
       children: children,
       isAutolink: existing.isAutolink,
       span: existing.span,
+      frozen: true,
     );
   }
-  return LinkNode(
+  return createFrozenLinkNode(
     destination: existing.destination,
     title: existing.title,
     children: children,
@@ -3135,47 +4012,103 @@ LinkNode createBlockedLinkNodeFromExisting(
 }
 
 List<MarkdownInlineNode> _coalesceTextNodes(List<MarkdownInlineNode> nodes) {
-  if (nodes.length <= 1) {
+  final int len = nodes.length;
+  if (len == 0) {
     return nodes;
   }
+  if (len == 1) {
+    final MarkdownInlineNode only = nodes[0];
+    if (only is TextNode && only.text.isEmpty) {
+      return emptyFrozenInlineList;
+    }
+    return nodes;
+  }
+  bool needsWork = false;
+  bool prevWasText = false;
+  for (int i = 0; i < len; i++) {
+    final MarkdownInlineNode node = nodes[i];
+    if (node is TextNode) {
+      if (node.text.isEmpty || prevWasText) {
+        needsWork = true;
+        break;
+      }
+      prevWasText = true;
+    } else {
+      prevWasText = false;
+    }
+  }
+  if (!needsWork) {
+    return nodes;
+  }
+
   final List<MarkdownInlineNode> out = <MarkdownInlineNode>[];
-  for (final MarkdownInlineNode node in nodes) {
+  TextNode? pending;
+  StringBuffer? buf;
+  SourceSpan? pendingSpan;
+
+  for (int i = 0; i < len; i++) {
+    final MarkdownInlineNode node = nodes[i];
     if (node is TextNode) {
       if (node.text.isEmpty) {
         continue;
       }
-      if (out.isNotEmpty && out.last is TextNode) {
-        final TextNode prev = out.last as TextNode;
-        out[out.length - 1] = TextNode(
-          '${prev.text}${node.text}',
-          span: SourceSpan(
-            startOffset: prev.span.startOffset,
-            endOffset: node.span.endOffset,
-            startLine: prev.span.startLine,
-            endLine: node.span.endLine,
-          ),
+      if (buf != null) {
+        buf.write(node.text);
+        final SourceSpan prev = pendingSpan!;
+        pendingSpan = createUncheckedSpan(
+          startOffset: prev.startOffset,
+          endOffset: node.span.endOffset,
+          startLine: prev.startLine,
+          endLine: node.span.endLine,
         );
+      } else if (pending != null) {
+        buf = StringBuffer(pending.text)..write(node.text);
+        final SourceSpan prev = pendingSpan!;
+        pendingSpan = createUncheckedSpan(
+          startOffset: prev.startOffset,
+          endOffset: node.span.endOffset,
+          startLine: prev.startLine,
+          endLine: node.span.endLine,
+        );
+        pending = null;
       } else {
-        out.add(node);
+        pending = node;
+        pendingSpan = node.span;
       }
     } else {
+      if (buf != null) {
+        out.add(TextNode(buf.toString(), span: pendingSpan!));
+        buf = null;
+        pending = null;
+        pendingSpan = null;
+      } else if (pending != null) {
+        out.add(pending);
+        pending = null;
+        pendingSpan = null;
+      }
       out.add(node);
     }
+  }
+  if (buf != null) {
+    out.add(TextNode(buf.toString(), span: pendingSpan!));
+  } else if (pending != null) {
+    out.add(pending);
   }
   return out;
 }
 
 String _extractPlainText(List<MarkdownInlineNode> nodes) {
   final StringBuffer out = StringBuffer();
-  for (final MarkdownInlineNode node in nodes) {
-    out.write(node.toPlainText());
+  for (int i = 0; i < nodes.length; i++) {
+    out.write(nodes[i].toPlainText());
   }
   return out.toString();
 }
 
 String _extractAltText(List<MarkdownInlineNode> nodes) {
   final StringBuffer out = StringBuffer();
-  for (final MarkdownInlineNode node in nodes) {
+  for (int i = 0; i < nodes.length; i++) {
+    final MarkdownInlineNode node = nodes[i];
     if (node is TextNode) {
       out.write(node.text);
     } else if (node is CodeSpanNode) {
