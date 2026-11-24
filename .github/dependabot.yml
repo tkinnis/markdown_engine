@@ -7,6 +7,11 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
+    groups:
+      pub-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "pub"
     directory: "/packages/markdown_engine"
@@ -15,6 +20,11 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
+    groups:
+      pub-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "pub"
     directory: "/packages/markdown_engine_flutter"
@@ -23,6 +33,11 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
+    groups:
+      pub-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "pub"
     directory: "/studio"
@@ -37,14 +52,6 @@ updates:
         update-types:
           - "minor"
           - "patch"
-
-  - package-ecosystem: "pub"
-    directory: "/tool/compare"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "chore(deps)"
 
   - package-ecosystem: "github-actions"
     directory: "/"

@@ -18,11 +18,134 @@ jobs:
   verify:
     name: Analyze, Test & Spec
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed scopes
+        id: changes
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          code_changed=false
+          core_pkg=false
+          flutter_pkg=false
+          example_app=false
+          studio_app=false
+          compare_pkg=false
+          tool_scripts=false
+          bench=false
+
+          set_all_true() {
+            code_changed=true
+            core_pkg=true
+            flutter_pkg=true
+            example_app=true
+            studio_app=true
+            compare_pkg=true
+            tool_scripts=true
+            bench=true
+          }
+
+          classify_files() {
+            local file=""
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+              case "$file" in
+                README.md|CONTRIBUTING.md|CODE_OF_CONDUCT.md|SECURITY.md|AGENTS.md|LICENSE|doc/*|corpus/README.md|studio/README.md|packages/markdown_engine/LICENSE|packages/markdown_engine_flutter/LICENSE|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE.md|.github/copilot-instructions.md|.github/workflows/pages.yml|.github/workflows/reference-monitor.yml|.github/dependabot.yml)
+                  ;;
+                pubspec.yaml|pubspec.lock|analysis_options.yaml|.github/workflows/ci.yml|packages/markdown_engine/*|corpus/spec/*|corpus/extensions/*|corpus/security/*|corpus/streaming/*)
+                  set_all_true
+                  ;;
+                packages/markdown_engine_flutter/example/*)
+                  code_changed=true
+                  example_app=true
+                  ;;
+                packages/markdown_engine_flutter/*)
+                  code_changed=true
+                  flutter_pkg=true
+                  example_app=true
+                  studio_app=true
+                  compare_pkg=true
+                  ;;
+                studio/*)
+                  code_changed=true
+                  studio_app=true
+                  ;;
+                tool/compare/*)
+                  code_changed=true
+                  compare_pkg=true
+                  ;;
+                tool/benchmark*)
+                  code_changed=true
+                  tool_scripts=true
+                  bench=true
+                  ;;
+                tool/*|REFERENCE.md)
+                  code_changed=true
+                  tool_scripts=true
+                  ;;
+                *)
+                  set_all_true
+                  ;;
+              esac
+            done
+          }
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            set_all_true
+          else
+            DIFF_OK=true
+            CHANGED=""
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              TARGET_REF="${BASE_REF:-main}"
+              if ! git rev-parse --verify "origin/${TARGET_REF}^{commit}" >/dev/null 2>&1; then
+                git fetch --no-tags --depth=0 origin "$TARGET_REF" || true
+              fi
+              if git rev-parse --verify "origin/${TARGET_REF}^{commit}" >/dev/null 2>&1; then
+                CHANGED=$(git diff --name-only "origin/${TARGET_REF}...HEAD")
+              else
+                DIFF_OK=false
+              fi
+            else
+              if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+                CHANGED=$(git diff --name-only "${BEFORE_SHA}..HEAD")
+              else
+                DIFF_OK=false
+              fi
+            fi
+
+            if [ "$DIFF_OK" != "true" ]; then
+              set_all_true
+            elif [ -n "$CHANGED" ]; then
+              classify_files <<< "$CHANGED"
+            fi
+          fi
+
+          {
+            echo "code_changed=$code_changed"
+            echo "core_pkg=$core_pkg"
+            echo "flutter_pkg=$flutter_pkg"
+            echo "example_app=$example_app"
+            echo "studio_app=$studio_app"
+            echo "compare_pkg=$compare_pkg"
+            echo "tool_scripts=$tool_scripts"
+            echo "bench=$bench"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Changed scopes: code_changed=$code_changed core_pkg=$core_pkg flutter_pkg=$flutter_pkg example_app=$example_app studio_app=$studio_app compare_pkg=$compare_pkg tool_scripts=$tool_scripts bench=$bench"
 
       - name: Setup Flutter & Dart SDK
+        if: steps.changes.outputs.code_changed == 'true'
         uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.47.6"
@@ -30,49 +153,61 @@ jobs:
           cache: true
 
       - name: Install Dart & Flutter workspace dependencies
-        run: |
-          flutter pub get
-          (cd tool/compare && flutter pub get)
+        if: steps.changes.outputs.code_changed == 'true'
+        run: flutter pub get
+
+      - name: Install comparison tooling dependencies
+        if: steps.changes.outputs.compare_pkg == 'true'
+        working-directory: tool/compare
+        run: flutter pub get
 
       - name: Verify code formatting
+        if: steps.changes.outputs.code_changed == 'true'
         run: dart format --output=none --set-exit-if-changed packages tool studio
 
       - name: Run static analysis
+        if: steps.changes.outputs.code_changed == 'true'
         run: dart analyze --fatal-infos
 
       - name: Run comparison tooling static analysis
+        if: steps.changes.outputs.compare_pkg == 'true'
         working-directory: tool/compare
         run: dart analyze --fatal-infos
 
       - name: Run pure-Dart core tests & CLI example
+        if: steps.changes.outputs.core_pkg == 'true'
         working-directory: packages/markdown_engine
         run: |
           dart test
           dart run example/main.dart
 
-      - name: Run pure-Dart dartdoc check (PRs & release tags)
-        if: github.ref_type == 'tag' || github.event_name == 'pull_request'
+      - name: Run pure-Dart dartdoc check (core PRs & release tags)
+        if: github.ref_type == 'tag' || (github.event_name == 'pull_request' && steps.changes.outputs.core_pkg == 'true')
         working-directory: packages/markdown_engine
         run: dart doc --dry-run
 
       - name: Run Flutter package tests
+        if: steps.changes.outputs.flutter_pkg == 'true'
         working-directory: packages/markdown_engine_flutter
-        run: flutter test
+        run: flutter test --no-pub
 
-      - name: Run Flutter package dartdoc check (PRs & release tags)
-        if: github.ref_type == 'tag' || github.event_name == 'pull_request'
+      - name: Run Flutter package dartdoc check (Flutter PRs & release tags)
+        if: github.ref_type == 'tag' || (github.event_name == 'pull_request' && steps.changes.outputs.flutter_pkg == 'true')
         working-directory: packages/markdown_engine_flutter
         run: dart doc --dry-run
 
       - name: Run Flutter example app tests
+        if: steps.changes.outputs.example_app == 'true'
         working-directory: packages/markdown_engine_flutter/example
-        run: flutter test
+        run: flutter test --no-pub
 
       - name: Run Studio app tests
+        if: steps.changes.outputs.studio_app == 'true'
         working-directory: studio
-        run: flutter test
+        run: flutter test --no-pub
 
       - name: Verify lockstep versions
+        if: steps.changes.outputs.code_changed == 'true'
         run: dart run tool/check_versions.dart
 
       - name: Verify release git tag matches lockstep version
@@ -80,20 +215,23 @@ jobs:
         run: dart run tool/check_versions.dart --tag "${GITHUB_REF_NAME}"
 
       - name: Verify REFERENCE.md pins and spec SHA-256 digests
+        if: steps.changes.outputs.code_changed == 'true'
         run: dart run tool/sync_reference.dart --verify
 
       - name: Verify CommonMark & GFM specification parity
+        if: steps.changes.outputs.core_pkg == 'true' || steps.changes.outputs.tool_scripts == 'true'
         run: dart run tool/verify_spec.dart --strict
 
       - name: Verify native AOT benchmark regressions
+        if: steps.changes.outputs.bench == 'true'
         run: dart run tool/benchmark_suite.dart --check-regressions
 
-      - name: Validate pub.dev publish readiness for markdown_engine (PRs & release tags)
-        if: github.ref_type == 'tag' || github.event_name == 'pull_request'
+      - name: Validate pub.dev publish readiness for markdown_engine (core PRs & release tags)
+        if: github.ref_type == 'tag' || (github.event_name == 'pull_request' && steps.changes.outputs.core_pkg == 'true')
         working-directory: packages/markdown_engine
         run: dart pub publish --dry-run
 
-      - name: Validate pub.dev publish readiness for markdown_engine_flutter (PRs & release tags)
-        if: github.ref_type == 'tag' || github.event_name == 'pull_request'
+      - name: Validate pub.dev publish readiness for markdown_engine_flutter (Flutter PRs & release tags)
+        if: github.ref_type == 'tag' || (github.event_name == 'pull_request' && steps.changes.outputs.flutter_pkg == 'true')
         working-directory: packages/markdown_engine_flutter
         run: flutter pub publish --dry-run
