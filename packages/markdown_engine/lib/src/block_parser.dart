@@ -1706,11 +1706,9 @@ final class _BlockEngine {
           }
         }
 
-        // 9. Footnote Definition (`[^label]: ...`) when not interrupting paragraph.
-        if (options.footnotes &&
-            firstCu == 0x5B &&
-            !(!closedUnmatched && oldTipWasParagraph) &&
-            !atMaxDepth) {
+        // 9. Footnote Definition (`[^label]: ...`), matching cmark-gfm so
+        // consecutive definitions and definitions after paragraphs open cleanly.
+        if (options.footnotes && firstCu == 0x5B && !atMaxDepth) {
           final int fnRes = _tryOpenFootnoteDef(
             cursor,
             lastMatched: lastMatched,

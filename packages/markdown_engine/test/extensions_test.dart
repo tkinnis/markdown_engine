@@ -101,6 +101,147 @@ void main() {
       expect(doc.toHtml(), contains('Unmatched reference[^missing]'));
     });
 
+    test(
+      'parses consecutive numeric and named footnote definitions without blank lines',
+      () {
+        const String source = '''
+markdown_engine compiles Mermaid diagrams into native vector bytecode[^1] and supports named references[^note].
+
+[^1]: Powered by `pele_dart` and `vector_graphics_compiler`.
+[^note]: Footnote definitions are collected and numbered at the bottom of the rendered document.
+''';
+        final MarkdownDocument doc = engine.parse(
+          source,
+          options: const MarkdownOptions.extended(),
+        );
+
+        final FootnoteSectionNode? section = doc.blocks
+            .whereType<FootnoteSectionNode>()
+            .firstOrNull;
+        expect(section, isNotNull);
+        expect(
+          section!.definitions.map((FootnoteDefinitionNode d) => d.label),
+          <String>['1', 'note'],
+        );
+        expect(
+          section.definitions.map((FootnoteDefinitionNode d) => d.index),
+          <int>[1, 2],
+        );
+        expect(
+          section.definitions.first.toPlainText(),
+          isNot(contains('[^note]:')),
+        );
+        final String html = doc.toHtml();
+        expect(html, contains('id="fnref-1"'));
+        expect(html, contains('id="fnref-note"'));
+        expect(html, contains('id="fn-1"'));
+        expect(html, contains('id="fn-note"'));
+        expect(html, isNot(contains('[^note]')));
+      },
+    );
+
+    test(
+      'opens footnote definitions immediately after paragraphs, blockquotes, and lists',
+      () {
+        const String afterPara = '''
+Paragraph text[^p1].
+[^p1]: Immediate footnote after paragraph.
+''';
+        final MarkdownDocument paraDoc = engine.parse(afterPara);
+        final FootnoteSectionNode? paraSec = paraDoc.blocks
+            .whereType<FootnoteSectionNode>()
+            .firstOrNull;
+        expect(paraSec, isNotNull);
+        expect(
+          paraSec!.definitions.map((FootnoteDefinitionNode d) => d.label),
+          <String>['p1'],
+        );
+        expect(paraDoc.toHtml(), isNot(contains('[^p1]')));
+
+        const String afterQuote = '''
+> Quoted text[^q1].
+[^q1]: Immediate footnote after blockquote.
+''';
+        final MarkdownDocument quoteDoc = engine.parse(afterQuote);
+        expect(
+          quoteDoc.blocks
+              .whereType<FootnoteSectionNode>()
+              .single
+              .definitions
+              .single
+              .label,
+          'q1',
+        );
+        expect(quoteDoc.toHtml(), isNot(contains('[^q1]')));
+
+        const String afterList = '''
+- List item[^l1].
+[^l1]: Immediate footnote after list item.
+''';
+        final MarkdownDocument listDoc = engine.parse(afterList);
+        expect(
+          listDoc.blocks
+              .whereType<FootnoteSectionNode>()
+              .single
+              .definitions
+              .single
+              .label,
+          'l1',
+        );
+        expect(listDoc.toHtml(), isNot(contains('[^l1]')));
+      },
+    );
+
+    test(
+      'keeps lazy multi-line footnote continuation before consecutive definition',
+      () {
+        const String source = '''
+Here is a simple footnote[^1]. A footnote can also have multiple lines[^2].
+
+[^1]: My reference.
+[^2]: To add line breaks within a footnote, add 2 spaces to the end of a line.  
+This is a second line.
+[^3]: Trailing unused note.
+''';
+        final MarkdownDocument doc = engine.parse(
+          source,
+          options: const MarkdownOptions.gfm(),
+        );
+        final FootnoteSectionNode section = doc.blocks
+            .whereType<FootnoteSectionNode>()
+            .single;
+        expect(
+          section.definitions.map((FootnoteDefinitionNode d) => d.label),
+          <String>['1', '2'],
+        );
+        expect(
+          section.definitions[1].toPlainText(),
+          contains('This is a second line.'),
+        );
+        expect(
+          doc.footnotes.map((FootnoteDefinitionNode d) => d.label),
+          <String>['1', '2', '3'],
+        );
+      },
+    );
+
+    test(
+      'preserves CommonMark literal text when footnotes option is disabled',
+      () {
+        const String source = '''
+Paragraph text[^1].
+[^1]: Should remain plain text in CommonMark mode.
+''';
+        final MarkdownDocument doc = engine.parse(
+          source,
+          options: const MarkdownOptions.commonMark(),
+        );
+        expect(doc.blocks.whereType<FootnoteSectionNode>(), isEmpty);
+        expect(doc.footnotes, isEmpty);
+        expect(doc.toHtml(), contains('[^1]: Should remain plain text'));
+      },
+    );
+
     test('parses PHP Extra definition lists with multi-paragraph bodies', () {
       final String source = File(
         '$root/extensions/definition_lists.md',
