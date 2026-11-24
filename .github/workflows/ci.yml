@@ -30,7 +30,9 @@ jobs:
           cache: true
 
       - name: Install Dart & Flutter workspace dependencies
-        run: flutter pub get
+        run: |
+          flutter pub get
+          (cd tool/compare && flutter pub get)
 
       - name: Verify code formatting
         run: dart format --output=none --set-exit-if-changed packages tool studio
@@ -40,9 +42,7 @@ jobs:
 
       - name: Run comparison tooling static analysis
         working-directory: tool/compare
-        run: |
-          flutter pub get
-          dart analyze --fatal-infos
+        run: dart analyze --fatal-infos
 
       - name: Run pure-Dart core tests & CLI example
         working-directory: packages/markdown_engine
