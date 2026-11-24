@@ -1,6 +1,14 @@
 # Benchmarks (Native AOT, Head-to-Head & macOS Profile)
 
-This document presents the canonical performance profile for `markdown_engine` (`0.1.0`) and `markdown_engine_flutter` (`0.1.0`) on Apple Silicon (`Apple M4`, macOS `15.6`), combining interleaved Native Dart AOT parser benchmarks (`tool/compare/bin/compare_parsers_aot.dart` under `MarkdownOptions.gfm()`), Flutter Test JIT and headless `800x600` widget benchmarks (`tool/compare/test/compare_flutter_bench_test.dart`) against `package:markdown 7.3.1`, `flutter_md 0.3.1`, and `flutter_markdown_plus 1.0.12`, persistent vs one-shot Mermaid background isolate measurements (`tool/compare/test/mermaid_worker_bench_test.dart`), real macOS `--profile` Impeller (`MetalSDF`) frame-timing telemetry (`studio/lib/profile_benchmark_main.dart`), and CI regression ceilings (`tool/benchmark_suite.dart` / `tool/benchmark_baseline.json`).
+This report presents the performance profile for `markdown_engine` (`0.1.0`) and `markdown_engine_flutter` (`0.1.0`) on Apple Silicon (`Apple M4`, macOS `15.6`).
+
+It combines five suites:
+
+* **Native Dart AOT**: Interleaved parser benchmarks (`tool/compare/bin/compare_parsers_aot.dart`) under `MarkdownOptions.gfm()`.
+* **Flutter Test JIT & Widget Pumps**: Headless `800x600` benchmarks (`tool/compare/test/compare_flutter_bench_test.dart`) against `package:markdown 7.3.1`, `flutter_md 0.3.1`, and `flutter_markdown_plus 1.0.12`.
+* **Mermaid Worker Isolate**: Persistent vs. one-shot background isolate measurements (`tool/compare/test/mermaid_worker_bench_test.dart`).
+* **macOS `--profile` Impeller**: Live `MetalSDF` frame-timing telemetry (`studio/lib/profile_benchmark_main.dart`).
+* **CI Regression Gate**: Standalone AOT bounds verified by `tool/benchmark_suite.dart` and `tool/benchmark_baseline.json`.
 
 ## Host Environment & Dependency Pins
 
@@ -20,7 +28,10 @@ All five suites below ran sequentially on an idle Apple M4 host with zero concur
 
 ## Executive Scoreboard
 
-To keep comparisons transparent and avoid mixing apples with oranges, this scoreboard is split into two explicit tiers: **Tier 1 (Apples-to-Apples Core Benchmarks)** aligns parser options, non-selectable widget configuration (`selectable: false`), matched 31-pump streaming pacing, and disabled built-in math/Mermaid widgets (`B4a`) against raw-text competitors, whereas **Tier 2 (Rich Out-of-the-Box Capabilities)** measures production-default `SelectionArea` selection (`-Selectable`), native OpenType `TexMath` (`tex_math_flutter`), `VectorGraphic` Mermaid (`pele_dart`), GitHub alerts, hybrid two-sliver streaming (`B4b`), live macOS `--profile` Impeller frames, and persistent Mermaid worker isolate dispatch that third-party packages do not natively provide.
+The scoreboard separates matched baseline benchmarks from rich production capabilities so comparisons remain transparent:
+
+* **Tier 1 (Apples-to-Apples Core Benchmarks)**: Aligns parser options, `selectable: false` widget settings, matched 31-pump streaming pacing, and disabled built-in math/Mermaid widgets (`B4a`) against raw-text packages.
+* **Tier 2 (Rich Out-of-the-Box Capabilities)**: Measures production-default `SelectionArea` selection (`-Selectable`), native OpenType `TexMath`, `VectorGraphic` Mermaid diagrams, GitHub alerts, hybrid two-sliver streaming (`B4b`), live macOS `--profile` frames, and persistent Mermaid worker dispatch.
 
 ### Tier 1 — Apples-to-Apples Core Benchmarks
 
@@ -43,7 +54,8 @@ To keep comparisons transparent and avoid mixing apples with oranges, this score
 | **Widget Core** | `B3`: 30-chunk prose stream (`selectable: false`, `31` pumps) | **9.29 ms** (`p95 10.95 ms`, `0.31 ms/chunk`; `+ finish()` `0.20 ms`) | 9.78 ms (`p95 11.56 ms`, `0.33 ms/chunk`) | N/A | 68.28 ms (`p95 83.16 ms`, `2.28 ms/chunk`) |
 | **Widget Core** | `B4a`: 30-chunk mixed stream (GFM, built-in math/Mermaid off, `selectable: false`) | 6.77 ms (`p95 7.54 ms`, `0.23 ms/chunk`; `+ finish()` `0.17 ms`) / `B4a-Hybrid` 10.91 ms (`p95 14.55 ms`, `+ finish()` `0.54 ms`) | **6.08 ms** (`p95 6.28 ms`, `0.20 ms/chunk`; raw text/code only) | N/A | 34.64 ms (`p95 37.77 ms`, `1.15 ms/chunk`; raw blocks + full rebuild) |
 
-Notice why `B4a` isolates apples-to-apples core streaming on the mixed fixture: disabling `enableBuiltInMath` and `enableBuiltInMermaid` makes `B4a` render strictly core text and fenced blocks like `flutter_md` and `flutter_markdown_plus` (while `B4a-Hybrid` enables `MarkdownOptions.extended()` alert callouts alongside raw math text fallback), whereas `B4b` in Tier 2 exercises native `TexMath`, `VectorGraphic` Mermaid, and GitHub alerts end to end.
+> [!NOTE]
+> `B4a` disables `enableBuiltInMath` and `enableBuiltInMermaid` so it renders only core text and code blocks like `flutter_md` and `flutter_markdown_plus`. `B4a-Hybrid` turns on `MarkdownOptions.extended()` alert callouts alongside raw math fallbacks, while Tier 2 `B4b` tests native `TexMath`, `VectorGraphic` Mermaid, and GitHub alerts end to end.
 
 ### Tier 2 — Rich Out-of-the-Box Capabilities
 
@@ -58,11 +70,11 @@ Notice why `B4a` isolates apples-to-apples core streaming on the mixed fixture: 
 | **macOS Profile** | 60Hz live streaming (`48` chunks, `51` frames, Impeller `MetalSDF`) | **0.29 ms** build p50 (`p95 0.65 ms`) / **0.28 ms** raster p50 (`p95 0.62 ms`, `0` jank) | N/A | N/A | N/A |
 | **Mermaid Isolate** | `10` distinct cold diagrams (`debugForceAsyncMermaidInTests=true`) | **17.05 ms** unwarmed seq / **10.37 ms** warmed seq (`persistent`) · **4.69 ms** warmed concurrent (`compute`) | N/A | N/A | N/A |
 
-Even with full `SelectionArea` / cross-sliver selection active (`selectable: true`), `B3-Selectable` (`9.88 ms` p50, `10.27 ms` p95) matches non-selectable `flutter_md` (`9.78 ms` p50, `11.56 ms` p95) on median session latency while beating `flutter_md` on `p95` tail latency, and `B4b-Warm` (`16.38 ms`) renders real OpenType math, vector Mermaid diagrams, GitHub alerts, and full selection in under half the time `flutter_markdown_plus` takes to render raw blocks without math or diagrams (`34.64 ms` in Tier 1 `B4a`).
+With full `SelectionArea` selection enabled (`selectable: true`), `B3-Selectable` (`9.88 ms` p50, `10.27 ms` p95) matches non-selectable `flutter_md` (`9.78 ms` p50, `11.56 ms` p95) on median latency and leads on `p95` tail latency. `B4b-Warm` (`16.38 ms`) renders OpenType math, vector Mermaid diagrams, GitHub alerts, and selection in under half the time `flutter_markdown_plus` takes for raw blocks (`34.64 ms` in Tier 1 `B4a`).
 
 ## Canonical Native AOT Benchmarks (`tool/compare/bin/compare_parsers_aot.dart`)
 
-All Native AOT latencies, throughputs, speedup factors, and charts below come from the single canonical interleaved AOT run (`compare_parsers_aot.dart --json`) comparing `markdown_engine` (`MarkdownOptions.gfm()`) against `package:markdown 7.3.1` (`ExtensionSet.gitHubFlavored`, `enableTagfilter: true`).
+All Native AOT figures below come from the interleaved `compare_parsers_aot.dart --json` run comparing `markdown_engine` (`MarkdownOptions.gfm()`) against `package:markdown 7.3.1` (`ExtensionSet.gitHubFlavored`, `enableTagfilter: true`).
 
 | Workload | Payload | Samples x Batch | `markdown_engine` Mean | `markdown_engine` p50 | `markdown_engine` p95 | `markdown_engine` Throughput (p50) | `package:markdown 7.3.1` p50 (`p95`) | Speedup (`p50`) |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -108,7 +120,7 @@ xychart-beta horizontal
 
 ## Flutter Test JIT Parser Throughput & Spec Trade-Offs (`compare_flutter_bench_test.dart`)
 
-`flutter_md 0.3.1` exports Flutter widgets and cannot execute in a pure-Dart AOT CLI binary, so pure-parser comparisons across `markdown_engine`, `flutter_md`, and `package:markdown` run interleaved inside `flutter test` JIT VM.
+Because `flutter_md 0.3.1` depends on Flutter widgets and cannot run in a pure-Dart AOT CLI binary, parser benchmarks across `markdown_engine`, `flutter_md`, and `package:markdown` execute interleaved inside the `flutter test` JIT VM.
 
 | Workload | Payload | `markdown_engine` p50 (`p95`) | `flutter_md 0.3.1` p50 (`p95`) | `package:markdown 7.3.1` p50 (`p95`) |
 | :--- | ---: | ---: | ---: | ---: |
@@ -117,22 +129,25 @@ xychart-beta horizontal
 | Large 5,000-line AST | `168.9 KB` (`4,996` lines) | **1.704 ms** (`p95 2.018 ms`, `96.81 MB/s`; AST+HTML `2.235 ms`, `p95 3.449 ms`) | `1.855 ms` (`p95 3.510 ms`, `88.93 MB/s`) | `47.837 ms` (`p95 48.449 ms`, `3.45 MB/s`) |
 | 50-chunk LLM stream | `2.1 KB` / `50` chunks | `2.52 us/chunk` (**`p95 2.88 us`**, `126.00 us` total; **0.86 us/chunk AOT**) | **2.11 us/chunk** (`p95 3.11 us`, `105.50 us` total; AOT N/A) | `275.92 us/chunk` (`p95 282.71 us`, `13.796 ms` total) |
 
-`flutter_md 0.3.1` trades CommonMark/GFM spec parity features (`__bold__` renders as underline rather than `<strong>`, Setext headings collapse into paragraphs, reference links and `<url>` autolinks stay literal text, HTML entities such as `&copy;` and `&#35;` remain undecoded, 4-space indented code blocks parse as paragraphs, and raw HTML stays literal text), HTML serialization, URL scheme sanitization (`MarkdownUrlPolicy`), and complexity budgets (`MarkdownBudgets`) for a slightly tighter JIT loop on the 937 B small payload (`8.38 us` vs `8.81 us`) and 50-chunk JIT median (`2.11 us/chunk` vs `2.52 us/chunk`). Even inside JIT, `markdown_engine` beats `flutter_md` on Medium AST (`1.34x` faster), Large AST (`1.09x` median and `1.74x` faster `p95` tail), and 50-chunk stream `p95` (`2.88 us` vs `3.11 us`), while compiling to `0.86 us/chunk` (`43.00 us` total) in Native Dart AOT (`flutter_md` AOT = `N/A`).
+Key JIT trade-offs observed in this suite:
+
+* **Spec & Security Scope**: `flutter_md 0.3.1` omits CommonMark/GFM compliance (`__bold__` becomes underline, Setext headings become paragraphs, reference links and `<url>` autolinks stay literal, entities remain undecoded, indented code parses as paragraphs, and raw HTML stays text), HTML serialization, `MarkdownUrlPolicy`, and `MarkdownBudgets` in favor of a tighter loop on the 937 B (`8.38 us` vs `8.81 us`) and 50-chunk JIT (`2.11 us/chunk` vs `2.52 us/chunk`) runs.
+* **Scaling & AOT**: Even under JIT, `markdown_engine` leads `flutter_md` on Medium AST (`1.34x`), Large AST (`1.09x` median, `1.74x` `p95`), and 50-chunk stream `p95` (`2.88 us` vs `3.11 us`), and compiles to `0.86 us/chunk` (`43.00 us` total) in Native AOT (`flutter_md` AOT = `N/A`).
 
 ## Headless Flutter Widget Benchmarks (`800x600` Viewport)
 
-Each widget benchmark runs `2` warmup rounds followed by `7` timed interleaved round-robin rounds (`ABC`/`BCA`/`CAB` rotation) in an `800x600` `MaterialApp` viewport. Tier 1 matches `selectable: false` and `31` streaming pumps across every widget; Tier 2 measures `markdown_engine_flutter`'s production-default `selectable: true` (`SelectionArea` + `MarkdownRichText`) and rich built-in `TexMath` + `VectorGraphic` Mermaid + alert pipeline (`B4b`).
+Each widget benchmark runs `2` warmup rounds followed by `7` timed interleaved round-robin rounds (`ABC`/`BCA`/`CAB`) in an `800x600` `MaterialApp` viewport. Tier 1 matches `selectable: false` and `31` streaming pumps across all packages, while Tier 2 measures `markdown_engine_flutter`'s production-default `selectable: true` and built-in math, Mermaid, and alert rendering (`B4b`).
 
 ### Tier 1 Core Widget Benchmarks (`selectable: false`, Matched `31` Pumps)
 
 | Benchmark | `markdown_engine_flutter` (`selectable: false`) | `flutter_md 0.3.1` (`selectable: false`) | `flutter_markdown_plus 1.0.12` (`selectable: false`) | Observations |
 | :--- | ---: | ---: | ---: | :--- |
-| `B1`: 403-block build & pump (`data`) | **10.05 ms** (`p95 13.32 ms`, `iqr 2.55 ms`) | `23.31 ms` (`p95 25.80 ms`) | `28.88 ms` (`p95 34.99 ms`, `iqr 5.73 ms`) | Lazy `SliverMarkdownDocument` + `FastMarkdownText` / `MarkdownParagraphLeaf` (`2.32x` faster than `flutter_md`, `2.87x` faster than `flutter_markdown_plus`) |
+| `B1`: 403-block build & pump (`data`) | **10.05 ms** (`p95 13.32 ms`, `iqr 2.55 ms`) | `23.31 ms` (`p95 25.80 ms`) | `28.88 ms` (`p95 34.99 ms`, `iqr 5.73 ms`) | Lazy `SliverMarkdownDocument` + fast leaf render boxes (`2.32x` faster than `flutter_md`, `2.87x` faster than `flutter_markdown_plus`) |
 | `B1`: 403-block pre-parsed (`.document`) | **8.56 ms** (`p95 10.39 ms`, `iqr 2.02 ms`) | `23.23 ms` (`p95 25.44 ms`) | N/A *(parses inside widget)* | `2.71x` faster than pre-parsed `flutter_md` |
 | `B2`: Light <-> Dark toggle (`4` timed toggles/round) | **1.73 ms/toggle** (`p95 3.25 ms`, `iqr 0.30 ms`, `0` re-parses) | `17.72 ms/toggle` (`p95 25.44 ms`, `iqr 1.46 ms`, `0` re-parses) | `18.98 ms/toggle` (`p95 23.68 ms`, `iqr 1.29 ms`, `42` re-parses) | `10.24x` faster than `flutter_md`, `10.97x` faster than `flutter_markdown_plus` (zero AST re-parses) |
-| `B3`: 30-chunk prose LLM stream (`31` pumps) | **9.29 ms** (`p95 10.95 ms`, `0.31 ms/chunk`) \| `+ finish()` `0.20 ms` (`p95 0.25 ms`) | `9.78 ms` (`p95 11.56 ms`, `0.33 ms/chunk`) | `68.28 ms` (`p95 83.16 ms`, `2.28 ms/chunk`) | Push listeners (`0` polling timers), expanded streaming fast paths, and `MarkdownStreamingCanvasLeaf` beat `flutter_md` (`1.05x`) and `flutter_markdown_plus` (`7.35x`) |
-| `B4a`: 30-chunk mixed stream (GFM, math/Mermaid off) | `6.77 ms` (`p95 7.54 ms`, `0.23 ms/chunk`) \| `+ finish()` `0.17 ms` (`p95 0.25 ms`) | **6.08 ms** (`p95 6.28 ms`, `0.20 ms/chunk`) | `34.64 ms` (`p95 37.77 ms`, `1.15 ms/chunk`) | `5.12x` faster than `flutter_markdown_plus` on matched raw-block streaming while enforcing full GFM spec and URL/budget guards |
-| `B4a-Hybrid`: 30-chunk mixed stream (alerts + raw math fallback, math/Mermaid off) | `10.91 ms` (`p95 14.55 ms`, `0.36 ms/chunk`) \| `+ finish()` `0.54 ms` (`p95 0.61 ms`) | N/A *(no alert blocks)* | N/A *(no alert blocks)* | `3.18x` faster than `flutter_markdown_plus`'s raw-block `34.64 ms` while rendering GitHub callout alerts in the settled prefix sliver |
+| `B3`: 30-chunk prose LLM stream (`31` pumps) | **9.29 ms** (`p95 10.95 ms`, `0.31 ms/chunk`) \| `+ finish()` `0.20 ms` (`p95 0.25 ms`) | `9.78 ms` (`p95 11.56 ms`, `0.33 ms/chunk`) | `68.28 ms` (`p95 83.16 ms`, `2.28 ms/chunk`) | Push listeners (`0` polling timers), streaming fast paths, and tail canvas beat `flutter_md` (`1.05x`) and `flutter_markdown_plus` (`7.35x`) |
+| `B4a`: 30-chunk mixed stream (GFM, math/Mermaid off) | `6.77 ms` (`p95 7.54 ms`, `0.23 ms/chunk`) \| `+ finish()` `0.17 ms` (`p95 0.25 ms`) | **6.08 ms** (`p95 6.28 ms`, `0.20 ms/chunk`) | `34.64 ms` (`p95 37.77 ms`, `1.15 ms/chunk`) | `5.12x` faster than `flutter_markdown_plus` on matched raw-block streaming while enforcing GFM parity and security guards |
+| `B4a-Hybrid`: 30-chunk mixed stream (alerts + raw math fallback, math/Mermaid off) | `10.91 ms` (`p95 14.55 ms`, `0.36 ms/chunk`) \| `+ finish()` `0.54 ms` (`p95 0.61 ms`) | N/A *(no alert blocks)* | N/A *(no alert blocks)* | `3.18x` faster than `flutter_markdown_plus`'s raw-block `34.64 ms` while rendering GitHub alerts in the settled prefix sliver |
 
 ### Tier 2 Rich Out-of-the-Box Widget Benchmarks (`selectable: true` Default & Native Math/Mermaid)
 
@@ -147,28 +162,28 @@ Each widget benchmark runs `2` warmup rounds followed by `7` timed interleaved r
 
 ## Real macOS `--profile` Impeller Frame Timings (`studio/lib/profile_benchmark_main.dart`)
 
-Measured via `dart run tool/run_macos_profile_benchmark.dart --no-pub --timeout=180` (`flutter run -d macos --profile --no-pub -t lib/profile_benchmark_main.dart`) under Impeller `MetalSDF` after `MarkdownBuiltInRenderers.warmUp()`, collecting live `SchedulerBinding.instance.addTimingsCallback` `FrameTiming` durations across `500`-section scrolling and `60Hz` streaming with native `tex_math_flutter`, persistent-isolate `pele_dart` + `vector_graphics` Mermaid diagrams, and the hybrid two-sliver streaming tail canvas.
+Measured via `dart run tool/run_macos_profile_benchmark.dart --no-pub --timeout=180` under Impeller `MetalSDF` after `MarkdownBuiltInRenderers.warmUp()`. Frame timings come from live `SchedulerBinding.instance.addTimingsCallback` across `500`-section scrolling and `60Hz` streaming with native math, Mermaid, and hybrid canvas rendering.
 
 | Workload | Frames | Build (`p50 / p95 / p99 / max`) | Raster (`p50 / p95 / p99 / max`) | Jank (`> 16.67 ms`) |
 | :--- | ---: | ---: | ---: | ---: |
 | 500-section scroll (`TexMath` + Mermaid + tables + alerts) | `152` | **0.77 ms** / `1.81 ms` / `1.95 ms` / `2.16 ms` | **0.52 ms** / `1.25 ms` / `1.35 ms` / `1.39 ms` | **0** build, **0** raster, **0** total |
 | 60Hz live streaming (`48` chunks with math & Mermaid) | `51` | **0.29 ms** / `0.65 ms` / `3.44 ms` / `3.52 ms` | **0.28 ms** / `0.62 ms` / `1.56 ms` / `2.06 ms` | **0** build, **0** raster, **0** total |
 
-Across both `--profile` phases (`152` scroll frames + `51` streaming frames), `MarkdownBuiltInRenderers` (backed by dual entry+byte LRU budgets defaulting to `1,024` entries / `8 MiB` for math and `128` entries / `16 MiB` for Mermaid, plus the default-on persistent Mermaid worker isolate) recorded `mathLayouts=312` (`mathHits=23`) and `mermaidRenders=12` (`mermaidHits=1`) with zero jank frames across the 60 Hz (`16.67 ms`) budget.
+Across both `--profile` phases (`152` scroll frames + `51` streaming frames), `MarkdownBuiltInRenderers` (backed by `1,024`-entry / `8 MiB` math and `128`-entry / `16 MiB` Mermaid LRU caches) recorded `mathLayouts=312` (`mathHits=23`) and `mermaidRenders=12` (`mermaidHits=1`) with zero jank frames against the 60 Hz (`16.67 ms`) budget.
 
 ## Persistent vs One-Shot Mermaid Worker Isolate (`tool/compare/test/mermaid_worker_bench_test.dart`)
 
-Measured on cold LRU cache across `10` distinct Mermaid diagrams (`2` warmup + `10` interleaved rounds under `debugForceAsyncMermaidInTests = true`, forcing real background `Isolate` compilation on Apple M4), comparing default `MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true` against `usePersistentMermaidIsolate = false` (one-shot `compute()` per diagram).
+Measured on a cold LRU cache across `10` distinct Mermaid diagrams (`2` warmup + `10` interleaved rounds under `debugForceAsyncMermaidInTests = true`), comparing default `MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true` against `false` (one-shot `compute()`).
 
 | Dispatch Pattern (`10` Distinct Cold Diagrams) | `usePersistentMermaidIsolate = true` (Default) | `usePersistentMermaidIsolate = false` (One-Shot `compute()`) | Notes |
 | :--- | ---: | ---: | :--- |
-| Unwarmed sequential | **17.05 ms** (`p95 21.88 ms`) | `21.07 ms` (`p95 34.49 ms`) | Single lazy worker isolate eliminates 9 extra isolate spawns and repeated `pele_dart` + `vector_graphics_compiler` setup (**1.24x** faster persistent) |
-| Post-`warmUp()` sequential | **10.37 ms** (`p95 19.23 ms`) | `15.68 ms` (`p95 26.85 ms`) | Pre-warmed persistent worker serves sequential diagrams with zero spawn or warm-up overhead (**1.51x** faster persistent) |
-| Post-`warmUp()` concurrent (`Future.wait`) | `9.67 ms` (`p95 11.09 ms`) | **4.69 ms** (`p95 9.32 ms`) | Single persistent worker caps background memory at 1 isolate (`9.67 ms`), while setting `usePersistentMermaidIsolate = false` fans batch `Future.wait` loads across 10 parallel `compute()` isolates (**2.06x** faster parallel `compute()`) |
+| Unwarmed sequential | **17.05 ms** (`p95 21.88 ms`) | `21.07 ms` (`p95 34.49 ms`) | Persistent worker avoids 9 extra isolate spawns and repeated `pele_dart` + compiler setup (**1.24x** faster persistent) |
+| Post-`warmUp()` sequential | **10.37 ms** (`p95 19.23 ms`) | `15.68 ms` (`p95 26.85 ms`) | Pre-warmed worker serves sequential diagrams with zero spawn or warm-up cost (**1.51x** faster persistent) |
+| Post-`warmUp()` concurrent (`Future.wait`) | `9.67 ms` (`p95 11.09 ms`) | **4.69 ms** (`p95 9.32 ms`) | Single persistent worker caps memory at 1 isolate (`9.67 ms`); `false` fans batch `Future.wait` loads across 10 `compute()` isolates (**2.06x** faster parallel `compute()`) |
 
 ## CI Regression Ceilings & Structural Telemetry (`tool/benchmark_suite.dart`)
 
-`dart run tool/benchmark_suite.dart --check-regressions` compiles and runs a standalone Native AOT regression gate (updating [`tool/benchmark_baseline.json`](../tool/benchmark_baseline.json) when `--update-baseline` is passed) to verify memory bounds, structural block reuse, streaming prefix settling, and generous `O(N^2)` sanity ceilings rather than serving as a head-to-head comparison table (canonical parser latencies live in the interleaved `compare_parsers_aot.dart` section above).
+`dart run tool/benchmark_suite.dart --check-regressions` runs a standalone Native AOT regression gate (updating [`tool/benchmark_baseline.json`](https://github.com/tkinnis/markdown_engine/blob/main/tool/benchmark_baseline.json) when `--update-baseline` is passed) to verify memory bounds, block reuse, prefix settling, and generous `O(N^2)` sanity ceilings. Canonical parser comparisons live in the interleaved `compare_parsers_aot.dart` section above.
 
 | CI Check / Telemetry Metric | Measured Value | CI Gate / Threshold | Status / Notes |
 | :--- | ---: | ---: | :--- |
@@ -184,12 +199,12 @@ Measured on cold LRU cache across `10` distinct Mermaid diagrams (`2` warmup + `
 
 ## Methodology & Fairness Invariants
 
-Every parser and widget benchmark executes deterministic in-memory fixtures with zero filesystem or network I/O inside timed windows and verifies HTML/AST parity outside timed sampling before recording measurements.
+Every parser and widget benchmark runs deterministic in-memory fixtures with zero filesystem or network I/O inside timed windows, checking HTML/AST parity outside timed sampling.
 
-* **Interleaved Round-Robin Ordering**: `compare_parsers_aot.dart`, `compare_flutter_bench_test.dart`, and `mermaid_worker_bench_test.dart` rotate participant execution order each round (`ABC` / `BCA` / `CAB` via `interleaveRoundIndices`) across both warmup and timed rounds so CPU scheduling jitter and thermal drift affect every package uniformly.
-* **Matched `selectable: false` vs `-Selectable` Separation**: Tier 1 widget benchmarks (`B1`–`B4a`) pass `selectable: false` on `MarkdownView` so layout and paint costs match `flutter_md` and `flutter_markdown_plus`; Tier 2 (`B1-Selectable`, `B2-Selectable`, `B3-Selectable`, `B4b`) enables production-default `selectable: true` (`SelectionArea` + `MarkdownRichText`).
-* **Matched `31`-Pump Streaming & Separate `+ finish()` Delta**: `B3`, `B4a`, and `B4b` execute `1` initial reset pump plus `30` active chunk pumps (`31` total pumps) identically across all engines, while reporting `MarkdownView.streaming`'s final `controller.finish()` reconciliation pump separately as `+ finish()` delta.
-* **Percentiles, Batching & Throughput**: Microsecond benchmarks wrap `batchIterations` consecutive calls in a single `Stopwatch` window (dividing by `batchIterations`, and by `50` chunks for streaming) with dead-code sink accumulation, reporting median (`p50`) and `p95` tail latencies alongside MiB/s throughput (`(bytes / (1024 * 1024)) / (medianUs / 1e6)`).
+* **Interleaved Round-Robin Ordering**: `compare_parsers_aot.dart`, `compare_flutter_bench_test.dart`, and `mermaid_worker_bench_test.dart` rotate participant order (`ABC`/`BCA`/`CAB`) each round so jitter and thermal drift affect every package equally.
+* **Matched `selectable: false` vs `-Selectable`**: Tier 1 widget benchmarks (`B1`–`B4a`) pass `selectable: false` to match `flutter_md` and `flutter_markdown_plus`; Tier 2 enables production-default `selectable: true` (`SelectionArea` + `MarkdownRichText`).
+* **Matched `31`-Pump Streaming & `+ finish()` Delta**: `B3`, `B4a`, and `B4b` run `1` reset pump plus `30` active chunk pumps (`31` total) identically across all engines, reporting `controller.finish()` separately as `+ finish()`.
+* **Batching, Percentiles & Throughput**: Microsecond runs time `batchIterations` consecutive calls in one `Stopwatch` window with dead-code sinks, reporting `p50` and `p95` latencies alongside MiB/s (`(bytes / (1024 * 1024)) / (medianUs / 1e6)`).
 
 ## Exact Reproducible Commands
 

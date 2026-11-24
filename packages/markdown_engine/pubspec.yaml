@@ -13,6 +13,12 @@ topics:
   - parser
   - ast
 
+screenshots:
+  - description: 'Light-mode pipeline overview of MarkdownEngine parsing CommonMark/GFM source into a sealed AST and HTML.'
+    path: screenshots/showcase_light.png
+  - description: 'Dark-mode pipeline overview of MarkdownEngine parsing CommonMark/GFM source into a sealed AST and HTML.'
+    path: screenshots/showcase_dark.png
+
 resolution: workspace
 
 environment:

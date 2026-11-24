@@ -1,5 +1,5 @@
 name: markdown_engine_flutter
-description: Flutter widgets, Material ColorScheme theming, selection integration, and streaming controller support for markdown_engine.
+description: Flutter MarkdownView widget with lazy slivers, OpenType TeX math, vector Mermaid diagrams, HTML tables, selection, and streaming.
 version: 0.1.0
 homepage: https://tkinnis.github.io/markdown_engine/
 repository: https://github.com/tkinnis/markdown_engine/tree/main/packages/markdown_engine_flutter
@@ -12,6 +12,14 @@ topics:
   - gfm
   - widget
   - streaming
+
+screenshots:
+  - description: 'Light-theme MarkdownView rendering headings, alerts, task lists, tables, TeX math, Mermaid diagrams, and HTML keycaps.'
+    path: screenshots/showcase_light.png
+  - description: 'Dark-theme MarkdownView rendering headings, alerts, task lists, tables, TeX math, Mermaid diagrams, and HTML keycaps.'
+    path: screenshots/showcase_dark.png
+  - description: 'Native HTML tables with keycaps, description lists, expanded details disclosures, and inline HTML typography.'
+    path: screenshots/html_and_disclosures.png
 
 resolution: workspace
 

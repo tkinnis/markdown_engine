@@ -1,0 +1,35 @@
+name: Feature Request
+description: Suggest a Markdown extension, CommonMark/GFM parity enhancement, streaming API, or Flutter integration capability.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Use Case / Problem Statement
+      description: What are you building with `markdown_engine`, and what capability is missing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution or API
+      description: Describe the Markdown syntax, AST/HTML behavior, or Dart/Flutter API you would like to see.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Feature Scope
+      options:
+        - CommonMark / GFM Core Parser & Spec Parity
+        - Markdown Extensions (Alerts, Footnotes, Frontmatter, Math, Definition Lists, Formatting)
+        - Incremental Diffing & Streaming (IncrementalMarkdownParser / StreamingMarkdownController)
+        - Security & Budgets (MarkdownUrlPolicy, HTML Sanitization, MarkdownBudgets)
+        - Flutter Rendering (markdown_engine_flutter, Slivers, Selection, Theming, Built-In Math/Mermaid)
+        - Studio / Tooling / Documentation
+        - Other
+    validations:
+      required: true

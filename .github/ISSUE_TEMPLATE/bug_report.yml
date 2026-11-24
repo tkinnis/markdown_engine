@@ -1,0 +1,66 @@
+name: Bug Report
+description: Report a crash, unexpected exception, invalid HTML/AST/JSON output, or API bug in markdown_engine or markdown_engine_flutter.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue in **`markdown_engine`**. Please fill in the fields below so we can reproduce and fix the problem.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what went wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: markdown_source
+    attributes:
+      label: Minimal Reproducible Markdown Source
+      description: Paste the smallest Markdown input that triggers the bug.
+      render: markdown
+      placeholder: |
+        # Example
+
+        | Column A | Column B |
+        | :--- | :--- |
+        | Cell 1 | Cell 2 |
+    validations:
+      required: true
+
+  - type: textarea
+    id: dart_code
+    attributes:
+      label: Dart / Flutter Invocation & Options
+      description: Show how you called `MarkdownEngine`, `IncrementalMarkdownParser`, `StreamingMarkdownController`, or `MarkdownView` with `MarkdownOptions`.
+      render: dart
+      placeholder: |
+        const engine = MarkdownEngine(defaultOptions: MarkdownOptions.gfm());
+        final html = engine.renderToHtml(source);
+    validations:
+      required: false
+
+  - type: dropdown
+    id: package_target
+    attributes:
+      label: Package / Component
+      options:
+        - markdown_engine (packages/markdown_engine)
+        - markdown_engine_flutter (packages/markdown_engine_flutter)
+        - markdown_engine_studio (studio/)
+        - tool / CLI
+        - Multiple / Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Dart / Flutter SDK Version & Platform
+      description: "e.g., Dart 3.13.5 / Flutter 3.47.6 on macOS / iOS / Android / Web / Linux"
+      placeholder: "Dart 3.13.5 / Flutter 3.47.6 / macOS"
+    validations:
+      required: true

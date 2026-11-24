@@ -1,0 +1,73 @@
+name: Rendering Mismatch
+description: Report a CommonMark, GFM, HTML, Flutter widget, TeX math, or Mermaid diagram rendering mismatch.
+title: "[Rendering]: "
+labels: ["rendering"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `markdown_engine` targets exact parity with pinned **CommonMark `0.31.2`** and **GitHub Flavored Markdown (`0.29.0.gfm.13`)**, alongside native HTML block rendering, Flutter slivers, TeX math (`tex_math_flutter`), and Mermaid diagrams (`pele_dart`). See the [Reference Synchronization Guide](https://tkinnis.github.io/markdown_engine/#/doc/REFERENCE_SYNC) for pinned specification details.
+
+  - type: dropdown
+    id: mismatch_category
+    attributes:
+      label: Mismatch Category
+      options:
+        - CommonMark 0.31.2 specification / HTML parity
+        - GFM 0.29.0.gfm.13 (tables, strikethrough, autolinks, task lists, tagfilter, footnotes)
+        - HTML block or inline HTML rendering
+        - Flutter rendering / sliver virtualization / streaming / selection
+        - Built-in TeX math rendering (tex_math_flutter)
+        - Built-in Mermaid diagram rendering (pele_dart)
+        - Other / Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: options_preset
+    attributes:
+      label: MarkdownOptions Preset
+      options:
+        - MarkdownOptions() / MarkdownOptions.extended() (all 23 extensions)
+        - MarkdownOptions.gfm()
+        - MarkdownOptions.commonMark()
+        - Custom MarkdownOptions
+    validations:
+      required: true
+
+  - type: textarea
+    id: markdown_source
+    attributes:
+      label: Markdown Source
+      description: Paste the exact Markdown, embedded HTML, TeX expression, or Mermaid fence that exhibits the mismatch.
+      render: markdown
+      placeholder: |
+        | Feature | Output |
+        | :--- | :--- |
+        | Math | $E = mc^2$ |
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_output
+    attributes:
+      label: Expected Output or Reference Screenshot
+      description: Paste the expected CommonMark/GFM HTML or attach a reference screenshot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_output
+    attributes:
+      label: Actual Output or markdown_engine Screenshot
+      description: Paste the actual HTML output or attach a screenshot from `studio/` or your Flutter app.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Observed Difference & Environment
+      description: Include `MarkdownOptions` flags, Light/Dark theme mode, and your Dart/Flutter SDK versions and platform.
+    validations:
+      required: false

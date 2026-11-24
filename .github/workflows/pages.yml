@@ -16,10 +16,16 @@ on:
       - packages/markdown_engine/README.md
       - packages/markdown_engine/CHANGELOG.md
       - packages/markdown_engine/LICENSE
+      - packages/markdown_engine/screenshots/**
+      - packages/markdown_engine/example/main.dart
       - packages/markdown_engine_flutter/README.md
       - packages/markdown_engine_flutter/CHANGELOG.md
       - packages/markdown_engine_flutter/LICENSE
+      - packages/markdown_engine_flutter/screenshots/**
+      - packages/markdown_engine_flutter/example/README.md
+      - packages/markdown_engine_flutter/example/lib/main.dart
       - studio/README.md
+      - tool/benchmark_baseline.json
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -42,13 +48,33 @@ jobs:
 
       - name: Stage documentation site
         run: |
-          mkdir -p _site/doc _site/corpus _site/packages/markdown_engine _site/packages/markdown_engine_flutter _site/studio
+          mkdir -p _site/doc _site/corpus _site/packages/markdown_engine/example _site/packages/markdown_engine_flutter/example/lib _site/studio _site/tool
           cp README.md REFERENCE.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md LICENSE AGENTS.md _site/
           cp -R doc/* _site/doc/
           cp corpus/README.md _site/corpus/
           cp packages/markdown_engine/README.md packages/markdown_engine/CHANGELOG.md packages/markdown_engine/LICENSE _site/packages/markdown_engine/
           cp packages/markdown_engine_flutter/README.md packages/markdown_engine_flutter/CHANGELOG.md packages/markdown_engine_flutter/LICENSE _site/packages/markdown_engine_flutter/
           cp studio/README.md _site/studio/
+          if [ -f packages/markdown_engine/example/main.dart ]; then
+            cp packages/markdown_engine/example/main.dart _site/packages/markdown_engine/example/
+          fi
+          if [ -f packages/markdown_engine_flutter/example/README.md ]; then
+            cp packages/markdown_engine_flutter/example/README.md _site/packages/markdown_engine_flutter/example/
+          fi
+          if [ -f packages/markdown_engine_flutter/example/lib/main.dart ]; then
+            cp packages/markdown_engine_flutter/example/lib/main.dart _site/packages/markdown_engine_flutter/example/lib/
+          fi
+          if [ -f tool/benchmark_baseline.json ]; then
+            cp tool/benchmark_baseline.json _site/tool/
+          fi
+          if [ -d packages/markdown_engine/screenshots ] && [ -n "$(ls -A packages/markdown_engine/screenshots)" ]; then
+            mkdir -p _site/packages/markdown_engine/screenshots
+            cp -R packages/markdown_engine/screenshots/* _site/packages/markdown_engine/screenshots/
+          fi
+          if [ -d packages/markdown_engine_flutter/screenshots ] && [ -n "$(ls -A packages/markdown_engine_flutter/screenshots)" ]; then
+            mkdir -p _site/packages/markdown_engine_flutter/screenshots
+            cp -R packages/markdown_engine_flutter/screenshots/* _site/packages/markdown_engine_flutter/screenshots/
+          fi
           cp doc/index.html _site/index.html
           cp doc/_sidebar.md _site/_sidebar.md
           if [ -f doc/images/markdown_engine_favicon.svg ]; then

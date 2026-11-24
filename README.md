@@ -2,26 +2,26 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/tkinnis/markdown_engine/ci.yml?branch=main&label=CI&logo=github)](https://github.com/tkinnis/markdown_engine/actions/workflows/ci.yml) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-0ea5e9)](https://tkinnis.github.io/markdown_engine/) [![CommonMark 0.31.2](https://img.shields.io/badge/CommonMark%200.31.2-652%2F652-0284c7)](doc/COVERAGE.md) [![GFM 0.29.0](https://img.shields.io/badge/GFM%200.29.0.gfm.13-670%2F670%20%2B%2030%2F30-7c3aed)](doc/COVERAGE.md) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**`markdown_engine`** is a pure-Dart CommonMark `0.31.2` and GitHub Flavored Markdown (`0.29.0.gfm.13`) parser, immutable sealed AST, HTML/plain-text/JSON exporter, incremental and streaming engine, and Flutter rendering suite built without a WebView or JavaScript runtime.
+**`markdown_engine`** is a pure-Dart CommonMark `0.31.2` and GitHub Flavored Markdown (`0.29.0.gfm.13`) parser, immutable syntax tree, exporter, incremental streaming engine, and Flutter rendering suite built without a WebView or JavaScript runtime.
 
 ## Quick Start
 
 ### Pure Dart ([`markdown_engine`](packages/markdown_engine/README.md))
 
-Install `markdown_engine` (requires Dart `^3.8.0`, `package:meta` as its sole runtime dependency):
+Install `markdown_engine` (requires Dart `^3.8.0`, with `package:meta` as its sole runtime dependency):
 
 ```bash
 dart pub add markdown_engine
 ```
 
-Parse CommonMark, GFM, or extended Markdown synchronously into an immutable `MarkdownDocument` (`const MarkdownOptions()` enables all 23 extensions out of the box, while `.commonMark()` and `.gfm()` keep strict specification defaults) and export HTML, plain text, or JSON metadata:
+Parse Markdown synchronously into an immutable `MarkdownDocument`, then export HTML, plain text, or JSON metadata. Default `const MarkdownOptions()` enables all 23 extensions out of the box, while `.commonMark()` and `.gfm()` enforce strict specification defaults.
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
 
 void main() {
   const MarkdownEngine engine = MarkdownEngine();
-  final MarkdownDocument document = engine.parse('''
+  final MarkdownDocument document = engine.parse(r'''
 # Hello, Markdown
 
 Supports **GFM tables**, ~~strikethrough~~, task lists, ==highlights==, math $E = mc^2$, and `code`.
@@ -43,7 +43,7 @@ Install `markdown_engine_flutter` (requires Dart `^3.13.0` and Flutter `>=3.47.0
 flutter pub add markdown_engine_flutter
 ```
 
-Render Markdown with built-in native OpenType TeX math (`tex_math_flutter`), vector Mermaid diagrams (`pele_dart` + `vector_graphics`), zero-reparse theme switching, lazy sliver virtualization (`SliverMarkdownDocument`), outline navigation (`MarkdownController`), privacy-first remote image gating (`MarkdownImagePolicy`), and live streaming (`MarkdownView.streaming`):
+Render Markdown with native OpenType TeX math, offline vector Mermaid diagrams, zero-reparse Light/Dark themes, lazy sliver virtualization, outline navigation, and privacy-first image controls:
 
 ```dart
 import 'package:flutter/material.dart';
@@ -71,13 +71,17 @@ Widget buildMarkdownSample(BuildContext context, MarkdownController controller) 
 }
 ```
 
-Use `MarkdownView.document(document: preParsed)` alongside `MarkdownDocumentReader` (which implements `ValueListenable<MarkdownDocument>`, automatically offloads documents `>= 4096` code units to a background isolate with latest-wins coalescing, and falls back synchronously on `IsolateSpawnException`) or `MarkdownView.streaming(controller: streamController)` for zero-poll push-based token feeds. Pass an optional `focusNode` for keyboard Select-All (`Cmd+A`) and Copy across virtualized slivers.
+Choose the right entry point for your workload:
+
+* **Inline source**: `MarkdownView(source)` parses once in widget state and applies incremental block diffing automatically on subsequent edits.
+* **Pre-parsed or large files**: Pair `MarkdownView.document` with `MarkdownDocumentReader` to parse inputs of `4096` or more UTF-16 code units in a background isolate.
+* **Live streams**: Bind `MarkdownView.streaming` to a `StreamingMarkdownController` for zero-poll push updates, and pass an optional `focusNode` for keyboard Select-All (`Cmd+A`) and Copy across slivers.
 
 ## Incremental Editing & Streaming Feeds
 
 ### Incremental Document Diffing (`IncrementalMarkdownParser`)
 
-Avoid full-document reparses in live editors by reusing blank-line-isolated unchanged prefix and suffix blocks with preserved `blockId` values, $O(1)$ edit-offset windowing (`editStartOffset`, `editOldEndOffset`, `editNewEndOffset`), and $O(1)$ lazy span shifting:
+Avoid full-document reparses in live editors. `IncrementalMarkdownParser` isolates edited lines via constant-time edit offsets, reuses unchanged prefix and suffix AST blocks with stable `blockId` values, and shifts trailing spans lazily:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -104,7 +108,7 @@ void main() {
 
 ### Streaming Chunked Accumulation (`StreamingMarkdownController`)
 
-Accumulate chunked responses (such as token-by-token SSE or LLM streams) while freezing settled prefix blocks (`settledBlocks`, aligned via `settledPrefixBlockCount`), notifying pure-Dart push listeners (`addListener`/`removeListener`), and re-parsing only the active trailing slice:
+Accumulate chunked SSE or LLM responses while freezing settled prefix blocks in place. Listeners receive synchronous push notifications on every chunk while only the active trailing slice reparses:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -131,24 +135,23 @@ void main() {
 
 ## Highlights & Security
 
-* **Two-Phase CommonMark & GFM Engine**: Implements strict CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.gfm.13` block structuring, flanking delimiter resolution, Unicode punctuation/case folding, HTML5 entities, pipe tables, strikethrough, task lists, autolinks, and `tagfilter`, powered by an ASCII structural lookup table (`LUT`) + single-backtick inline fast paths, linear text coalescing, and mid-paragraph / open-code streaming fast paths.
-* **Complete Out-of-the-Box `MarkdownOptions()` & Strict Spec Presets**: Default `const MarkdownOptions()` enables all 23 extensions out of the box (`gfmTables`, `gfmStrikethrough`, `gfmTaskLists`, `gfmAutolinks`, `gfmTagFilter`, `footnotes`, `alerts`, `frontmatter`, `definitionLists`, `math`, `headingSlugs`, `highlight`, `subscript`, `superscript`, `emoji`, `smartPunctuation`, `explicitHeadingIds`, `detailsBlocks`, `figureBlocks`, `alignedBlocks`, `kbd`, `abbreviations`, `inlineBreaks` — all individually opt-out), while `MarkdownOptions.commonMark()` and `MarkdownOptions.gfm()` stay strictly specification-scoped (`MarkdownOptions.extended()` matches default `MarkdownOptions()`).
-* **Dart 3 Sealed AST & Lazy Document Metadata**: 18 `MarkdownBlockNode` and 20 `MarkdownInlineNode` immutable sealed subtypes with pooled `blockId` identity, UTF-16 `SourceSpan` tracking, exhaustive `switch` support, and lazy `source`, `outline`, and `remoteImageAddresses` computation on `MarkdownDocument`.
-* **Defense-in-Depth Security**: Enforces `MarkdownUrlPolicy.strict()` by default on `MarkdownOptions()` (with an ASCII URL fast path allowing `http`, `https`, `mailto`, relative, and `#fragment` URLs while blocking protocol-relative `//`, userinfo `@`, `javascript:`, `vbscript:`, unsafe `data:`, and Unicode/control-char obfuscated URIs), GFM `tagfilter`, a linear-time HTML5 state-machine sanitizer (`sanitizeHtml: true` stripping `<script>`, `<style>`, `<noscript>`, `<template>`, `<iframe>`, `<svg>`, `<math>`, `<form>`, `<meta>`, `on*` handlers, `srcdoc`, and unsafe CSS `url(...)`), bounded inline emphasis nesting, and `MarkdownBudgets` (`maxInputLength`, `maxNestingDepth`, `maxBlocks`, `maxTableColumns`, `maxTableRows`, `maxHtmlBytes`, `maxTokens`, `maxOutputBytes`). See [`SECURITY.md`](SECURITY.md).
-
-* **Flutter Sliver Rendering Suite (`markdown_engine_flutter`)**: Built-in native OpenType TeX math (`tex_math_flutter`) and vector Mermaid diagrams (`pele_dart` + `vector_graphics`) with `MarkdownBuiltInRenderers.warmUp()`, default-on web-safe persistent background Mermaid worker (`usePersistentMermaidIsolate = true`, `isMermaidWorkerActive`, opt-out via `false` for one-shot `compute()`, and `dispose()`), and dual entry+byte LRU caches (`1,024` entries / `8 MiB` math and `128` entries / `16 MiB` Mermaid, configurable via `MarkdownBuiltInRenderers.configureCaches(...)` / `resetCacheDefaults()` with byte telemetry), zero-reparse Light/Dark `MarkdownTheme` switching (preserving math layouts and theming Mermaid palettes reactively), automatic incremental diffing inside `MarkdownView` edits, child widget memoization, fast simple-prose leaf rendering (`FastMarkdownText`, `MarkdownParagraphLeaf`, `MarkdownHorizontalOverflowBox`), lazy `SliverMarkdownDocument` virtualization keyed by `blockId` (`addAutomaticKeepAlives: true`), zero-poll hybrid two-sliver streaming tail canvas in `MarkdownView.streaming` (keeping settled `TexMath`, Mermaid, alerts, `<details>`, and custom builders frozen in `SliverMarkdownDocument` while streaming trailing prose/lists/tables on `MarkdownStreamingCanvasLeaf` with visible-viewport prefix `ui.Picture` reuse and cross-sliver `SelectionArea` selection), `WidgetsApp`-safe selection with full-document `Cmd+A` / Copy and excluded UI chrome, background isolate `ValueListenable` loading via `MarkdownDocumentReader`, `readingPlaceNotifier` & `scrollToAnchor` navigation via `MarkdownController`, `Semantics` & `FocusableActionDetector` accessibility, and `MarkdownImagePolicy` (`block`, `ask`, `load`) privacy controls.
+* **Two-Phase CommonMark & GFM Engine**: Implements strict CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.gfm.13` block structuring, flanking emphasis rules, Unicode punctuation, HTML5 entities, tables, strikethrough, task lists, autolinks, and `tagfilter`.
+* **Complete Defaults & Strict Presets**: Default `MarkdownOptions()` enables all 23 extensions out of the box (each individually opt-out), while `.commonMark()` and `.gfm()` remain strictly specification-scoped.
+* **Dart 3 Sealed AST**: Exposes 18 `MarkdownBlockNode` and 20 `MarkdownInlineNode` immutable subtypes with `SourceSpan` tracking, exhaustive `switch` support, and lazy `outline` and `remoteImageAddresses` getters.
+* **Defense-in-Depth Security**: Enforces `MarkdownUrlPolicy.strict()` by default, GFM `tagfilter`, a linear-time HTML sanitizer (`sanitizeHtml: true`), bounded inline nesting, and configurable `MarkdownBudgets` caps. See [`SECURITY.md`](SECURITY.md).
+* **Virtualized Flutter Rendering**: Materializes only visible blocks in `SliverMarkdownDocument`, switches Light/Dark themes with zero re-parses, and gates remote images via `MarkdownImagePolicy` (`block`, `ask`, `load`).
+* **Native Math, Mermaid & Selection**: Includes built-in `tex_math_flutter` OpenType math, background-isolate `pele_dart` Mermaid rendering, cross-sliver `SelectionArea` support, and screen-reader `Semantics`.
 
 ## Built-In Ecosystem Integration & Custom Overrides
 
-`markdown_engine_flutter` includes native OpenType TeX math and vector Mermaid diagram rendering out of the box without embedding a WebView, while keeping `MarkdownBuilderDelegates` open for opt-outs or custom overrides:
+`markdown_engine_flutter` renders math formulas and Mermaid diagrams out of the box with no WebView or boilerplate builders, while keeping `MarkdownBuilderDelegates` open for overrides:
 
-* **Built-In LaTeX Math ([`tex_math`](https://github.com/tkinnis/tex_math) / `tex_math_flutter`)**: Default `MarkdownOptions()` parses `$...$` / `\(...\)` into `MathInlineNode` and `$$...$$` / `\[...\]` into `MathBlockNode`, and `markdown_engine_flutter` renders both natively via `tex_math_flutter` (`NewCMMath-Regular.otf`, dual `1,024`-entry / `8 MiB` LRU cache, baseline inline alignment, `TexMathOverflow.scroll`, and safe error widgets). Call `MarkdownBuiltInRenderers.warmUp()` to pre-load the font off the UI thread, tune budgets with `MarkdownBuiltInRenderers.configureCaches(...)`, set `enableBuiltInMath: false` to restore monospace fallbacks, or supply `mathInlineBuilder` / `mathBlockBuilder` to override.
-* **Built-In Mermaid Diagrams ([`pele_dart`](https://github.com/tkinnis/pele_dart))**: Fenced `mermaid` `CodeBlockNode`s render automatically via `pele_dart` + `vector_graphics` on a web-safe persistent pre-warmed background isolate by default (`MarkdownBuiltInRenderers.usePersistentMermaidIsolate = true`, `isMermaidWorkerActive`, opt-out via `false` to shut down the worker immediately and use one-shot `compute()`, and `dispose()` for clean worker teardown) with dual `128`-entry / `16 MiB` LRU caching, theme-reactive `PelePalette` colors, and calm preview cards while streaming unclosed fences. Set `enableBuiltInMermaid: false` or provide a custom `MarkdownBuilderDelegates.diagramBuilder` (`(context, CodeBlockNode node)`) to override.
-* **Desktop Viewer ([`Siren`](https://github.com/tkinnis/siren))**: Part of the pure-Dart Markdown, math, and diagram documentation toolchain alongside `tex_math`, `pele_dart`, and `siren`.
+* **Built-In LaTeX Math ([`tex_math`](https://github.com/tkinnis/tex_math) / `tex_math_flutter`)**: Renders inline (`$...$`, `\(...\)`) and display (`$$...$$`, `\[...\]`) math natively using `NewCMMath-Regular.otf` and a dual-budget LRU cache (`1,024` entries / `8 MiB`). Set `enableBuiltInMath: false` or provide `mathInlineBuilder` / `mathBlockBuilder` to override.
+* **Built-In Mermaid Diagrams ([`pele_dart`](https://github.com/tkinnis/pele_dart))**: Compiles fenced `mermaid` code blocks via `pele_dart` and `vector_graphics` on a bounded lazy burst worker isolate pool with theme-reactive palettes and a `128`-entry / `16 MiB` LRU cache. Call `MarkdownBuiltInRenderers.warmUp()` ahead of first paint, tune budgets via `configureCaches(...)`, set `enableBuiltInMermaid: false`, or supply `diagramBuilder` to customize.
 
 ## Specification Parity & Native AOT Benchmarks
 
-Verified offline against vendored upstream specifications tracked in [`REFERENCE.md`](REFERENCE.md) (`dart run tool/verify_spec.dart --strict` and [`doc/COVERAGE.md`](doc/COVERAGE.md)):
+Verified offline against vendored upstream specifications tracked in [`REFERENCE.md`](REFERENCE.md) via `dart run tool/verify_spec.dart --strict` (full report in [`doc/COVERAGE.md`](doc/COVERAGE.md)):
 
 | Suite | Specification Fixture | Passed | Failed | Disabled | Total | Pass Rate |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
@@ -156,7 +159,7 @@ Verified offline against vendored upstream specifications tracked in [`REFERENCE
 | `gfm_spec` | `cmark-gfm 0.29.0.gfm.13` (`test/spec.txt`) | 670 | 0 | 2 | 672 | **100.0%** |
 | `gfm_extensions` | `cmark-gfm 0.29.0.gfm.13` (`test/extensions.txt`) | 30 | 0 | 0 | 30 | **100.0%** |
 
-Native Dart AOT (interleaved `tool/compare/bin/compare_parsers_aot.dart`) timings on Apple M4 (`arm64`, macOS `15.6`, Dart `3.13.5`) under `MarkdownOptions.gfm()` — see [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md) for the two-tier head-to-head scoreboard (`package:markdown`, `flutter_md`, `flutter_markdown_plus`), adversarial benchmarks, persistent vs one-shot Mermaid isolate measurements, hybrid mixed-content streaming telemetry, charts, real macOS `--profile` Impeller frame timings (`0.77 ms` scroll p50 / `0.29 ms` streaming p50, `0` jank frames), and `tool/benchmark_suite.dart` CI regression ceilings:
+Native Dart AOT measurements (`tool/compare/bin/compare_parsers_aot.dart`) on Apple M4 (`arm64`, macOS `15.6`, Dart `3.13.5`) under `MarkdownOptions.gfm()`. See [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md) for the two-tier Flutter scoreboard (`package:markdown`, `flutter_md`, `flutter_markdown_plus`), adversarial benchmarks, Mermaid isolate measurements, macOS `--profile` Impeller frame timings (`0.77 ms` scroll p50 / `0.29 ms` streaming p50, `0` jank frames), and CI regression ceilings:
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) | Highlights |
 | :--- | ---: | ---: | ---: | ---: | :--- |
@@ -170,9 +173,9 @@ Native Dart AOT (interleaved `tool/compare/bin/compare_parsers_aot.dart`) timing
 
 | Component | Path | Role |
 | :--- | :--- | :--- |
-| **`markdown_engine`** | [`packages/markdown_engine/`](packages/markdown_engine/README.md) | Pure-Dart CommonMark/GFM parser, sealed AST, HTML/text/JSON exporters, extensions, incremental/streaming parsers, and security budgets (`meta` only, Dart `^3.8.0`). |
-| **`markdown_engine_flutter`** | [`packages/markdown_engine_flutter/`](packages/markdown_engine_flutter/README.md) | Flutter `MarkdownView` (`.document`, `.streaming`), built-in `tex_math_flutter` math & `pele_dart` + `vector_graphics` Mermaid renderers (`MarkdownBuiltInRenderers`), virtualized `SliverMarkdownDocument`, `MarkdownTheme` / `MarkdownAlertPalette`, `MarkdownController`, `MarkdownDocumentReader` isolate loader, `MarkdownBuilderDelegates`, and `SelectionArea` (`>=3.47.0`, Dart `^3.13.0`). |
-| **Flutter Example** | [`packages/markdown_engine_flutter/example/`](packages/markdown_engine_flutter/example/lib/main.dart) | Standalone Flutter application demonstrating `MarkdownView` and `MarkdownTheme`. |
+| **`markdown_engine`** | [`packages/markdown_engine/`](packages/markdown_engine/README.md) | Pure-Dart CommonMark/GFM parser, sealed AST, HTML/text/JSON exporters, incremental/streaming parsers, and security budgets (`meta` only, Dart `^3.8.0`). |
+| **`markdown_engine_flutter`** | [`packages/markdown_engine_flutter/`](packages/markdown_engine_flutter/README.md) | Flutter `MarkdownView`, `SliverMarkdownDocument`, built-in math and Mermaid renderers, theming, `MarkdownController`, `MarkdownDocumentReader`, and selection (`>=3.47.0`, Dart `^3.13.0`). |
+| **Flutter Example** | [`packages/markdown_engine_flutter/example/`](https://github.com/tkinnis/markdown_engine/blob/main/packages/markdown_engine_flutter/example/lib/main.dart) | Standalone Flutter application demonstrating `MarkdownView` and `MarkdownTheme`. |
 | **Studio Workbench** | [`studio/`](studio/README.md) | macOS desktop comparison and inspection workbench (`>=3.47.0`, Dart `^3.13.0`). |
 | **Verification Corpus** | [`corpus/`](corpus/README.md) | Vendored CommonMark `0.31.2` (`652` examples) and GFM `0.29.0.gfm.13` (`672` + `30` examples) fixtures plus extension, security, and streaming suites. |
 | **Reference & Coverage** | [`REFERENCE.md`](REFERENCE.md) · [`doc/COVERAGE.md`](doc/COVERAGE.md) | Pinned upstream specifications, SHA-256 integrity hashes, and live spec compliance reports. |
@@ -181,13 +184,13 @@ Native Dart AOT (interleaved `tool/compare/bin/compare_parsers_aot.dart`) timing
 
 | Guide | Description |
 | :--- | :--- |
-| **[Architecture & Design](doc/ARCHITECTURE.md)** | Two-phase CommonMark/GFM pipeline, sealed AST, HTML sanitizer, URL policy, incremental/streaming design, and Flutter separation. |
+| **[Architecture & Design](doc/ARCHITECTURE.md)** | Two-phase CommonMark/GFM pipeline, sealed AST, HTML sanitizer, URL policy, incremental/streaming design, and Flutter rendering layers. |
 | **[API Manual](doc/API_MANUAL.md)** | Complete public API reference across `markdown_engine` and `markdown_engine_flutter`. |
 | **[Studio Guide](doc/STUDIO_GUIDE.md)** | macOS workbench layout, headless widget tests, and CLI verification tools. |
 | **[Reference Pins](REFERENCE.md)** | Pinned CommonMark `0.31.2` and `cmark-gfm` `0.29.0.gfm.13` specs and SHA-256 digests. |
 | **[Coverage Matrix](doc/COVERAGE.md)** | Live CommonMark and GFM specification parity breakdown. |
 | **[Benchmarks](doc/BENCHMARKS.md)** | Native Dart AOT measurements, incremental/streaming telemetry, charts, and regression ceilings. |
-| **[Reference Sync](doc/REFERENCE_SYNC.md)** | Procedure for verifying and refreshing vendored specification fixtures. |
+| **[Reference Sync](doc/REFERENCE_SYNC.md)** | Procedure for checking upstream releases and refreshing vendored specification fixtures. |
 | **[Releasing](doc/RELEASING.md)** | Lockstep versioning checks, release tagging, and pub.dev publishing order. |
 | **[Security Policy](SECURITY.md)** | Input budgets, URL scheme allowlisting, HTML sanitization, and vulnerability reporting. |
 

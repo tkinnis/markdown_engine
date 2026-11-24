@@ -31,6 +31,5 @@
   - [markdown_engine_flutter on pub.dev ↗](https://pub.dev/packages/markdown_engine_flutter)
   - [tex_math (LaTeX Math Engine) ↗](https://github.com/tkinnis/tex_math)
   - [pele_dart (Mermaid Diagrams) ↗](https://github.com/tkinnis/pele_dart)
-  - [Siren (macOS Markdown Viewer) ↗](https://github.com/tkinnis/siren)
   - [GitHub Repository ↗](https://github.com/tkinnis/markdown_engine)
   - [tonykinnis.com ↗](https://tonykinnis.com)

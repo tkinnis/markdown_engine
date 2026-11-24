@@ -1,8 +1,8 @@
 # markdown_engine
 
-[![CI](https://img.shields.io/github/actions/workflow/status/tkinnis/markdown_engine/ci.yml?branch=main&label=CI&logo=github)](https://github.com/tkinnis/markdown_engine/actions/workflows/ci.yml) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-0ea5e9)](https://tkinnis.github.io/markdown_engine/) [![CommonMark 0.31.2](https://img.shields.io/badge/CommonMark%200.31.2-652%2F652-0284c7)](https://github.com/tkinnis/markdown_engine/blob/main/doc/COVERAGE.md) [![GFM 0.29.0](https://img.shields.io/badge/GFM%200.29.0.gfm.13-670%2F670%20%2B%2030%2F30-7c3aed)](https://github.com/tkinnis/markdown_engine/blob/main/doc/COVERAGE.md) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/tkinnis/markdown_engine/ci.yml?branch=main&label=CI&logo=github)](https://github.com/tkinnis/markdown_engine/actions/workflows/ci.yml) [![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-0ea5e9)](https://tkinnis.github.io/markdown_engine/) [![CommonMark 0.31.2](https://img.shields.io/badge/CommonMark%200.31.2-652%2F652-0284c7)](https://github.com/tkinnis/markdown_engine/blob/main/doc/COVERAGE.md) [![GFM 0.29.0](https://img.shields.io/badge/GFM%200.29.0.gfm.13-670%2F670%20%2B%2030%2F30-7c3aed)](https://github.com/tkinnis/markdown_engine/blob/main/doc/COVERAGE.md) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/tkinnis/markdown_engine/blob/main/packages/markdown_engine/LICENSE)
 
-Pure-Dart CommonMark `0.31.2` and GitHub Flavored Markdown (`0.29.0.gfm.13`) parser, immutable sealed AST, HTML/plain-text/JSON exporters, and incremental streaming engine with `package:meta` as its sole runtime dependency. Every stage runs synchronously in memory with zero Flutter, DOM, JavaScript, or filesystem imports.
+Pure-Dart CommonMark `0.31.2` and GitHub Flavored Markdown (`0.29.0.gfm.13`) parser, immutable sealed AST, HTML/plain-text/JSON exporters, and incremental streaming engine. Every stage runs synchronously in memory with `package:meta` as its sole runtime dependency and zero Flutter, DOM, JavaScript, or filesystem imports.
 
 ## Installation
 
@@ -12,11 +12,11 @@ Add `markdown_engine` to any Dart or Flutter project (requires Dart `^3.8.0`):
 dart pub add markdown_engine
 ```
 
-If you are building a Flutter application and want ready-made Markdown widgets, Material `ColorScheme` theming, and `SelectionArea` support, use [`markdown_engine_flutter`](https://pub.dev/packages/markdown_engine_flutter).
+If you are building a Flutter application and want ready-made Markdown widgets, theming, built-in math/Mermaid rendering, and selection support, use [`markdown_engine_flutter`](https://pub.dev/packages/markdown_engine_flutter).
 
 ## Quick Start
 
-Configure a `MarkdownEngine` with default `MarkdownOptions()` (all 23 extensions enabled out of the box, each individually opt-out), strict `.commonMark()` or `.gfm()` presets (`math: false`), or `.extended()` (matching default `MarkdownOptions()`) and parse synchronously into an immutable `MarkdownDocument`:
+Configure `MarkdownEngine` with `MarkdownOptions()` (all 23 extensions enabled out of the box), or pass `.commonMark()` or `.gfm()` for strict spec compliance, then parse synchronously into an immutable `MarkdownDocument`:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -24,13 +24,13 @@ import 'package:markdown_engine/markdown_engine.dart';
 void main() {
   const MarkdownEngine engine = MarkdownEngine();
 
-  final MarkdownDocument document = engine.parse('''---
+  final MarkdownDocument document = engine.parse(r'''---
 title: Architecture Notes
 ---
 
 # Overview
 
-Pure-Dart **CommonMark 0.31.2** and **GFM** with ==highlight==, H~2~O, x^2^, and \$E = mc^2\$.
+Pure-Dart **CommonMark 0.31.2** and **GFM** with ==highlight==, H~2~O, x^2^, and $E = mc^2$.
 
 > [!NOTE]
 > Supports footnotes[^1], tables, alerts, and definition lists.
@@ -49,7 +49,7 @@ Pure-Dart **CommonMark 0.31.2** and **GFM** with ==highlight==, H~2~O, x^2^, and
 
 ### Incremental Block Reuse (`IncrementalMarkdownParser`)
 
-In live editors, `IncrementalMarkdownParser` reuses cached normalized source text, windows edits in $O(1)$ using `editStartOffset`/`editOldEndOffset`/`editNewEndOffset`, binary-searches unchanged blank-line-isolated prefix and suffix blocks with preserved `blockId` values, applies $O(1)$ lazy span shifting, and reparses only the dirty slice:
+In live editors, `IncrementalMarkdownParser` isolates edited lines in constant time using optional edit offsets, reuses unchanged prefix and suffix blocks with preserved `blockId` values, and shifts trailing `SourceSpan` positions lazily:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -77,7 +77,7 @@ void editInPlace() {
 
 ### Streaming Token Feeds (`StreamingMarkdownController`)
 
-For token-by-token SSE or LLM streams, `StreamingMarkdownController` freezes completed leading blocks in `settledBlocks`, exposes `settledPrefixBlockCount` (the exact prefix length of `currentDocument.blocks` whose frozen objects stay identical by reference across active tail chunks, returning `0` while active definitions force full reparsing and equaling `currentDocument.blocks.length` after `finish()`), notifies registered push listeners (`addListener`/`removeListener`/`dispose`), fast-paths mid-paragraph and open-fenced-code appends without reparsing closed blocks, defers `source`/`outline`/`remoteImageAddresses` until read, and reconciles exact parity on `finish()`:
+For token-by-token SSE or LLM streams, `StreamingMarkdownController` freezes completed leading blocks in `settledBlocks` and reparses only the active trailing slice. Listeners receive synchronous push notifications on every update without polling timers, and `finish()` reconciles exact parity with a full `MarkdownEngine.parse`.
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -96,7 +96,7 @@ MarkdownDocument streamReply(Iterable<String> chunks) {
 
 ## Security & Resource Budgets
 
-Process untrusted user or network Markdown safely with built-in URL validation, HTML sanitization, and deterministic complexity caps:
+Process untrusted Markdown safely using built-in URL validation, HTML sanitization, and deterministic complexity limits:
 
 ```dart
 import 'package:markdown_engine/markdown_engine.dart';
@@ -118,28 +118,39 @@ const MarkdownOptions hardenedOptions = MarkdownOptions.gfm(
 );
 ```
 
-* **`MarkdownUrlPolicy`**: Defaults to `MarkdownUrlPolicy.strict()` on `MarkdownOptions()` (allowing `http`, `https`, `mailto`, relative paths, and `#fragments` via an ASCII validation fast path while rejecting protocol-relative `//`, userinfo `@`, `javascript:`, `vbscript:`, unsafe `data:`, and control/zero-width obfuscated URIs), with optional host allowlists and opt-in raster image data URIs (`allowSafeImageDataUrls`).
-* **GFM `tagfilter` & Linear HTML5 Sanitizer (`sanitizeHtml`)**: Escapes disallowed GFM tags by default (`gfmTagFilter: true`), and when `sanitizeHtml: true` runs a linear-time HTML5 state-machine tokenizer/allowlist sanitizer stripping `<script>`, `<style>`, `<noscript>`, `<template>`, `<iframe>`, `<object>`, `<embed>`, `<svg>`, `<math>`, `<form>`, `<meta>`, `on*` handlers, `srcdoc`, unsafe CSS `url(...)`, and disallowed URI attributes (`href`, `src`, `srcset`, `background`, `cite`, `ping`, `longdesc`, `poster`, `action`).
-* **`MarkdownBudgets`**: Enforces caps on `maxInputLength` (`500000`), `maxNestingDepth` (`64`, bounding both block containers and inline emphasis/brackets), `maxBlocks` (`50000`), `maxTableColumns` (`128`), `maxTableRows` (`10000`), `maxHtmlBytes` (`250000`), `maxTokens` (`500000`), and `maxOutputBytes` (`4194304`).
+* **`MarkdownUrlPolicy`**: Defaults to `MarkdownUrlPolicy.strict()` on `MarkdownOptions()`, allowing `http`, `https`, `mailto`, relative paths, and `#fragments` while rejecting `javascript:`, `vbscript:`, unsafe `data:`, protocol-relative `//`, userinfo `@`, and obfuscated URIs.
+* **GFM `tagfilter` & HTML Sanitizer**: Escapes disallowed GFM tags by default (`gfmTagFilter: true`), and when `sanitizeHtml: true` strips active HTML elements, event handlers (`on*`), `srcdoc`, and unsafe URI attributes using a linear-time state machine.
+* **`MarkdownBudgets`**: Caps document size, nesting depth, AST block count, table dimensions, raw HTML size, token count, and output bytes:
+
+| Budget Field | Default Limit | Protected Resource |
+| :--- | ---: | :--- |
+| `maxInputLength` | `500,000` | Input UTF-16 code units per parse. |
+| `maxNestingDepth` | `64` | Nested block containers and inline delimiters. |
+| `maxBlocks` | `50,000` | Total emitted block AST nodes. |
+| `maxTableColumns` | `128` | Columns per GFM pipe table. |
+| `maxTableRows` | `10,000` | Body rows per GFM pipe table. |
+| `maxHtmlBytes` | `250,000` | Cumulative raw HTML code units before escaping. |
+| `maxTokens` | `500,000` | Inline scanner and delimiter work units. |
+| `maxOutputBytes` | `4,194,304` | Rendered HTML and reference expansion size. |
 
 ## Core API Summary
 
 | Symbol | Role |
 | :--- | :--- |
 | `MarkdownEngine` | Stateless entry point exposing `parse`, `renderToHtml`, and `toPlainText`. |
-| `MarkdownOptions` | Presets (`.commonMark()`, `.gfm()`, `.extended()`), default `MarkdownOptions()` (all 23 extensions enabled out of the box and individually opt-out, plus `urlPolicy: MarkdownUrlPolicy.strict()`), and 26 feature/sanitization flags plus `budgets` and `urlPolicy` (`.commonMark()` and `.gfm()` remain strict spec presets). |
-| `MarkdownDocument` | Immutable parsed output exposing `blocks`, `frontmatter`, `footnotes`, `linkDefinitions`, `abbreviations`, lazy `source`, `outline`, and `remoteImageAddresses`, plus `toHtml()`, `toPlainText()`, and `toJson()`. |
-| `HtmlRenderer` | Renders `List<MarkdownBlockNode>` to CommonMark/GFM HTML respecting sanitization, `maxHtmlBytes`, and `maxOutputBytes`. |
-| `IncrementalMarkdownParser` / `IncrementalParseResult` | Reuses unchanged prefix/suffix AST blocks across targeted document edits with $O(1)$ edit-windowing, fast prefix/suffix diffing, cached source normalization reuse, and $O(1)$ lazy span shifting. |
-| `StreamingMarkdownController` | Accumulates streamed chunks with frozen `settledBlocks`, exact `settledPrefixBlockCount` alignment, pure-Dart push listeners (`addListener`/`removeListener`/`dispose`), prefix-preserving `replaceText()`, and full-parity `finish()`. |
-| `MarkdownBlockNode` / `MarkdownInlineNode` | Sealed Dart 3 AST hierarchies (18 block subtypes including `MathBlockNode` for `$$...$$` and `\[...\]`, 20 inline subtypes including `MathInlineNode` for `$...$` and `\(...\)`) with `SourceSpan`, `blockId`, `toPlainText()`, and `shiftSpan()`. |
-| `HeadingSlugGenerator` / `slugifyHeadingText` | Deterministic GitHub-style heading anchor slug generation with collision deduplication. |
+| `MarkdownOptions` | Configures presets (`.commonMark()`, `.gfm()`, `.extended()`), 23 individually toggleable extensions, sanitization flags, `budgets`, and `urlPolicy`. |
+| `MarkdownDocument` | Immutable parsed output exposing `blocks`, `frontmatter`, `footnotes`, `linkDefinitions`, `abbreviations`, `outline`, `remoteImageAddresses`, `toHtml()`, `toPlainText()`, and `toJson()`. |
+| `HtmlRenderer` | Renders `List<MarkdownBlockNode>` to CommonMark/GFM HTML while enforcing sanitization and output budgets. |
+| `IncrementalMarkdownParser` | Reuses unchanged prefix and suffix AST blocks across live edits with preserved `blockId` identity and `IncrementalParseResult` reuse metrics. |
+| `StreamingMarkdownController` | Accumulates streamed chunks with frozen `settledBlocks`, `settledPrefixBlockCount` alignment, push listeners, `replaceText()`, and full-parity `finish()`. |
+| `MarkdownBlockNode` / `MarkdownInlineNode` | Sealed Dart 3 AST hierarchies (`18` block subtypes and `20` inline subtypes) with `SourceSpan`, `blockId`, `toPlainText()`, and `shiftSpan()`. |
+| `HeadingSlugGenerator` / `slugifyHeadingText` | Generates deterministic GitHub-style heading anchor slugs with collision deduplication. |
 
-## Built-In Flutter Integration & Companion Packages
+## Companion Packages
 
-* **Out-of-the-Box Flutter Rendering ([`markdown_engine_flutter`](https://pub.dev/packages/markdown_engine_flutter))**: Pairs directly with `markdown_engine` to render `MathInlineNode`, `MathBlockNode`, and `mermaid` fenced `CodeBlockNode`s natively out of the box via bundled `tex_math_flutter` and `pele_dart` integration.
-* **LaTeX Math ([`tex_math`](https://pub.dev/packages/tex_math) / [`tex_math_flutter`](https://pub.dev/packages/tex_math_flutter))**: With `math: true` (enabled by default alongside all 23 extensions on `MarkdownOptions()`), inline `$...$` / `\(...\)` and display `$$...$$` / `\[...\]` expressions parse into `MathInlineNode.latex` and `MathBlockNode.latex` for pure-Dart OpenType `MATH` typesetting.
-* **Mermaid Diagrams ([`pele_dart`](https://pub.dev/packages/pele_dart))**: Match fenced `CodeBlockNode`s where `language == 'mermaid'` and render `literal` to pure-Dart SVG diagrams.
+* **Flutter Rendering ([`markdown_engine_flutter`](https://pub.dev/packages/markdown_engine_flutter))**: Renders `MarkdownDocument` ASTs in virtualized Flutter slivers with built-in OpenType math, Mermaid diagrams, theming, and text selection.
+* **LaTeX Math ([`tex_math`](https://pub.dev/packages/tex_math))**: Typesets parsed `MathInlineNode` and `MathBlockNode` formulas using OpenType `MATH` font tables.
+* **Mermaid Diagrams ([`pele_dart`](https://pub.dev/packages/pele_dart))**: Renders fenced `mermaid` `CodeBlockNode` payloads to pure-Dart SVG diagrams.
 
 ## Specification Parity & Native AOT Performance
 
@@ -151,7 +162,7 @@ Verified against the vendored CommonMark `0.31.2` and `github/cmark-gfm 0.29.0.g
 | `gfm_spec` (`0.29.0.gfm.13`) | 670 | 0 | 2 | 672 | **100.0%** |
 | `gfm_extensions` (`0.29.0.gfm.13`) | 30 | 0 | 0 | 30 | **100.0%** |
 
-Native Dart AOT (interleaved `tool/compare/bin/compare_parsers_aot.dart`) measurements on Apple M4 (`arm64`, macOS `15.6`, Dart `3.13.5`) under `MarkdownOptions.gfm()`:
+Native Dart AOT (`tool/compare/bin/compare_parsers_aot.dart`) measurements on Apple M4 (`arm64`, macOS `15.6`, Dart `3.13.5`) under `MarkdownOptions.gfm()`:
 
 | Workload | Payload | Mean | Median (p50) | Throughput (p50) |
 | :--- | ---: | ---: | ---: | ---: |
@@ -163,5 +174,5 @@ Native Dart AOT (interleaved `tool/compare/bin/compare_parsers_aot.dart`) measur
 
 ## License & Additional Resources
 
-* **`markdown_engine`**: Copyright (c) 2026 Tony Kinnis — [MIT License](LICENSE).
-* [Repository README](https://github.com/tkinnis/markdown_engine/blob/main/README.md) · [API Manual](https://github.com/tkinnis/markdown_engine/blob/main/doc/API_MANUAL.md) · [Architecture](https://github.com/tkinnis/markdown_engine/blob/main/doc/ARCHITECTURE.md) · [Coverage Matrix](https://github.com/tkinnis/markdown_engine/blob/main/doc/COVERAGE.md) · [Benchmarks](https://github.com/tkinnis/markdown_engine/blob/main/doc/BENCHMARKS.md)
+* **`markdown_engine`**: Copyright (c) 2026 Tony Kinnis — [MIT License](https://github.com/tkinnis/markdown_engine/blob/main/packages/markdown_engine/LICENSE).
+* [Repository README](https://github.com/tkinnis/markdown_engine/blob/main/README.md) · [API Manual](https://github.com/tkinnis/markdown_engine/blob/main/doc/API_MANUAL.md) · [Architecture](https://github.com/tkinnis/markdown_engine/blob/main/doc/ARCHITECTURE.md) · [Coverage Matrix](https://github.com/tkinnis/markdown_engine/blob/main/doc/COVERAGE.md) · [Benchmarks](https://github.com/tkinnis/markdown_engine/blob/main/doc/BENCHMARKS.md) · [Reference Pins](https://github.com/tkinnis/markdown_engine/blob/main/REFERENCE.md) · [Security Policy](https://github.com/tkinnis/markdown_engine/blob/main/SECURITY.md)

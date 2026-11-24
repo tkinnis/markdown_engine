@@ -4,11 +4,11 @@ macOS Flutter inspection and streaming workbench for **`markdown_engine`** and *
 
 ## Features
 
-* **Preset Sample Selector**: Switch between `CommonMark & GFM Showcase`, `Comprehensive Markdown Guide` (full Markdown syntax guide, all 33 Mermaid diagram families, and comprehensive LaTeX math gallery loaded from `assets/comprehensive_markdown_guide.md`), `Kitchen Sink (Visual Parity)`, `Alerts, Frontmatter & HTML`, `Security & Sanitization`, and `500-Section Virtualization Stress`.
-* **Zero-Reparse Light / Dark Theme Switching**: Toggle between Light and Dark `MarkdownThemeData` palettes from the top toolbar while monitoring live `controller.parseCount` telemetry to confirm zero redundant parses on theme changes.
-* **Live Editor & LLM Streaming Simulator**: Edit Markdown source live on the left pane or flip into **Streaming Mode** for interactive Play, Pause, Step, Finish, and Reset playback with adjustable chunk intervals, live `settledBlockCount`, total/active block counts, and per-chunk parse duration in microseconds.
-* **Virtualized Preview, Outline Jump & Custom Hooks**: Render documents lazily with `MarkdownView` and `MarkdownView.streaming`, jump directly to headings via the live `controller.outline` sidebar (`controller.scrollToAnchor`), inspect custom `mathInlineBuilder`, `mathBlockBuilder`, and `diagramBuilder` demo cards, and verify `MarkdownUrlPolicy` filtering via live link-audit badges, status banners, and snackbars.
-* **AST, SourceSpans, HTML & Plain-Text Inspector**: Toggle the right-hand inspector between an expandable AST and `SourceSpan` tree (`blockId`, node type, 1-based line ranges, and UTF-16 offsets), serialized `document.toHtml()` output, and `document.toPlainText()` previews.
+* **Preset Sample Selector**: Switch among `CommonMark & GFM Showcase`, `Comprehensive Markdown Guide` (`StudioPresetId.comprehensiveGuide`, loaded from `assets/comprehensive_markdown_guide.md`), `Kitchen Sink`, `Alerts, Frontmatter & HTML`, `Security & Sanitization`, and `500-Section Virtualization Stress`.
+* **Zero-Reparse Theme Switching**: Toggle Light and Dark `MarkdownThemeData` palettes from the toolbar while monitoring `controller.parseCount` to confirm zero redundant parses.
+* **Live Editor & Streaming Simulator**: Edit Markdown live on the left pane or switch to **Streaming Mode** for Play, Pause, Step, Finish, and Reset controls with chunk timing and `settledBlockCount` telemetry.
+* **Virtualized Preview & Outline Jump**: Render documents with `MarkdownView` and `MarkdownView.streaming`, navigate headings via `controller.scrollToAnchor`, test custom builders, and audit `MarkdownUrlPolicy` link filtering.
+* **AST, HTML & Plain-Text Inspector**: Inspect the expandable AST with `blockId` and `SourceSpan` ranges alongside `document.toHtml()` and `document.toPlainText()` outputs.
 
 ## Setup, Tests & Launch
 
@@ -17,7 +17,7 @@ Resolve workspace dependencies at the repository root, then run headless widget 
 ```bash
 flutter pub get
 (cd studio && flutter test)
-cd studio && flutter run -d macos
+(cd studio && flutter run -d macos)
 ```
 
-See the [Comparison Studio Guide](../doc/STUDIO_GUIDE.md) for workspace architecture and accompanying CLI verification tools.
+See the [Comparison Studio Guide](../doc/STUDIO_GUIDE.md) for workbench architecture and accompanying CLI verification tools.
