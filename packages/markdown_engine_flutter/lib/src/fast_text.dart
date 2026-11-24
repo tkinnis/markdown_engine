@@ -23,6 +23,7 @@ final class MarkdownRenderEnvironment {
     required this.textDirection,
     required this.selectionRegistrar,
     required this.selectionColor,
+    this.selectionMouseCursor,
     required this.locale,
     required this.hasOverlay,
     required this.defaultTextStyle,
@@ -37,9 +38,14 @@ final class MarkdownRenderEnvironment {
   factory MarkdownRenderEnvironment.resolve(BuildContext context) {
     final DefaultTextStyle defaultText = DefaultTextStyle.of(context);
     final SelectionRegistrar? registrar = SelectionContainer.maybeOf(context);
+    final DefaultSelectionStyle? selectionStyle = registrar != null
+        ? DefaultSelectionStyle.of(context)
+        : null;
     final Color? selectionColor = registrar != null
-        ? (DefaultSelectionStyle.of(context).selectionColor ??
-              DefaultSelectionStyle.defaultColor)
+        ? (selectionStyle!.selectionColor ?? DefaultSelectionStyle.defaultColor)
+        : null;
+    final MouseCursor? selectionMouseCursor = registrar != null
+        ? selectionStyle!.mouseCursor
         : null;
     final TextScaler scaler =
         MediaQuery.maybeTextScalerOf(context) ?? TextScaler.noScaling;
@@ -59,6 +65,7 @@ final class MarkdownRenderEnvironment {
       textDirection: dir,
       selectionRegistrar: registrar,
       selectionColor: selectionColor,
+      selectionMouseCursor: selectionMouseCursor,
       locale: locale,
       hasOverlay: hasOverlay,
       defaultTextStyle: defaultText.style,
@@ -80,6 +87,9 @@ final class MarkdownRenderEnvironment {
 
   /// Ambient selection highlight color.
   final Color? selectionColor;
+
+  /// Ambient selection mouse cursor override when selectable.
+  final MouseCursor? selectionMouseCursor;
 
   /// Ambient locale.
   final Locale? locale;
@@ -123,6 +133,28 @@ final class MarkdownRenderEnvironment {
     return resolved;
   }
 
+  /// Returns a copy with [selectionMouseCursor] replaced (or `this` if
+  /// unchanged).
+  MarkdownRenderEnvironment withSelectionMouseCursor(MouseCursor? cursor) {
+    if (selectionMouseCursor == cursor) {
+      return this;
+    }
+    return MarkdownRenderEnvironment(
+      textScaler: textScaler,
+      textDirection: textDirection,
+      selectionRegistrar: selectionRegistrar,
+      selectionColor: selectionColor,
+      selectionMouseCursor: cursor,
+      locale: locale,
+      hasOverlay: hasOverlay,
+      defaultTextStyle: defaultTextStyle,
+      boldText: boldText,
+      lineHeightScaleFactor: lineHeightScaleFactor,
+      letterSpacing: letterSpacing,
+      wordSpacing: wordSpacing,
+    );
+  }
+
   /// Applies [lineHeightScaleFactor], [letterSpacing], and [wordSpacing]
   /// overrides to nested [TextSpan] children when active.
   TextSpan applySpacingOverrides(TextSpan span) => _applyTextSpacingOverrides(
@@ -140,6 +172,7 @@ final class MarkdownRenderEnvironment {
           textDirection == other.textDirection &&
           identical(selectionRegistrar, other.selectionRegistrar) &&
           selectionColor == other.selectionColor &&
+          selectionMouseCursor == other.selectionMouseCursor &&
           locale == other.locale &&
           hasOverlay == other.hasOverlay &&
           defaultTextStyle == other.defaultTextStyle &&
@@ -154,6 +187,7 @@ final class MarkdownRenderEnvironment {
     textDirection,
     selectionRegistrar,
     selectionColor,
+    selectionMouseCursor,
     locale,
     hasOverlay,
     defaultTextStyle,
@@ -1535,6 +1569,7 @@ final class FastMarkdownText extends Text {
     this.resolvedLocale,
     this.selectionRegistrar,
     super.selectionColor,
+    this.selectionMouseCursor,
     this.useLeafRenderBox = true,
     this.topPadding = 0.0,
     this.dividerSpacing = 0.0,
@@ -1574,6 +1609,9 @@ final class FastMarkdownText extends Text {
 
   /// Pre-resolved ancestor [SelectionRegistrar], or `null` when non-selectable.
   final SelectionRegistrar? selectionRegistrar;
+
+  /// Optional hover cursor override when selectable.
+  final MouseCursor? selectionMouseCursor;
 
   /// Whether to render via [MarkdownParagraphLeaf] (`true`) or direct
   /// [RichText] (`false`, used when spans contain tap recognizers).
@@ -1629,6 +1667,7 @@ final class FastMarkdownText extends Text {
           : TextSpan(children: <InlineSpan>[activeSpan]);
       return MouseRegion(
         cursor:
+            selectionMouseCursor ??
             DefaultSelectionStyle.of(context).mouseCursor ??
             SystemMouseCursors.text,
         child: _SafeSelectableTextContainer(
@@ -1659,6 +1698,7 @@ final class FastMarkdownText extends Text {
       locale: resolvedLocale,
       registrar: selectionRegistrar,
       selectionColor: selectionColor,
+      selectionMouseCursor: selectionMouseCursor,
       topPadding: topPadding,
       dividerSpacing: dividerSpacing,
       dividerColor: dividerColor,
@@ -1686,6 +1726,7 @@ final class MarkdownParagraphLeaf extends LeafRenderObjectWidget {
     this.locale,
     this.registrar,
     this.selectionColor,
+    this.selectionMouseCursor,
     this.topPadding = 0.0,
     this.dividerSpacing = 0.0,
     this.dividerColor,
@@ -1720,6 +1761,9 @@ final class MarkdownParagraphLeaf extends LeafRenderObjectWidget {
 
   /// Selection highlight fill color.
   final Color? selectionColor;
+
+  /// Optional hover cursor override when selectable.
+  final MouseCursor? selectionMouseCursor;
 
   /// Top padding baked into layout/paint.
   final double topPadding;
@@ -1759,6 +1803,7 @@ final class MarkdownParagraphLeaf extends LeafRenderObjectWidget {
       locale: locale,
       registrar: registrar,
       selectionColor: selectionColor,
+      selectionMouseCursor: selectionMouseCursor,
       topPadding: topPadding,
       dividerSpacing: dividerSpacing,
       dividerColor: dividerColor,
@@ -1795,6 +1840,7 @@ final class MarkdownParagraphLeaf extends LeafRenderObjectWidget {
         maxWidth: maxWidth,
       )
       ..selectionColor = selectionColor
+      ..selectionMouseCursor = selectionMouseCursor
       ..registrar = registrar;
   }
 }
@@ -1813,6 +1859,7 @@ final class RenderMarkdownParagraph extends RenderBox
     Locale? locale,
     SelectionRegistrar? registrar,
     Color? selectionColor,
+    MouseCursor? selectionMouseCursor,
     double topPadding = 0.0,
     double dividerSpacing = 0.0,
     Color? dividerColor,
@@ -1827,6 +1874,8 @@ final class RenderMarkdownParagraph extends RenderBox
        _registrar = registrar,
        // ignore: prefer_initializing_formals
        _selectionColor = selectionColor,
+       // ignore: prefer_initializing_formals
+       _selectionMouseCursor = selectionMouseCursor,
        // ignore: prefer_initializing_formals
        _topPadding = topPadding,
        // ignore: prefer_initializing_formals
@@ -1861,6 +1910,7 @@ final class RenderMarkdownParagraph extends RenderBox
   String _plainText;
   SelectionRegistrar? _registrar;
   Color? _selectionColor;
+  MouseCursor? _selectionMouseCursor;
   double _topPadding;
   double _dividerSpacing;
   Color? _dividerColor;
@@ -2028,6 +2078,17 @@ final class RenderMarkdownParagraph extends RenderBox
     }
   }
 
+  /// Optional hover cursor override when selectable.
+  MouseCursor? get selectionMouseCursor => _selectionMouseCursor;
+  set selectionMouseCursor(MouseCursor? value) {
+    if (_selectionMouseCursor == value) {
+      return;
+    }
+    _selectionMouseCursor = value;
+    // Trigger a MouseTracker device update if the cursor changes while hovered.
+    markNeedsPaint();
+  }
+
   /// Ancestor selection registrar.
   SelectionRegistrar? get registrar => _registrar;
   set registrar(SelectionRegistrar? value) {
@@ -2050,8 +2111,9 @@ final class RenderMarkdownParagraph extends RenderBox
   }
 
   @override
-  MouseCursor get cursor =>
-      _registrar != null ? SystemMouseCursors.text : MouseCursor.defer;
+  MouseCursor get cursor => _registrar != null
+      ? (_selectionMouseCursor ?? SystemMouseCursors.text)
+      : MouseCursor.defer;
 
   @override
   PointerEnterEventListener? get onEnter => null;
@@ -2643,6 +2705,19 @@ final class _MarkdownTextSelectable extends ChangeNotifier
           final TextPosition pos = _box._textPainter.getPositionForOffset(
             local,
           );
+          if (_start != null && _end != null && _start != _end) {
+            final int selStart = math.min(_start!, _end!);
+            final int selEnd = math.max(_start!, _end!);
+            final bool withinSelection =
+                (pos.offset > selStart && pos.offset < selEnd) ||
+                (pos.offset == selStart &&
+                    pos.affinity == TextAffinity.downstream) ||
+                (pos.offset == selEnd && pos.affinity == TextAffinity.upstream);
+            if (withinSelection) {
+              result = SelectionResult.end;
+              break;
+            }
+          }
           final TextRange word = _box._textPainter.getWordBoundary(pos);
           _start = word.start;
           _end = word.end;

@@ -116,7 +116,12 @@ final class _MarkdownInteractiveActionState
                     ),
                   )
                 : const BoxDecoration(),
-            child: ExcludeSemantics(child: widget.child),
+            child: onActivate != null
+                ? DefaultSelectionStyle.merge(
+                    mouseCursor: SystemMouseCursors.click,
+                    child: ExcludeSemantics(child: widget.child),
+                  )
+                : ExcludeSemantics(child: widget.child),
           ),
         ),
       ),
@@ -508,6 +513,7 @@ Widget buildFastOrRichInlineText(
       resolvedLocale: env.locale,
       selectionRegistrar: env.selectionRegistrar,
       selectionColor: env.selectionColor,
+      selectionMouseCursor: env.selectionMouseCursor,
       useLeafRenderBox: true,
       contentPadding: contentPadding,
       maxWidth: maxWidth,
@@ -753,6 +759,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         resolvedLocale: env.locale,
         selectionRegistrar: env.selectionRegistrar,
         selectionColor: env.selectionColor,
+        selectionMouseCursor: env.selectionMouseCursor,
         useLeafRenderBox: nextRecognizers.isEmpty,
       );
     } else {
@@ -1843,7 +1850,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: onLinkTap,
-          child: current,
+          child: DefaultSelectionStyle.merge(
+            mouseCursor: SystemMouseCursors.click,
+            child: current,
+          ),
         ),
       );
     }

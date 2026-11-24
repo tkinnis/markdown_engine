@@ -2822,5 +2822,107 @@ $tail
         expect(copiedClipboard, isNot(contains('CHROME-BADGE')));
       },
     );
+
+    testWidgets(
+      'streaming canvas preserves drag selection on macOS right-click inside selection and selects word outside',
+      (WidgetTester tester) async {
+        SelectedContent? currentSelection;
+        final StreamingMarkdownController stream =
+            StreamingMarkdownController();
+        final FocusNode focusNode = FocusNode();
+        addTearDown(stream.dispose);
+        addTearDown(focusNode.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 800.0,
+                height: 300.0,
+                child: SelectionArea(
+                  focusNode: focusNode,
+                  onSelectionChanged: (SelectedContent? content) {
+                    currentSelection = content;
+                  },
+                  child: MarkdownView.streaming(
+                    controller: stream,
+                    selectable: true,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        stream.append(
+          'prefix alpha beta gamma suffix\n\nSecond streaming block.',
+        );
+        await tester.pump();
+
+        final Finder canvasFinder = find.byType(MarkdownStreamingCanvasLeaf);
+        expect(canvasFinder, findsOneWidget);
+        final Rect canvasRect = tester.getRect(canvasFinder);
+        final double lineCenterY = canvasRect.top + 12.0;
+        final Offset alphaStart = Offset(
+          canvasRect.left + 7 * 16.0 + 4.0,
+          lineCenterY,
+        );
+        final Offset betaCenter = Offset(
+          canvasRect.left + 15 * 16.0,
+          lineCenterY,
+        );
+        final Offset gammaEnd = Offset(
+          canvasRect.left + 23 * 16.0 - 2.0,
+          lineCenterY,
+        );
+        final Offset suffixCenter = Offset(
+          canvasRect.left + 27 * 16.0,
+          lineCenterY,
+        );
+
+        final TestGesture drag = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(drag.removePointer);
+        await drag.down(alphaStart);
+        await tester.pump();
+        await drag.moveTo(gammaEnd);
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, 'alpha beta gamma');
+
+        // Right-click inside selection preserves full drag selection and shows toolbar.
+        final TestGesture rightClickInside = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        addTearDown(rightClickInside.removePointer);
+        await rightClickInside.down(betaCenter);
+        await tester.pump();
+        await rightClickInside.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, 'alpha beta gamma');
+        expect(find.text('Copy'), findsOneWidget);
+
+        // Right-click outside selection selects clicked word 'suffix'.
+        final TestGesture rightClickOutside = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        addTearDown(rightClickOutside.removePointer);
+        await rightClickOutside.down(suffixCenter);
+        await tester.pump();
+        await rightClickOutside.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, 'suffix');
+      },
+      variant: const TargetPlatformVariant(<TargetPlatform>{
+        TargetPlatform.macOS,
+      }),
+    );
   });
 }

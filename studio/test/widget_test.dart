@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_engine/markdown_engine.dart';
@@ -773,6 +774,30 @@ void main() {
         ),
         isNotEmpty,
       );
+      final FootnoteSectionNode footnoteSection = parsed.blocks
+          .whereType<FootnoteSectionNode>()
+          .single;
+      expect(
+        footnoteSection.definitions.map((FootnoteDefinitionNode d) => d.label),
+        <String>['1', 'note', 'phi'],
+      );
+      expect(
+        footnoteSection.definitions.map((FootnoteDefinitionNode d) => d.index),
+        <int>[1, 2, 3],
+      );
+      expect(
+        footnoteSection.definitions.first.toPlainText(),
+        isNot(contains('[^note]:')),
+      );
+      final List<ParagraphNode> nonCodeParagraphs = parsed.blocks
+          .whereType<ParagraphNode>()
+          .toList();
+      expect(
+        nonCodeParagraphs.any(
+          (ParagraphNode p) => p.toPlainText().contains('[^note]'),
+        ),
+        isFalse,
+      );
 
       // Frontmatter metadata and top heading render cleanly.
       expect(find.text('User Manual'), findsWidgets);
@@ -821,6 +846,31 @@ void main() {
       );
       expect(mermaidGraphicFinder, findsWidgets);
       expect(tester.takeException(), isNull);
+
+      // Scroll to Footnotes section in the live preview and confirm [1] and [2] badges render.
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.text('Footnotes'),
+        ),
+        300.0,
+        scrollable: previewScrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.bySemanticsLabel('Footnote 1'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(MarkdownView),
+          matching: find.bySemanticsLabel('Footnote 2'),
+        ),
+        findsOneWidget,
+      );
 
       // Jump via outline to the LaTeX Math Examples section and verify zero exceptions.
       final Finder outlineLatexItem = find.descendant(
@@ -1186,5 +1236,96 @@ void main() {
         findsOneWidget,
       );
     },
+  );
+
+  testWidgets(
+    'Mouse hover shows click cursor on Studio preview links, outline items, and Copy button on macOS',
+    (WidgetTester tester) async {
+      _setDesktopViewport(tester);
+
+      const String sample = '''# Hover Section
+
+Check [Studio link](https://example.com) and footnote[^note].
+
+```dart
+final int x = 1;
+```
+
+[^note]: Footnote body.
+''';
+
+      await tester.pumpWidget(const MarkdownStudioApp(initialSource: sample));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      final TestGesture mouse = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        pointer: 1,
+      );
+      addTearDown(mouse.removePointer);
+      await mouse.addPointer(location: Offset.zero);
+      await tester.pump();
+
+      Future<MouseCursor?> cursorAt(Offset globalOffset) async {
+        await mouse.moveTo(globalOffset);
+        await tester.pump();
+        return RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(1);
+      }
+
+      // 1. Hover over Markdown link in preview.
+      final Finder linkParagraphFinder = find.descendant(
+        of: find.byType(MarkdownView),
+        matching: find.byWidgetPredicate(
+          (Widget w) =>
+              w is RichText && w.text.toPlainText().contains('Studio link'),
+        ),
+      );
+      final RenderParagraph linkPara = tester.renderObject<RenderParagraph>(
+        linkParagraphFinder.first,
+      );
+      final String plain = linkPara.text.toPlainText();
+      final int linkStart = plain.indexOf('Studio link');
+      expect(linkStart, greaterThanOrEqualTo(0));
+      final List<TextBox> boxes = linkPara.getBoxesForSelection(
+        TextSelection(
+          baseOffset: linkStart,
+          extentOffset: linkStart + 'Studio link'.length,
+        ),
+      );
+      expect(boxes, isNotEmpty);
+      expect(
+        await cursorAt(linkPara.localToGlobal(boxes.first.toRect().center)),
+        SystemMouseCursors.click,
+      );
+
+      // 2. Hover over footnote ref in preview.
+      expect(
+        await cursorAt(tester.getCenter(find.bySemanticsLabel('Footnote 1'))),
+        SystemMouseCursors.click,
+      );
+
+      // 3. Hover over Outline panel item (open Outline panel if collapsed).
+      if (find.byKey(const Key('studio-outline-list')).evaluate().isEmpty) {
+        await tester.tap(find.byKey(const Key('studio-outline-toggle')));
+        await tester.pumpAndSettle();
+      }
+      expect(
+        await cursorAt(
+          tester.getCenter(
+            find.byKey(const ValueKey<String>('outline-item-hover-section-0')),
+          ),
+        ),
+        SystemMouseCursors.click,
+      );
+
+      // 4. Hover over Studio code block Copy button.
+      expect(
+        await cursorAt(tester.getCenter(find.text('Copy').first)),
+        SystemMouseCursors.click,
+      );
+    },
+    variant: const TargetPlatformVariant(<TargetPlatform>{
+      TargetPlatform.macOS,
+    }),
   );
 }

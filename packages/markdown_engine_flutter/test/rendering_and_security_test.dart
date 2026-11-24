@@ -3679,6 +3679,590 @@ $deepUnclosedTable
         expect(tooltips.any((Tooltip t) => t.message == 'u'), isTrue);
       },
     );
+
+    testWidgets(
+      'renders consecutive numeric and named footnotes without blank lines and scrolls to fn-note',
+      (WidgetTester tester) async {
+        const String doc = '''
+markdown_engine compiles Mermaid diagrams into native vector bytecode[^1] and supports named references[^note].
+
+First spacer paragraph so the footnotes section renders below the fold.
+
+Second spacer paragraph to ensure the viewport must scroll to reach footnotes.
+
+Third spacer paragraph confirming controller anchor navigation works cleanly.
+
+[^1]: Powered by `pele_dart` and `vector_graphics_compiler`.
+[^note]: Footnote definitions are collected and numbered at the bottom of the rendered document.
+''';
+        final List<(String, String?)> tappedLinks = <(String, String?)>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                doc,
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: false,
+                delegates: MarkdownBuilderDelegates(
+                  onTapLink: (String destination, String? title) {
+                    tappedLinks.add((destination, title));
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        expect(find.bySemanticsLabel('Footnote 1'), findsOneWidget);
+        expect(find.bySemanticsLabel('Footnote 2'), findsOneWidget);
+        expect(find.text('[1]'), findsOneWidget);
+        expect(find.text('[2]'), findsOneWidget);
+        expect(find.textContaining('[^note]'), findsNothing);
+        expect(
+          find.textContaining(
+            'Footnote definitions are collected and numbered',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('↩'), findsNWidgets(2));
+
+        await tester.tap(find.bySemanticsLabel('Footnote 2'));
+        await tester.pump();
+        expect(tappedLinks, <(String, String?)>[('#fn-note', null)]);
+
+        final MarkdownController controller = MarkdownController();
+        final ScrollController scrollController = ScrollController();
+        addTearDown(() {
+          controller.dispose();
+          scrollController.dispose();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                height: 120.0,
+                child: MarkdownView(
+                  doc,
+                  options: const MarkdownOptions.extended(),
+                  controller: controller,
+                  scrollController: scrollController,
+                  selectable: false,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(scrollController.offset, 0.0);
+
+        await tester.tap(find.bySemanticsLabel('Footnote 2'));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(scrollController.offset, greaterThan(0.0));
+      },
+    );
+  });
+
+  group('Mouse hover cursor', () {
+    testWidgets(
+      'shows click cursor over links, footnotes, linked inline widgets, and details summary under selectable: true',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final MarkdownController controller = MarkdownController();
+        addTearDown(controller.dispose);
+
+        const String doc = '''
+Plain [Click docs](https://example.com) and [**Bold link**](https://example.com) and [`codeLink`](https://example.com) and [Jump section](#target) plus[^1]
+
+Linked widgets: [<kbd>Cmd</kbd>](https://example.com) [x<sup>2</sup>](https://example.com) [H<sub>2</sub>O](https://example.com) [<abbr title="HyperText">HTML</abbr>](https://example.com) [Unsafe](javascript:alert(1))
+
+<details>
+<summary>Toggle summary</summary>
+
+Hidden body
+
+</details>
+
+## Target {#target}
+
+[^1]: Footnote detail body.
+''';
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 900.0,
+                height: 900.0,
+                child: MarkdownView(
+                  doc,
+                  options: const MarkdownOptions.extended(),
+                  controller: controller,
+                  scrollable: false,
+                  selectable: true,
+                  delegates: MarkdownBuilderDelegates(
+                    onTapLink: (String _, String? _) {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        final TestGesture mouse = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          pointer: 1,
+        );
+        addTearDown(mouse.removePointer);
+        await mouse.addPointer(location: Offset.zero);
+        await tester.pump();
+
+        Future<MouseCursor?> cursorAt(Offset globalOffset) async {
+          await mouse.moveTo(globalOffset);
+          await tester.pump();
+          return RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(
+            1,
+          );
+        }
+
+        Offset centerOfSubstring(String paragraphContains, String target) {
+          final Finder richFinder = find.byWidgetPredicate(
+            (Widget w) =>
+                w is RichText &&
+                w.text.toPlainText().contains(paragraphContains),
+          );
+          final RenderParagraph paragraph = tester
+              .renderObject<RenderParagraph>(richFinder.first);
+          final String plain = paragraph.text.toPlainText();
+          final int start = plain.indexOf(target);
+          expect(start, greaterThanOrEqualTo(0), reason: 'Missing "$target"');
+          final List<TextBox> boxes = paragraph.getBoxesForSelection(
+            TextSelection(
+              baseOffset: start,
+              extentOffset: start + target.length,
+            ),
+          );
+          expect(boxes, isNotEmpty, reason: 'No boxes for "$target"');
+          return paragraph.localToGlobal(boxes.first.toRect().center);
+        }
+
+        // Plain prose next to links uses text cursor.
+        expect(
+          await cursorAt(centerOfSubstring('Click docs', 'Plain')),
+          SystemMouseCursors.text,
+        );
+        // Plain, bold, inline code, and anchor links use click cursor.
+        expect(
+          await cursorAt(centerOfSubstring('Click docs', 'Click docs')),
+          SystemMouseCursors.click,
+        );
+        expect(
+          await cursorAt(centerOfSubstring('Bold link', 'Bold link')),
+          SystemMouseCursors.click,
+        );
+        expect(
+          await cursorAt(centerOfSubstring('codeLink', 'codeLink')),
+          SystemMouseCursors.click,
+        );
+        expect(
+          await cursorAt(centerOfSubstring('Jump section', 'Jump section')),
+          SystemMouseCursors.click,
+        );
+
+        // Footnote inline badge and back-link use click cursor.
+        expect(
+          await cursorAt(tester.getCenter(find.bySemanticsLabel('Footnote 1'))),
+          SystemMouseCursors.click,
+        );
+        expect(
+          await cursorAt(
+            tester.getCenter(
+              find.bySemanticsLabel('Back to footnote reference 1'),
+            ),
+          ),
+          SystemMouseCursors.click,
+        );
+
+        // Linked WidgetSpan elements (<kbd>, <sup>, <sub>, <abbr>) use click cursor.
+        expect(
+          await cursorAt(tester.getCenter(find.text('Cmd'))),
+          SystemMouseCursors.click,
+        );
+        expect(
+          await cursorAt(tester.getCenter(find.text('2').first)),
+          SystemMouseCursors.click,
+        );
+        expect(
+          await cursorAt(tester.getCenter(find.text('2').last)),
+          SystemMouseCursors.click,
+        );
+        expect(
+          await cursorAt(tester.getCenter(find.text('HTML'))),
+          SystemMouseCursors.click,
+        );
+
+        // Blocked javascript: link must NOT use click cursor.
+        expect(
+          await cursorAt(centerOfSubstring('Unsafe', 'Unsafe')),
+          SystemMouseCursors.text,
+        );
+
+        // <details><summary> uses click cursor over the summary text itself.
+        expect(
+          await cursorAt(tester.getCenter(find.text('Toggle summary'))),
+          SystemMouseCursors.click,
+        );
+      },
+    );
+
+    testWidgets(
+      'shows click cursor over linked inline math chip (built-in math off) and TexMath (built-in math on)',
+      (WidgetTester tester) async {
+        await tester.runAsync(MarkdownBuiltInRenderers.warmUp);
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        final TestGesture mouse = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          pointer: 1,
+        );
+        addTearDown(mouse.removePointer);
+        await mouse.addPointer(location: Offset.zero);
+        await tester.pump();
+
+        Future<MouseCursor?> cursorAt(Offset globalOffset) async {
+          await mouse.moveTo(globalOffset);
+          await tester.pump();
+          return RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(
+            1,
+          );
+        }
+
+        // 1. Built-in math disabled -> fallback math chip link.
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                r'Linked math [$x+1$](https://example.com)',
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: true,
+                delegates: MarkdownBuilderDelegates(
+                  enableBuiltInMath: false,
+                  onTapLink: (String _, String? _) {},
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          await cursorAt(tester.getCenter(find.text('x+1'))),
+          SystemMouseCursors.click,
+        );
+
+        // 2. Built-in math enabled -> native TexMath widget inside link.
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownView(
+                r'Linked math [$x+1$](https://example.com)',
+                options: const MarkdownOptions.extended(),
+                scrollable: false,
+                selectable: true,
+                delegates: MarkdownBuilderDelegates(
+                  enableBuiltInMath: true,
+                  onTapLink: (String _, String? _) {},
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(TexMath), findsOneWidget);
+        expect(
+          await cursorAt(tester.getCenter(find.byType(TexMath))),
+          SystemMouseCursors.click,
+        );
+      },
+    );
+  });
+
+  group('macOS right-click selection preservation', () {
+    testWidgets(
+      'preserves single-paragraph drag selection on right-click inside selection, updates on right-click outside, and still allows double-click word selection',
+      (WidgetTester tester) async {
+        SelectedContent? currentSelection;
+        final FocusNode focusNode = FocusNode();
+        addTearDown(focusNode.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 800.0,
+                height: 400.0,
+                child: SelectionArea(
+                  focusNode: focusNode,
+                  onSelectionChanged: (SelectedContent? content) {
+                    currentSelection = content;
+                  },
+                  child: const MarkdownView(
+                    'prefix alpha beta gamma suffix',
+                    scrollable: false,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final Finder paraFinder = find.text('prefix alpha beta gamma suffix');
+        expect(paraFinder, findsOneWidget);
+        final Rect paraRect = tester.getRect(paraFinder);
+        // Flutter test's default Ahem font advances 16px per character at fontSize 16.
+        // 'prefix alpha beta gamma suffix' -> indices:
+        // alpha: 7..12, beta: 13..17, gamma: 18..23, suffix: 24..30.
+        final Offset alphaStart = Offset(
+          paraRect.left + 7 * 16.0 + 4.0,
+          paraRect.center.dy,
+        );
+        final Offset betaCenter = Offset(
+          paraRect.left + 15 * 16.0,
+          paraRect.center.dy,
+        );
+        final Offset gammaEnd = Offset(
+          paraRect.left + 23 * 16.0 - 2.0,
+          paraRect.center.dy,
+        );
+        final Offset suffixCenter = Offset(
+          paraRect.left + 27 * 16.0,
+          paraRect.center.dy,
+        );
+
+        final TestGesture drag = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(drag.removePointer);
+        await drag.down(alphaStart);
+        await tester.pump();
+        await drag.moveTo(gammaEnd);
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, 'alpha beta gamma');
+
+        // Right-click inside the active selection on 'beta': must preserve selection
+        // and show context menu.
+        final TestGesture rightClickInside = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        addTearDown(rightClickInside.removePointer);
+        await rightClickInside.down(betaCenter);
+        await tester.pump();
+        await rightClickInside.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, 'alpha beta gamma');
+        expect(find.text('Copy'), findsOneWidget);
+
+        // Double-click inside the active selection on 'beta': must still shrink
+        // selection to 'beta'.
+        final TestGesture doubleClick = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(doubleClick.removePointer);
+        await doubleClick.down(betaCenter);
+        await tester.pump();
+        await doubleClick.up();
+        await tester.pump(const Duration(milliseconds: 50));
+        await doubleClick.down(betaCenter);
+        await tester.pump();
+        await doubleClick.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, 'beta');
+
+        // Drag 'alpha beta gamma' again, then right-click OUTSIDE on 'suffix':
+        // native macOS behavior selects the clicked word 'suffix'.
+        await drag.down(alphaStart);
+        await tester.pump();
+        await drag.moveTo(gammaEnd);
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+        expect(currentSelection?.plainText, 'alpha beta gamma');
+
+        final TestGesture rightClickOutside = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        addTearDown(rightClickOutside.removePointer);
+        await rightClickOutside.down(suffixCenter);
+        await tester.pump();
+        await rightClickOutside.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, 'suffix');
+      },
+      variant: const TargetPlatformVariant(<TargetPlatform>{
+        TargetPlatform.macOS,
+      }),
+    );
+
+    testWidgets(
+      'preserves multi-paragraph drag selection on right-click inside first paragraph',
+      (WidgetTester tester) async {
+        SelectedContent? currentSelection;
+        final FocusNode focusNode = FocusNode();
+        addTearDown(focusNode.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 800.0,
+                height: 400.0,
+                child: SelectionArea(
+                  focusNode: focusNode,
+                  onSelectionChanged: (SelectedContent? content) {
+                    currentSelection = content;
+                  },
+                  child: const MarkdownView(
+                    'First paragraph words\n\nSecond paragraph words',
+                    scrollable: false,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final Rect firstRect = tester.getRect(
+          find.text('First paragraph words'),
+        );
+        final Rect secondRect = tester.getRect(
+          find.text('Second paragraph words'),
+        );
+
+        final TestGesture drag = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        addTearDown(drag.removePointer);
+        await drag.down(firstRect.centerLeft + const Offset(4.0, 0.0));
+        await tester.pump();
+        await drag.moveTo(secondRect.centerRight - const Offset(4.0, 0.0));
+        await tester.pump();
+        await drag.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, contains('First paragraph words'));
+        expect(currentSelection?.plainText, contains('Second paragraph words'));
+        final String beforeRightClick = currentSelection!.plainText;
+
+        final TestGesture rightClick = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        addTearDown(rightClick.removePointer);
+        await rightClick.down(firstRect.center);
+        await tester.pump();
+        await rightClick.up();
+        await tester.pump();
+
+        expect(currentSelection?.plainText, beforeRightClick);
+        expect(find.text('Copy'), findsOneWidget);
+      },
+      variant: const TargetPlatformVariant(<TargetPlatform>{
+        TargetPlatform.macOS,
+      }),
+    );
+
+    testWidgets(
+      'preserves Select All document selection on right-click inside a paragraph',
+      (WidgetTester tester) async {
+        String? copiedClipboard;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (
+              MethodCall call,
+            ) async {
+              if (call.method == 'Clipboard.setData') {
+                final Map<Object?, Object?> args =
+                    call.arguments as Map<Object?, Object?>;
+                copiedClipboard = args['text'] as String?;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        final FocusNode focusNode = FocusNode();
+        addTearDown(focusNode.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 800.0,
+                height: 400.0,
+                child: MarkdownView(
+                  'Alpha select all\n\nBeta select all',
+                  focusNode: focusNode,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        focusNode.requestFocus();
+        await tester.pump();
+        Actions.invoke(
+          focusNode.context!,
+          const SelectAllTextIntent(SelectionChangedCause.keyboard),
+        );
+        await tester.pump();
+
+        final TestGesture rightClick = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        addTearDown(rightClick.removePointer);
+        await rightClick.down(tester.getCenter(find.text('Alpha select all')));
+        await tester.pump();
+        await rightClick.up();
+        await tester.pump();
+
+        expect(find.text('Copy'), findsOneWidget);
+        Actions.invoke(focusNode.context!, CopySelectionTextIntent.copy);
+        await tester.pump();
+
+        expect(copiedClipboard, contains('Alpha select all'));
+        expect(copiedClipboard, contains('Beta select all'));
+      },
+      variant: const TargetPlatformVariant(<TargetPlatform>{
+        TargetPlatform.macOS,
+      }),
+    );
   });
 }
 

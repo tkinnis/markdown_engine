@@ -607,6 +607,7 @@ Widget _buildHeading(
         resolvedLocale: env.locale,
         selectionRegistrar: env.selectionRegistrar,
         selectionColor: env.selectionColor,
+        selectionMouseCursor: env.selectionMouseCursor,
         useLeafRenderBox: true,
         topPadding: node.level <= 2 ? 8.0 : 4.0,
         dividerSpacing: node.level <= 2 ? 6.0 : 0.0,
@@ -965,6 +966,7 @@ final class _MarkdownCodeBlockState extends State<_MarkdownCodeBlock> {
               resolvedLocale: env.locale,
               selectionRegistrar: env.selectionRegistrar,
               selectionColor: env.selectionColor,
+              selectionMouseCursor: env.selectionMouseCursor,
             ),
           ),
         ],
@@ -1003,6 +1005,7 @@ Widget _buildBlockQuote(
         resolvedLocale: env.locale,
         selectionRegistrar: env.selectionRegistrar,
         selectionColor: env.selectionColor,
+        selectionMouseCursor: env.selectionMouseCursor,
         contentPadding: const EdgeInsets.fromLTRB(18.0, 10.0, 12.0, 10.0),
         backgroundColor: theme.effectiveBlockquoteBackground,
         leftBorderColor: theme.effectiveBlockquoteBorder,
@@ -1593,7 +1596,8 @@ final class _MarkdownDetailsBlockState extends State<_MarkdownDetailsBlock> {
                           widget.renderContext.remoteImagesApproved,
                       onRequestLoadRemoteImages:
                           widget.renderContext.onRequestLoadRemoteImages,
-                      environment: widget.renderContext.environment,
+                      environment: widget.renderContext.environment
+                          ?.withSelectionMouseCursor(SystemMouseCursors.click),
                     ),
                   ),
                 ],

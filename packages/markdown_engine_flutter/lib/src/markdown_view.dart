@@ -1838,7 +1838,19 @@ final class _MarkdownSelectionContainerDelegate
 
   @override
   SelectionResult handleSelectWord(SelectWordSelectionEvent event) {
-    clearSelectAllState();
+    if (_isSelectAllActive) {
+      final SelectionGeometry before = getSelectionGeometry();
+      final int prevStart = currentSelectionStartIndex;
+      final int prevEnd = currentSelectionEndIndex;
+      final SelectionResult result = super.handleSelectWord(event);
+      final SelectionGeometry after = getSelectionGeometry();
+      if (prevStart != currentSelectionStartIndex ||
+          prevEnd != currentSelectionEndIndex ||
+          before != after) {
+        clearSelectAllState();
+      }
+      return result;
+    }
     return super.handleSelectWord(event);
   }
 

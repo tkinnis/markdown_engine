@@ -133,6 +133,7 @@ final class StudioOutlinePanel extends StatelessWidget {
                               key: ValueKey<String>(
                                 'outline-item-${item.slug}-$index',
                               ),
+                              mouseCursor: SystemMouseCursors.click,
                               onTap: () {
                                 unawaited(controller.scrollToAnchor(item.slug));
                                 onJumpToHeading(item);

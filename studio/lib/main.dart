@@ -601,6 +601,7 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
     );
     return ThemeData(
       colorScheme: scheme,
+      fontFamilyFallback: const <String>['NewCMMath'],
       useMaterial3: true,
       visualDensity: VisualDensity.compact,
     );
@@ -847,7 +848,7 @@ final class _MarkdownStudioAppState extends State<MarkdownStudioApp> {
                 value: _selectedPresetId,
                 isDense: true,
                 borderRadius: BorderRadius.circular(8.0),
-                style: TextStyle(
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   fontSize: 12.5,
                   fontWeight: FontWeight.w600,
                   color: scheme.onSurface,

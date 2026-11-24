@@ -285,6 +285,7 @@ final class _StudioSyntaxCodeBlockState extends State<_StudioSyntaxCodeBlock> {
                 const Spacer(),
                 SelectionContainer.disabled(
                   child: InkWell(
+                    mouseCursor: SystemMouseCursors.click,
                     borderRadius: BorderRadius.circular(4.0),
                     onTap: _copyCode,
                     child: Padding(

@@ -3512,6 +3512,29 @@ final class _StreamingCanvasSelectable extends ChangeNotifier
           final Offset local = _box.globalToLocal(wordEvent.globalPosition);
           final int globalOff = _offsetForLocal(local);
           final _SelectableSlice? slice = _sliceForOffset(globalOff);
+          if (slice != null &&
+              _start != null &&
+              _end != null &&
+              _start != _end) {
+            final int selStart = math.min(_start!, _end!);
+            final int selEnd = math.max(_start!, _end!);
+            final TextPosition slicePos = slice.painter.getPositionForOffset(
+              local - slice.offset,
+            );
+            final int posGlobal =
+                slice.startOffset +
+                slicePos.offset.clamp(0, slice.plainText.length);
+            final bool withinSelection =
+                (posGlobal > selStart && posGlobal < selEnd) ||
+                (posGlobal == selStart &&
+                    slicePos.affinity == TextAffinity.downstream) ||
+                (posGlobal == selEnd &&
+                    slicePos.affinity == TextAffinity.upstream);
+            if (withinSelection) {
+              result = SelectionResult.end;
+              break;
+            }
+          }
           if (slice == null) {
             _start = 0;
             _end = 0;
