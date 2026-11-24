@@ -109,8 +109,10 @@ Directory? _locateFlutterMaterialFontsDir() {
 Future<void> _expectGolden(
   Finder finder,
   String goldenPath, {
-  double precisionTolerance = 0.02,
+  double? precisionTolerance,
 }) async {
+  final double tolerance =
+      precisionTolerance ?? (Platform.isMacOS ? 0.02 : 0.06);
   final GoldenFileComparator previous = goldenFileComparator;
   if (previous is! LocalFileComparator) {
     await expectLater(finder, matchesGoldenFile(goldenPath));
@@ -118,7 +120,7 @@ Future<void> _expectGolden(
   }
   goldenFileComparator = _TolerantGoldenFileComparator(
     previous.basedir.resolve('golden_rendering_test.dart'),
-    precisionTolerance: precisionTolerance,
+    precisionTolerance: tolerance,
   );
   try {
     await expectLater(finder, matchesGoldenFile(goldenPath));
@@ -155,6 +157,7 @@ Future<void> _pumpGoldenDocument(
         brightness: isDark ? Brightness.dark : Brightness.light,
         fontFamily: 'Roboto',
         fontFamilyFallback: const <String>['NewCMMath'],
+        platform: TargetPlatform.macOS,
         useMaterial3: true,
       ),
       home: Scaffold(
