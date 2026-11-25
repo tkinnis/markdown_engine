@@ -1,3 +1,12 @@
+## 0.2.1
+
+Improved footnote back-link placement/rendering and fixed underline decoration painting across linked images.
+
+### Rendering Fixes
+
+- **Inline Footnote Back-Links (`↩︎`)**: Appended footnote back-reference links inline at the end of trailing paragraph blocks (falling back below non-paragraph blocks such as code blocks) using text variation selector `U+FE0E` (`↩︎`) so monochrome link styling renders cleanly on macOS without triggering emoji rendering or polluting copied text.
+- **Linked Image Underline Exclusion**: Stopped applying link `TextDecoration.underline` across child `ImageNode`, `PictureInlineNode`, and inline `<img>` `WidgetSpan`s while preserving underlines on adjacent linked text and nested formatting spans.
+
 ## 0.2.0
 
 Added interactive Mermaid diagram tap hooks, flattened SVG payload propagation, and hover overlay controls.

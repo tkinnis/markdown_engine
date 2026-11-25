@@ -1,6 +1,6 @@
 name: markdown_engine_flutter
 description: Flutter MarkdownView widget with lazy slivers, OpenType TeX math, vector Mermaid diagrams, HTML tables, selection, and streaming.
-version: 0.2.0
+version: 0.2.1
 homepage: https://tkinnis.github.io/markdown_engine/
 repository: https://github.com/tkinnis/markdown_engine/tree/main/packages/markdown_engine_flutter
 issue_tracker: https://github.com/tkinnis/markdown_engine/issues
@@ -30,7 +30,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  markdown_engine: ^0.2.0
+  markdown_engine: ^0.2.1
   pele_dart: ^1.13.0+1
   tex_math_flutter: ^0.1.0
   vector_graphics: ^1.2.6

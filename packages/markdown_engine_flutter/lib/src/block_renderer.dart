@@ -1863,6 +1863,95 @@ Widget _buildFootnoteDefinition(
     }
   }
 
+  Widget buildBackLink(int occurrence) {
+    return SelectionContainer.disabled(
+      child: MarkdownInteractiveAction(
+        onActivate: () => navigateBack(occurrence),
+        semanticLabel: 'Back to footnote reference ${node.index}',
+        focusBorderColor: theme.accent,
+        child: Text(
+          occurrence == 1 ? '↩\uFE0E' : '↩\uFE0E$occurrence',
+          style: TextStyle(
+            color: theme.effectiveLinkColor,
+            fontSize: noteTheme.fontSize,
+            fontWeight: FontWeight.w600,
+            fontFamily: noteTheme.fontFamily,
+            height: 1.0,
+          ),
+        ),
+      ),
+    );
+  }
+
+  final MarkdownBlockNode? lastBlock = node.children.isNotEmpty
+      ? node.children.last
+      : null;
+  final bool canInlineBackLinks =
+      lastBlock is ParagraphNode && !_isStandaloneMediaParagraph(lastBlock);
+
+  final Widget bodyContent;
+  if (canInlineBackLinks) {
+    final List<InlineSpan> trailingSpans = <InlineSpan>[
+      for (int occ = 1; occ <= backCount; occ++)
+        WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: Padding(
+            padding: EdgeInsets.only(left: occ == 1 ? 5.0 : 6.0),
+            child: buildBackLink(occ),
+          ),
+        ),
+    ];
+    final Widget trailingParagraph = buildFastOrRichInlineText(
+      context,
+      nodes: lastBlock.children,
+      baseStyle: noteTheme.bodyTextStyle(),
+      theme: noteTheme,
+      delegates: noteContext.delegates,
+      urlPolicy: noteContext.urlPolicy,
+      controller: noteContext.controller,
+      textAlign: noteContext.textAlign,
+      remoteImagesApproved: noteContext.remoteImagesApproved,
+      onRequestLoadRemoteImages: noteContext.onRequestLoadRemoteImages,
+      environment: noteContext.environment,
+      trailingSpans: trailingSpans,
+    );
+    if (node.children.length == 1) {
+      bodyContent = trailingParagraph;
+    } else {
+      final List<MarkdownBlockNode> leadingBlocks = node.children.sublist(
+        0,
+        node.children.length - 1,
+      );
+      bodyContent = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Padding(
+            padding: EdgeInsets.only(bottom: noteTheme.blockSpacing * 0.75),
+            child: _buildBlockColumn(context, leadingBlocks, noteContext),
+          ),
+          trailingParagraph,
+        ],
+      );
+    }
+  } else {
+    bodyContent = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        _buildBlockColumn(context, node.children, noteContext),
+        const SizedBox(height: 2.0),
+        Wrap(
+          spacing: 6.0,
+          children: <Widget>[
+            for (int occ = 1; occ <= backCount; occ++) buildBackLink(occ),
+          ],
+        ),
+      ],
+    );
+  }
+
   return MarkdownAnchorTarget(
     slugs: <String>['fn-${node.label}'],
     controller: renderContext.controller,
@@ -1878,41 +1967,18 @@ Widget _buildFootnoteDefinition(
           ),
         ),
         const SizedBox(width: 8.0),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              _buildBlockColumn(context, node.children, noteContext),
-              const SizedBox(height: 2.0),
-              Wrap(
-                spacing: 6.0,
-                children: <Widget>[
-                  for (int occ = 1; occ <= backCount; occ++)
-                    SelectionContainer.disabled(
-                      child: MarkdownInteractiveAction(
-                        onActivate: () => navigateBack(occ),
-                        semanticLabel:
-                            'Back to footnote reference ${node.index}',
-                        focusBorderColor: theme.accent,
-                        child: Text(
-                          occ == 1 ? '↩' : '↩$occ',
-                          style: TextStyle(
-                            color: theme.effectiveLinkColor,
-                            fontSize: noteTheme.fontSize,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
+        Expanded(child: bodyContent),
       ],
     ),
   );
+}
+
+bool _isStandaloneMediaParagraph(ParagraphNode node) {
+  if (node.children.length != 1) {
+    return false;
+  }
+  final MarkdownInlineNode single = node.children.first;
+  return single is ImageNode || single is PictureInlineNode;
 }
 
 Widget _buildHtmlBlockEntry(

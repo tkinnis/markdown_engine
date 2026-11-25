@@ -479,7 +479,8 @@ List<InlineSpan> _buildSimpleInlineChildren(
 }
 
 /// Builds a lean [FastMarkdownText] leaf widget when [nodes] contains only
-/// simple text/style inlines, or falls back to [MarkdownInlineText].
+/// simple text/style inlines and [trailingSpans] is empty, or falls back to
+/// [MarkdownInlineText].
 Widget buildFastOrRichInlineText(
   BuildContext context, {
   required List<MarkdownInlineNode> nodes,
@@ -495,8 +496,10 @@ Widget buildFastOrRichInlineText(
   TextStyle? effectiveStyleOverride,
   EdgeInsets? contentPadding,
   double? maxWidth,
+  List<InlineSpan>? trailingSpans,
 }) {
-  if (canBuildFastSimpleInlines(nodes)) {
+  if ((trailingSpans == null || trailingSpans.isEmpty) &&
+      canBuildFastSimpleInlines(nodes)) {
     final MarkdownRenderEnvironment env =
         environment ?? MarkdownRenderEnvironment.resolve(context);
     final TextStyle effectiveStyle =
@@ -530,6 +533,7 @@ Widget buildFastOrRichInlineText(
     remoteImagesApproved: remoteImagesApproved,
     onRequestLoadRemoteImages: onRequestLoadRemoteImages,
     environment: environment,
+    trailingSpans: trailingSpans,
   );
   if (contentPadding == null && maxWidth == null) {
     return rich;
@@ -563,6 +567,7 @@ final class MarkdownInlineText extends StatefulWidget {
     this.remoteImagesApproved = false,
     this.onRequestLoadRemoteImages,
     this.environment,
+    this.trailingSpans,
   });
 
   /// Inline AST nodes to render.
@@ -594,6 +599,9 @@ final class MarkdownInlineText extends StatefulWidget {
 
   /// Optional pre-resolved ambient environment hoisted by the enclosing view.
   final MarkdownRenderEnvironment? environment;
+
+  /// Optional spans appended inline at the end of rendered [nodes].
+  final List<InlineSpan>? trailingSpans;
 
   @override
   State<MarkdownInlineText> createState() => _MarkdownInlineTextState();
@@ -693,9 +701,13 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
   Widget build(BuildContext context) {
     final MarkdownRenderEnvironment env =
         widget.environment ?? MarkdownRenderEnvironment.resolve(context);
+    final List<InlineSpan>? trailingSpans = widget.trailingSpans;
+    final bool hasTrailingSpans =
+        trailingSpans != null && trailingSpans.isNotEmpty;
 
     final Widget? cached = _cachedRichText;
-    if (cached != null &&
+    if (!hasTrailingSpans &&
+        cached != null &&
         identical(widget.nodes, _cachedNodes) &&
         widget.baseStyle == _cachedBaseStyle &&
         widget.theme == _cachedTheme &&
@@ -734,6 +746,15 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
       nextRecognizers: nextRecognizers,
       acc: acc,
     );
+    final List<InlineSpan> effectiveSpans;
+    if (hasTrailingSpans) {
+      effectiveSpans = List<InlineSpan>.of(spans)..addAll(trailingSpans);
+      if (trailingSpans.any((InlineSpan span) => span is WidgetSpan)) {
+        acc.hasWidgetSpan = true;
+      }
+    } else {
+      effectiveSpans = spans;
+    }
 
     if (pool != null) {
       for (final List<TapGestureRecognizer> unused in pool.values) {
@@ -745,7 +766,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         : nextRecognizers;
     _scheduleRetiredCleanup();
 
-    final TextSpan baseSpan = TextSpan(style: effectiveStyle, children: spans);
+    final TextSpan baseSpan = TextSpan(
+      style: effectiveStyle,
+      children: effectiveSpans,
+    );
     final Widget built;
     if (!acc.hasWidgetSpan) {
       final TextSpan rootSpan = env.applySpacingOverrides(baseSpan);
@@ -772,7 +796,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         selectionColor: env.selectionColor,
       );
     }
-    _cachedRichText = built;
+    _cachedRichText = hasTrailingSpans ? null : built;
     _cachedNodes = widget.nodes;
     _cachedBaseStyle = widget.baseStyle;
     _cachedTheme = widget.theme;
@@ -802,6 +826,56 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     return recognizer;
   }
 
+  static bool _containsVisualMediaInline(List<MarkdownInlineNode> nodes) {
+    for (final MarkdownInlineNode node in nodes) {
+      if (_nodeContainsVisualMedia(node)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool _nodeContainsVisualMedia(MarkdownInlineNode node) {
+    return switch (node) {
+      ImageNode() || PictureInlineNode() => true,
+      RawHtmlInlineNode(:final String html) =>
+        tryParseHtmlImageTag(html) != null,
+      EmphasisNode(:final List<MarkdownInlineNode> children) ||
+      StrongNode(:final List<MarkdownInlineNode> children) ||
+      StrikethroughNode(:final List<MarkdownInlineNode> children) ||
+      HighlightNode(:final List<MarkdownInlineNode> children) ||
+      SubscriptNode(:final List<MarkdownInlineNode> children) ||
+      SuperscriptNode(:final List<MarkdownInlineNode> children) ||
+      LinkNode(:final List<MarkdownInlineNode> children) ||
+      KbdInlineNode(:final List<MarkdownInlineNode> children) ||
+      AbbrInlineNode(
+        :final List<MarkdownInlineNode> children,
+      ) => _containsVisualMediaInline(children),
+      TextNode() ||
+      SoftBreakNode() ||
+      HardBreakNode() ||
+      InlineBreakNode() ||
+      CodeSpanNode() ||
+      MathInlineNode() ||
+      FootnoteRefNode() ||
+      AnchorInlineNode() => false,
+    };
+  }
+
+  TextStyle _applyLinkUnderline(TextStyle style, bool underlineLinkText) {
+    if (!underlineLinkText) {
+      return style;
+    }
+    final Color linkColor = widget.theme.effectiveLinkColor;
+    return style.copyWith(
+      decoration: _combineDecoration(
+        style.decoration,
+        TextDecoration.underline,
+      ),
+      decorationColor: linkColor,
+    );
+  }
+
   List<InlineSpan> _buildInlines(
     BuildContext context,
     List<MarkdownInlineNode> nodes,
@@ -814,6 +888,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required VoidCallback? onLinkTap,
     required bool isLink,
     required Uri? linkUrl,
+    bool underlineLinkText = false,
     required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
     required _InlineBuildAccumulator acc,
@@ -861,7 +936,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
             result.add(
               TextSpan(
                 text: '\u201C',
-                style: activeStyle,
+                style: _applyLinkUnderline(activeStyle, underlineLinkText),
                 recognizer: linkRecognizer,
                 mouseCursor: linkCursor,
               ),
@@ -871,7 +946,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
               result.add(
                 TextSpan(
                   text: '\u201D',
-                  style: activeStyle,
+                  style: _applyLinkUnderline(activeStyle, underlineLinkText),
                   recognizer: linkRecognizer,
                   mouseCursor: linkCursor,
                 ),
@@ -922,6 +997,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
                     onLinkTap: onLinkTap,
                     isLink: isLink,
                     linkUrl: linkUrl,
+                    underlineLinkText: underlineLinkText,
                     recognizerPool: recognizerPool,
                     nextRecognizers: nextRecognizers,
                     acc: acc,
@@ -980,6 +1056,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
                       onLinkTap: onLinkTap,
                       isLink: isLink,
                       linkUrl: linkUrl,
+                      underlineLinkText: underlineLinkText,
                       recognizerPool: recognizerPool,
                       nextRecognizers: nextRecognizers,
                       acc: acc,
@@ -1024,6 +1101,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           onLinkTap: onLinkTap,
           isLink: isLink,
           linkUrl: linkUrl,
+          underlineLinkText: underlineLinkText,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
           acc: acc,
@@ -1108,6 +1186,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required VoidCallback? onLinkTap,
     required bool isLink,
     required Uri? linkUrl,
+    bool underlineLinkText = false,
     required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
     required _InlineBuildAccumulator acc,
@@ -1118,18 +1197,46 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         ? SystemMouseCursors.click
         : null;
 
+    InlineSpan buildDecoratedChildSpan(
+      List<MarkdownInlineNode> children,
+      TextStyle childStyle,
+    ) {
+      final bool hasChildMedia =
+          underlineLinkText && _containsVisualMediaInline(children);
+      final TextStyle resolvedStyle = hasChildMedia
+          ? childStyle
+          : _applyLinkUnderline(childStyle, underlineLinkText);
+      return TextSpan(
+        style: resolvedStyle,
+        children: _buildInlines(
+          context,
+          children,
+          resolvedStyle,
+          inlineHtmlDepth: inlineHtmlDepth,
+          linkRecognizer: linkRecognizer,
+          onLinkTap: onLinkTap,
+          isLink: isLink,
+          linkUrl: linkUrl,
+          underlineLinkText: hasChildMedia,
+          recognizerPool: recognizerPool,
+          nextRecognizers: nextRecognizers,
+          acc: acc,
+        ),
+      );
+    }
+
     switch (node) {
       case TextNode():
         return TextSpan(
           text: node.text,
-          style: style,
+          style: _applyLinkUnderline(style, underlineLinkText),
           recognizer: linkRecognizer,
           mouseCursor: linkCursor,
         );
       case SoftBreakNode():
         return TextSpan(
           text: ' ',
-          style: style,
+          style: _applyLinkUnderline(style, underlineLinkText),
           recognizer: linkRecognizer,
           mouseCursor: linkCursor,
         );
@@ -1138,14 +1245,17 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         return TextSpan(text: '\n', style: style);
       case CodeSpanNode():
         final double baseSize = style.fontSize ?? theme.fontSize;
-        final TextStyle codeStyle = style.copyWith(
-          fontFamily: theme.effectiveCodeFontFamily,
-          fontFamilyFallback: MarkdownThemeData.defaultCodeFontFallback,
-          fontSize: baseSize * 0.9,
-          color: linkRecognizer != null
-              ? style.color
-              : theme.effectiveCodeForeground,
-          backgroundColor: theme.codeBackground,
+        final TextStyle codeStyle = _applyLinkUnderline(
+          style.copyWith(
+            fontFamily: theme.effectiveCodeFontFamily,
+            fontFamilyFallback: MarkdownThemeData.defaultCodeFontFallback,
+            fontSize: baseSize * 0.9,
+            color: linkRecognizer != null
+                ? style.color
+                : theme.effectiveCodeForeground,
+            backgroundColor: theme.codeBackground,
+          ),
+          underlineLinkText,
         );
         return TextSpan(
           text: node.literal,
@@ -1154,85 +1264,29 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           mouseCursor: linkCursor,
         );
       case EmphasisNode():
-        final TextStyle emStyle = style.copyWith(fontStyle: FontStyle.italic);
-        return TextSpan(
-          style: emStyle,
-          children: _buildInlines(
-            context,
-            node.children,
-            emStyle,
-            inlineHtmlDepth: inlineHtmlDepth,
-            linkRecognizer: linkRecognizer,
-            onLinkTap: onLinkTap,
-            isLink: isLink,
-            linkUrl: linkUrl,
-            recognizerPool: recognizerPool,
-            nextRecognizers: nextRecognizers,
-            acc: acc,
-          ),
+        return buildDecoratedChildSpan(
+          node.children,
+          style.copyWith(fontStyle: FontStyle.italic),
         );
       case StrongNode():
-        final TextStyle strongStyle = style.copyWith(
-          fontWeight: FontWeight.w700,
-        );
-        return TextSpan(
-          style: strongStyle,
-          children: _buildInlines(
-            context,
-            node.children,
-            strongStyle,
-            inlineHtmlDepth: inlineHtmlDepth,
-            linkRecognizer: linkRecognizer,
-            onLinkTap: onLinkTap,
-            isLink: isLink,
-            linkUrl: linkUrl,
-            recognizerPool: recognizerPool,
-            nextRecognizers: nextRecognizers,
-            acc: acc,
-          ),
+        return buildDecoratedChildSpan(
+          node.children,
+          style.copyWith(fontWeight: FontWeight.w700),
         );
       case StrikethroughNode():
-        final TextStyle strikeStyle = style.copyWith(
-          decoration: _combineDecoration(
-            style.decoration,
-            TextDecoration.lineThrough,
-          ),
-        );
-        return TextSpan(
-          style: strikeStyle,
-          children: _buildInlines(
-            context,
-            node.children,
-            strikeStyle,
-            inlineHtmlDepth: inlineHtmlDepth,
-            linkRecognizer: linkRecognizer,
-            onLinkTap: onLinkTap,
-            isLink: isLink,
-            linkUrl: linkUrl,
-            recognizerPool: recognizerPool,
-            nextRecognizers: nextRecognizers,
-            acc: acc,
+        return buildDecoratedChildSpan(
+          node.children,
+          style.copyWith(
+            decoration: _combineDecoration(
+              style.decoration,
+              TextDecoration.lineThrough,
+            ),
           ),
         );
       case HighlightNode():
-        final TextStyle highlightStyle = style.copyWith(
-          backgroundColor: theme.highlightFill,
-        );
-        return TextSpan(
-          style: highlightStyle,
-          children: _buildInlines(
-            context,
-            node.children,
-            highlightStyle,
-            inlineHtmlDepth: inlineHtmlDepth,
-            linkRecognizer: linkRecognizer,
-            onLinkTap: onLinkTap,
-            isLink: isLink,
-            linkUrl: linkUrl,
-            recognizerPool: recognizerPool,
-            nextRecognizers: nextRecognizers,
-            acc: acc,
-          ),
+        return buildDecoratedChildSpan(
+          node.children,
+          style.copyWith(backgroundColor: theme.highlightFill),
         );
       case SubscriptNode():
         return _buildScriptSpan(
@@ -1245,6 +1299,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           onLinkTap: onLinkTap,
           isLink: isLink,
           linkUrl: linkUrl,
+          underlineLinkText: underlineLinkText,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
           acc: acc,
@@ -1260,6 +1315,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           onLinkTap: onLinkTap,
           isLink: isLink,
           linkUrl: linkUrl,
+          underlineLinkText: underlineLinkText,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
           acc: acc,
@@ -1278,6 +1334,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         acc.hasWidgetSpan = true;
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
+          style: const TextStyle(decoration: TextDecoration.none),
           child: _wrapWidgetWithLink(
             buildMarkdownImageWidget(
               context: context,
@@ -1307,6 +1364,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         );
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
+          style: const TextStyle(decoration: TextDecoration.none),
           child: _wrapWidgetWithLink(
             buildMarkdownImageWidget(
               context: context,
@@ -1484,6 +1542,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           acc.hasWidgetSpan = true;
           return WidgetSpan(
             alignment: PlaceholderAlignment.middle,
+            style: const TextStyle(decoration: TextDecoration.none),
             child: _wrapWidgetWithLink(
               buildMarkdownImageWidget(
                 context: context,
@@ -1517,6 +1576,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     required VoidCallback? onLinkTap,
     required bool isLink,
     required Uri? linkUrl,
+    bool underlineLinkText = false,
     required Map<String, List<TapGestureRecognizer>>? recognizerPool,
     required List<_TrackedRecognizer> nextRecognizers,
     required _InlineBuildAccumulator acc,
@@ -1536,6 +1596,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
           onLinkTap: onLinkTap,
           isLink: isLink,
           linkUrl: linkUrl,
+          underlineLinkText: underlineLinkText,
           recognizerPool: recognizerPool,
           nextRecognizers: nextRecognizers,
           acc: acc,
@@ -1560,6 +1621,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
       onLinkTap: null,
       isLink: false,
       linkUrl: null,
+      underlineLinkText: underlineLinkText,
       recognizerPool: recognizerPool,
       nextRecognizers: nextRecognizers,
       acc: acc,
@@ -1754,14 +1816,10 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
     }
 
     final Color linkColor = widget.theme.effectiveLinkColor;
-    final TextStyle linkStyle = style.copyWith(
-      color: linkColor,
-      decoration: _combineDecoration(
-        style.decoration,
-        TextDecoration.underline,
-      ),
-      decorationColor: linkColor,
-    );
+    final bool hasVisualMedia = _containsVisualMediaInline(node.children);
+    final TextStyle linkStyle = hasVisualMedia
+        ? style.copyWith(color: linkColor)
+        : _applyLinkUnderline(style.copyWith(color: linkColor), true);
 
     return TextSpan(
       style: linkStyle,
@@ -1774,6 +1832,7 @@ final class _MarkdownInlineTextState extends State<MarkdownInlineText> {
         onLinkTap: onTap,
         isLink: true,
         linkUrl: parsedUri,
+        underlineLinkText: hasVisualMedia,
         recognizerPool: recognizerPool,
         nextRecognizers: nextRecognizers,
         acc: acc,

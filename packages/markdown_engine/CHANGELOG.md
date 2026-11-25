@@ -1,3 +1,9 @@
+## 0.2.1
+
+Lockstep patch release aligned with `markdown_engine_flutter` 0.2.1.
+
+- Maintained full CommonMark 0.31.2 and GFM 0.29.0.gfm.13 parser, AST, exporter, incremental editing, streaming, and security parity with `0.2.0`.
+
 ## 0.2.0
 
 Lockstep minor release aligned with `markdown_engine_flutter` 0.2.0.

@@ -444,8 +444,11 @@ Term Alpha
 
         // Footnotes
         expect(find.text('[1]'), findsOneWidget);
-        expect(find.text('Footnote explanation body.'), findsOneWidget);
-        expect(find.text('↩'), findsOneWidget);
+        expect(
+          find.textContaining('Footnote explanation body.'),
+          findsOneWidget,
+        );
+        expect(find.text('↩\uFE0E'), findsOneWidget);
       },
     );
 
@@ -1001,7 +1004,7 @@ Inside details body[^1].
           '✓',
           'Note',
           '▾',
-          '↩',
+          '↩\uFE0E',
           'Load remote images',
         ]) {
           final Finder chromeFinder = find.text(chrome);
@@ -3727,7 +3730,7 @@ Third spacer paragraph confirming controller anchor navigation works cleanly.
           ),
           findsOneWidget,
         );
-        expect(find.text('↩'), findsNWidgets(2));
+        expect(find.text('↩\uFE0E'), findsNWidgets(2));
 
         await tester.tap(find.bySemanticsLabel('Footnote 2'));
         await tester.pump();
@@ -4262,6 +4265,215 @@ Hidden body
       variant: const TargetPlatformVariant(<TargetPlatform>{
         TargetPlatform.macOS,
       }),
+    );
+  });
+
+  group('Inline footnote back-links and linked image underline exclusion', () {
+    testWidgets(
+      'renders footnote back-link inline on the same row as paragraph text and falls back below trailing code blocks',
+      (WidgetTester tester) async {
+        const String doc = '''
+Paragraph note[^1] and multi-block note[^2].
+
+[^1]: Footnote explanation ends inline.
+[^2]: Leading summary paragraph.
+
+    ```dart
+    final int answer = 42;
+    ```
+''';
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 720.0,
+                child: MarkdownView(
+                  doc,
+                  options: MarkdownOptions.extended(),
+                  scrollable: false,
+                  selectable: false,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        final Finder inlineNoteFinder = find.byWidgetPredicate(
+          (Widget w) =>
+              w is RichText &&
+              w.text.toPlainText().contains(
+                'Footnote explanation ends inline.',
+              ),
+        );
+        expect(inlineNoteFinder, findsOneWidget);
+        final Rect inlineNoteRect = tester.getRect(inlineNoteFinder);
+        final Finder backLinks = find.text('↩\uFE0E');
+        expect(backLinks, findsNWidgets(2));
+
+        // First back-link sits horizontally inline inside the trailing paragraph row.
+        final Rect firstBackRect = tester.getRect(backLinks.first);
+        expect(
+          firstBackRect.top,
+          greaterThanOrEqualTo(inlineNoteRect.top - 2.0),
+        );
+        expect(
+          firstBackRect.bottom,
+          lessThanOrEqualTo(inlineNoteRect.bottom + 2.0),
+        );
+
+        // Second footnote ends with a fenced code block so its back-link sits below it.
+        final Rect codeRect = tester.getRect(
+          find.textContaining('final int answer = 42;'),
+        );
+        final Rect secondBackRect = tester.getRect(backLinks.last);
+        expect(secondBackRect.top, greaterThan(codeRect.bottom));
+      },
+    );
+
+    testWidgets(
+      'omits link underline across linked images and <picture> elements while keeping text link underlines and tap handling',
+      (WidgetTester tester) async {
+        final List<String> tapped = <String>[];
+        const String doc = '''
+[![Flutter badge](https://example.com/badge.png)](https://flutter.dev/badge)
+
+<a href="https://flutter.dev/hero">
+  <h1 align="center">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://example.com/dark.png">
+      <img alt="Flutter" src="https://example.com/light.png">
+    </picture>
+  </h1>
+</a>
+
+[Visit ![icon](https://example.com/icon.png) **Flutter** docs](https://flutter.dev/docs)
+''';
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 760.0,
+                child: MarkdownView(
+                  doc,
+                  options: const MarkdownOptions.extended(),
+                  scrollable: false,
+                  selectable: false,
+                  delegates: MarkdownBuilderDelegates(
+                    imagePolicy: MarkdownImagePolicy.load,
+                    onTapLink: (String destination, String? _) {
+                      tapped.add(destination);
+                    },
+                    imageBuilder: (BuildContext _, ImageNode node) => SizedBox(
+                      key: ValueKey<String>('custom-img-${node.alt}'),
+                      width: 64.0,
+                      height: 28.0,
+                      child: Center(child: Text('IMG:${node.alt}')),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        void expectNoUnderlineOnWidgetSpan(String expectedKeyValue) {
+          final Finder imgFinder = find.byKey(
+            ValueKey<String>(expectedKeyValue),
+          );
+          expect(imgFinder, findsOneWidget);
+          final Finder richAncestor = find
+              .ancestor(
+                of: imgFinder,
+                matching: find.byWidgetPredicate((Widget w) => w is RichText),
+              )
+              .first;
+          final RichText richText = tester.widget<RichText>(richAncestor);
+
+          bool checkSpanTree(InlineSpan span) {
+            if (span is TextSpan) {
+              for (final InlineSpan child
+                  in span.children ?? const <InlineSpan>[]) {
+                if (child is WidgetSpan) {
+                  final bool containsUnderline =
+                      span.style?.decoration?.contains(
+                        TextDecoration.underline,
+                      ) ??
+                      false;
+                  expect(
+                    containsUnderline,
+                    isFalse,
+                    reason: 'Ancestor TextSpan around WidgetSpan must not underline',
+                  );
+                  expect(
+                    child.style?.decoration == TextDecoration.underline,
+                    isFalse,
+                  );
+                } else {
+                  checkSpanTree(child);
+                }
+              }
+            }
+            return true;
+          }
+
+          checkSpanTree(richText.text);
+        }
+
+        expectNoUnderlineOnWidgetSpan('custom-img-Flutter badge');
+        expectNoUnderlineOnWidgetSpan('custom-img-Flutter');
+        expectNoUnderlineOnWidgetSpan('custom-img-icon');
+
+        // Verify mixed link text spans still carry link underlines.
+        final RichText mixedRich = tester.widget<RichText>(
+          find
+              .ancestor(
+                of: find.byKey(const ValueKey<String>('custom-img-icon')),
+                matching: find.byWidgetPredicate((Widget w) => w is RichText),
+              )
+              .first,
+        );
+        final List<TextSpan> underlinedTextSpans = <TextSpan>[];
+        void collectUnderlined(InlineSpan span) {
+          if (span is TextSpan) {
+            final bool hasText = (span.text ?? '').trim().isNotEmpty;
+            final bool underlined =
+                span.style?.decoration?.contains(TextDecoration.underline) ??
+                false;
+            if (hasText && underlined) {
+              underlinedTextSpans.add(span);
+            }
+            for (final InlineSpan child
+                in span.children ?? const <InlineSpan>[]) {
+              collectUnderlined(child);
+            }
+          }
+        }
+
+        collectUnderlined(mixedRich.text);
+        final String combinedUnderlined = underlinedTextSpans
+            .map((TextSpan s) => s.text ?? '')
+            .join();
+        expect(combinedUnderlined, contains('Visit'));
+        expect(combinedUnderlined, contains('Flutter'));
+        expect(combinedUnderlined, contains('docs'));
+
+        // Tapping linked images and linked <picture> still triggers onTapLink.
+        await tester.tap(
+          find.byKey(const ValueKey<String>('custom-img-Flutter badge')),
+        );
+        await tester.tap(
+          find.byKey(const ValueKey<String>('custom-img-Flutter')),
+        );
+        await tester.pump();
+        expect(tapped, <String>[
+          'https://flutter.dev/badge',
+          'https://flutter.dev/hero',
+        ]);
+      },
     );
   });
 }
