@@ -37,6 +37,8 @@ export 'src/delegates.dart'
         MarkdownLinkTapCallback,
         MarkdownMathBlockBuilder,
         MarkdownMathInlineBuilder,
+        MarkdownMermaidDiagram,
+        MarkdownMermaidTapCallback,
         MarkdownWebLinkCallback;
 export 'src/document_reader.dart' show MarkdownDocumentReader;
 export 'src/fast_text.dart' show MarkdownRichText;

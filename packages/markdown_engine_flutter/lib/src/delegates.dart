@@ -1,3 +1,6 @@
+import 'dart:typed_data' show Uint8List;
+
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown_engine/markdown_engine.dart'
@@ -66,6 +69,67 @@ typedef MarkdownLinkTapCallback = void Function(
 /// Callback invoked when the user taps an allowed `http` or `https` web URI.
 typedef MarkdownWebLinkCallback = void Function(Uri uri);
 
+/// Immutable payload describing a compiled Mermaid diagram passed to
+/// [MarkdownMermaidTapCallback].
+@immutable
+final class MarkdownMermaidDiagram {
+  /// Creates a [MarkdownMermaidDiagram] payload.
+  const MarkdownMermaidDiagram({
+    required this.code,
+    required this.compiledBytes,
+    required this.svg,
+    required this.logicalSize,
+    required this.semanticsLabel,
+    required this.brightness,
+  });
+
+  /// Trimmed Mermaid source text for the diagram block.
+  final String code;
+
+  /// Compiled `vector_graphics` binary payload produced by `vg.encodeSvg`.
+  final Uint8List compiledBytes;
+
+  /// Self-contained flattened SVG 1.1 markup produced by `pele_dart`.
+  final String svg;
+
+  /// Intrinsic SVG viewBox dimensions in logical pixels.
+  final Size logicalSize;
+
+  /// Accessible label derived from the SVG `aria-label` or diagram type.
+  final String semanticsLabel;
+
+  /// Active Markdown theme brightness used to style the compiled diagram.
+  final Brightness brightness;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MarkdownMermaidDiagram &&
+          code == other.code &&
+          listEquals(compiledBytes, other.compiledBytes) &&
+          svg == other.svg &&
+          logicalSize == other.logicalSize &&
+          semanticsLabel == other.semanticsLabel &&
+          brightness == other.brightness;
+
+  @override
+  int get hashCode => Object.hash(
+    code,
+    Object.hashAll(compiledBytes),
+    svg,
+    logicalSize,
+    semanticsLabel,
+    brightness,
+  );
+}
+
+/// Callback invoked when the user taps or triggers zoom on a compiled
+/// built-in Mermaid diagram.
+typedef MarkdownMermaidTapCallback = void Function(
+  BuildContext context,
+  MarkdownMermaidDiagram diagram,
+);
+
 /// Pluggable rendering hooks and security policies for Markdown widgets.
 @immutable
 final class MarkdownBuilderDelegates {
@@ -84,6 +148,7 @@ final class MarkdownBuilderDelegates {
     this.imageBuilder,
     this.onTapLink,
     this.onOpenWebLink,
+    this.onTapMermaid,
     this.urlPolicy,
   });
 
@@ -143,6 +208,14 @@ final class MarkdownBuilderDelegates {
   /// Callback invoked when an allowed `http`/`https` web link is tapped.
   final MarkdownWebLinkCallback? onOpenWebLink;
 
+  /// Optional callback invoked when the user taps or triggers zoom on a
+  /// compiled built-in Mermaid diagram.
+  ///
+  /// When non-null, compiled Mermaid cards expose tap-to-zoom activation and a
+  /// hover overlay toolbar (`Zoom` and `Copy`). When `null`, diagrams render
+  /// statically without hover overlay chrome.
+  final MarkdownMermaidTapCallback? onTapMermaid;
+
   /// Optional [MarkdownUrlPolicy] overriding the parsed document's URL policy
   /// for interactive link and image gating.
   final MarkdownUrlPolicy? urlPolicy;
@@ -162,6 +235,7 @@ final class MarkdownBuilderDelegates {
     MarkdownImageBuilder? imageBuilder,
     MarkdownLinkTapCallback? onTapLink,
     MarkdownWebLinkCallback? onOpenWebLink,
+    MarkdownMermaidTapCallback? onTapMermaid,
     MarkdownUrlPolicy? urlPolicy,
   }) {
     return MarkdownBuilderDelegates(
@@ -178,6 +252,7 @@ final class MarkdownBuilderDelegates {
       imageBuilder: imageBuilder ?? this.imageBuilder,
       onTapLink: onTapLink ?? this.onTapLink,
       onOpenWebLink: onOpenWebLink ?? this.onOpenWebLink,
+      onTapMermaid: onTapMermaid ?? this.onTapMermaid,
       urlPolicy: urlPolicy ?? this.urlPolicy,
     );
   }
@@ -236,6 +311,7 @@ final class MarkdownBuilderDelegates {
           imageBuilder == other.imageBuilder &&
           onTapLink == other.onTapLink &&
           onOpenWebLink == other.onOpenWebLink &&
+          onTapMermaid == other.onTapMermaid &&
           urlPolicy == other.urlPolicy;
 
   @override
@@ -253,6 +329,7 @@ final class MarkdownBuilderDelegates {
     imageBuilder,
     onTapLink,
     onOpenWebLink,
+    onTapMermaid,
     urlPolicy,
   );
 }

@@ -28,6 +28,7 @@ export 'built_in_mermaid_worker_stub.dart'
 typedef _WorkerWireReply = (
   int id,
   TransferableTypedData? compiledBytes,
+  String? svg,
   double width,
   double height,
   String? semanticsLabel,
@@ -88,6 +89,7 @@ void _mermaidWorkerEntryPoint((SendPort, bool) args) {
       mainSendPort.send((
         id,
         transferable,
+        reply.svg,
         reply.width,
         reply.height,
         reply.semanticsLabel,
@@ -111,6 +113,7 @@ MermaidWorkerReply _failureReply({
 }) {
   return (
     compiledBytes: null,
+    svg: null,
     width: 0.0,
     height: 0.0,
     semanticsLabel: null,
@@ -633,6 +636,7 @@ final class PersistentMermaidWorker {
     final (
       int id,
       TransferableTypedData? transferable,
+      String? svg,
       double width,
       double height,
       String? semanticsLabel,
@@ -652,6 +656,7 @@ final class PersistentMermaidWorker {
         final Uint8List bytes = transferable.materialize().asUint8List();
         reply = (
           compiledBytes: bytes,
+          svg: svg,
           width: width,
           height: height,
           semanticsLabel: semanticsLabel,
@@ -668,6 +673,7 @@ final class PersistentMermaidWorker {
     } else {
       reply = (
         compiledBytes: null,
+        svg: svg,
         width: width,
         height: height,
         semanticsLabel: semanticsLabel,

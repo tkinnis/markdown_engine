@@ -9,6 +9,7 @@ import 'package:pele_dart/pele_dart.dart' as pele;
 import 'package:vector_graphics/vector_graphics_compat.dart';
 
 import 'built_in_mermaid_worker.dart';
+import 'delegates.dart' show MarkdownMermaidDiagram, MarkdownMermaidTapCallback;
 import 'fast_text.dart' show MarkdownRichText;
 import 'inline_renderer.dart' show MarkdownInteractiveAction;
 import 'theme.dart';
@@ -25,12 +26,16 @@ final class BuiltInMermaidSuccess extends BuiltInMermaidResult {
   /// Creates a [BuiltInMermaidSuccess].
   const BuiltInMermaidSuccess({
     required this.compiledBytes,
+    required this.svg,
     required this.logicalSize,
     required this.semanticsLabel,
   });
 
   /// Binary `vector_graphics` payload produced by `vg.encodeSvg`.
   final Uint8List compiledBytes;
+
+  /// Self-contained flattened SVG 1.1 markup produced by `pele_dart`.
+  final String svg;
 
   /// Intrinsic diagram logical size from the SVG viewBox.
   final Size logicalSize;
@@ -171,6 +176,7 @@ BuiltInMermaidResult _decodeWorkerReply(MermaidWorkerReply reply) {
   if (bytes != null) {
     return BuiltInMermaidSuccess(
       compiledBytes: bytes,
+      svg: reply.svg ?? '',
       logicalSize: Size(reply.width, reply.height),
       semanticsLabel: reply.semanticsLabel ?? 'Mermaid diagram',
     );
@@ -436,6 +442,7 @@ final class BuiltInMermaidCache {
     return switch (result) {
       BuiltInMermaidSuccess() =>
         result.compiledBytes.lengthInBytes +
+            result.svg.length * 2 +
             result.semanticsLabel.length * 2 +
             trimmedCode.length * 2 +
             128,
@@ -685,6 +692,7 @@ final class BuiltInMermaidDiagram extends StatefulWidget {
     required this.node,
     required this.theme,
     this.isStreamingIncomplete = false,
+    this.onTapMermaid,
   });
 
   /// Fenced Mermaid [CodeBlockNode].
@@ -697,6 +705,10 @@ final class BuiltInMermaidDiagram extends StatefulWidget {
   /// unfinished stream.
   final bool isStreamingIncomplete;
 
+  /// Optional callback invoked when the user taps or triggers zoom on a
+  /// compiled Mermaid diagram.
+  final MarkdownMermaidTapCallback? onTapMermaid;
+
   @override
   State<BuiltInMermaidDiagram> createState() => _BuiltInMermaidDiagramState();
 }
@@ -705,6 +717,7 @@ final class _BuiltInMermaidDiagramState extends State<BuiltInMermaidDiagram> {
   BuiltInMermaidResult? _result;
   int _generation = 0;
   late DerivedMermaidTheme _mermaidTheme;
+  bool _isHovered = false;
   bool _copied = false;
   Timer? _copiedResetTimer;
 
@@ -727,6 +740,9 @@ final class _BuiltInMermaidDiagramState extends State<BuiltInMermaidDiagram> {
     final bool streamingStateChanged =
         oldWidget.isStreamingIncomplete != widget.isStreamingIncomplete;
     _mermaidTheme = nextMermaidTheme;
+    if (widget.onTapMermaid == null && _isHovered) {
+      _isHovered = false;
+    }
 
     if (codeChanged || paletteChanged || streamingStateChanged) {
       _resolveOrSchedule();
@@ -776,6 +792,33 @@ final class _BuiltInMermaidDiagramState extends State<BuiltInMermaidDiagram> {
               _result = result;
             });
           }),
+    );
+  }
+
+  void _setHovered(bool hovered) {
+    if (_isHovered == hovered || !mounted) {
+      return;
+    }
+    setState(() {
+      _isHovered = hovered;
+    });
+  }
+
+  void _invokeOnTapMermaid(BuiltInMermaidSuccess result) {
+    final MarkdownMermaidTapCallback? onTap = widget.onTapMermaid;
+    if (onTap == null) {
+      return;
+    }
+    onTap(
+      context,
+      MarkdownMermaidDiagram(
+        code: widget.node.literal.trim(),
+        compiledBytes: result.compiledBytes,
+        svg: result.svg,
+        logicalSize: result.logicalSize,
+        semanticsLabel: result.semanticsLabel,
+        brightness: widget.theme.brightness,
+      ),
     );
   }
 
@@ -836,47 +879,146 @@ final class _BuiltInMermaidDiagramState extends State<BuiltInMermaidDiagram> {
           ),
     );
 
-    return Semantics(
-      container: true,
-      label: result.semanticsLabel,
-      child: Container(
-        width: double.infinity,
-        decoration: BoxDecoration(
-          color: _mermaidTheme.cardBackground,
-          borderRadius: BorderRadius.circular(8.0),
-          border: Border.all(color: theme.border, width: 1.0),
-        ),
-        clipBehavior: Clip.antiAlias,
-        padding: const EdgeInsets.all(14.0),
-        child: RepaintBoundary(
-          child: LayoutBuilder(
-            builder: (BuildContext ctx, BoxConstraints constraints) {
-              if (!constraints.hasBoundedWidth ||
-                  constraints.maxWidth.isInfinite) {
-                return Center(
-                  child: SizedBox.fromSize(size: targetSize, child: graphic),
-                );
-              }
-              final double availableWidth = constraints.maxWidth;
-              if (targetSize.width <= availableWidth) {
-                return Center(
-                  child: SizedBox.fromSize(size: targetSize, child: graphic),
-                );
-              }
-              const double minReadableScale = 0.55;
-              if (targetSize.width * minReadableScale <= availableWidth) {
-                return Center(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: SizedBox.fromSize(size: targetSize, child: graphic),
-                  ),
-                );
-              }
-              return SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
+    final Widget cardContent = Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: _mermaidTheme.cardBackground,
+        borderRadius: BorderRadius.circular(8.0),
+        border: Border.all(color: theme.border, width: 1.0),
+      ),
+      clipBehavior: Clip.antiAlias,
+      padding: const EdgeInsets.all(14.0),
+      child: RepaintBoundary(
+        child: LayoutBuilder(
+          builder: (BuildContext ctx, BoxConstraints constraints) {
+            if (!constraints.hasBoundedWidth ||
+                constraints.maxWidth.isInfinite) {
+              return Center(
                 child: SizedBox.fromSize(size: targetSize, child: graphic),
               );
-            },
+            }
+            final double availableWidth = constraints.maxWidth;
+            if (targetSize.width <= availableWidth) {
+              return Center(
+                child: SizedBox.fromSize(size: targetSize, child: graphic),
+              );
+            }
+            const double minReadableScale = 0.55;
+            if (targetSize.width * minReadableScale <= availableWidth) {
+              return Center(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: SizedBox.fromSize(size: targetSize, child: graphic),
+                ),
+              );
+            }
+            return SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SizedBox.fromSize(size: targetSize, child: graphic),
+            );
+          },
+        ),
+      ),
+    );
+
+    if (widget.onTapMermaid == null) {
+      return Semantics(
+        container: true,
+        label: result.semanticsLabel,
+        child: cardContent,
+      );
+    }
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.zoomIn,
+      onEnter: (_) => _setHovered(true),
+      onExit: (_) => _setHovered(false),
+      child: Stack(
+        children: <Widget>[
+          Semantics(
+            container: true,
+            label: result.semanticsLabel,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _invokeOnTapMermaid(result),
+              child: cardContent,
+            ),
+          ),
+          if (_isHovered)
+            Positioned(
+              top: 8.0,
+              right: 8.0,
+              child: SelectionContainer.disabled(
+                child: _buildHoverToolbar(result),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHoverToolbar(BuiltInMermaidSuccess result) {
+    final MarkdownThemeData theme = widget.theme;
+    final TextStyle zoomStyle = TextStyle(
+      color: theme.foreground,
+      fontSize: theme.fontSize * 0.78,
+      fontWeight: FontWeight.w600,
+      fontFamily: theme.fontFamily,
+    );
+    final TextStyle copyStyle = TextStyle(
+      color: _copied ? theme.accent : theme.muted,
+      fontSize: theme.fontSize * 0.78,
+      fontWeight: FontWeight.w600,
+      fontFamily: theme.fontFamily,
+    );
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.basic,
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 3.0),
+          decoration: BoxDecoration(
+            color: _mermaidTheme.cardBackground.withValues(alpha: 0.94),
+            borderRadius: BorderRadius.circular(999.0),
+            border: Border.all(color: theme.border, width: 1.0),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              MarkdownInteractiveAction(
+                onActivate: () => _invokeOnTapMermaid(result),
+                semanticLabel: 'Zoom Mermaid diagram',
+                focusBorderColor: theme.accent,
+                borderRadius: BorderRadius.circular(999.0),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8.0,
+                    vertical: 2.0,
+                  ),
+                  child: Text('Zoom', style: zoomStyle),
+                ),
+              ),
+              Container(
+                width: 1.0,
+                height: 12.0,
+                margin: const EdgeInsets.symmetric(horizontal: 2.0),
+                color: theme.border,
+              ),
+              MarkdownInteractiveAction(
+                onActivate: _copySource,
+                semanticLabel: _copied ? 'Copied' : 'Copy Mermaid source',
+                focusBorderColor: theme.accent,
+                borderRadius: BorderRadius.circular(999.0),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8.0,
+                    vertical: 2.0,
+                  ),
+                  child: Text(_copied ? 'Copied' : 'Copy', style: copyStyle),
+                ),
+              ),
+            ],
           ),
         ),
       ),

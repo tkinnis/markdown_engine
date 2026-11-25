@@ -8,6 +8,7 @@ import 'package:vector_graphics_compiler/vector_graphics_compiler.dart' as vg;
 /// by [PersistentMermaidWorker] or [compileMermaidCompute].
 typedef MermaidWorkerReply = ({
   Uint8List? compiledBytes,
+  String? svg,
   double width,
   double height,
   String? semanticsLabel,
@@ -138,6 +139,7 @@ MermaidWorkerReply compileMermaidSync(String code, pele.PelePalette palette) {
         _extractAriaLabel(rendered.svg) ?? '${rendered.type} diagram';
     return (
       compiledBytes: compiled,
+      svg: rendered.svg,
       width: safeWidth,
       height: safeHeight,
       semanticsLabel: label,
@@ -148,6 +150,7 @@ MermaidWorkerReply compileMermaidSync(String code, pele.PelePalette palette) {
   } on pele.PeleError catch (error) {
     return (
       compiledBytes: null,
+      svg: null,
       width: 0.0,
       height: 0.0,
       semanticsLabel: null,
@@ -158,6 +161,7 @@ MermaidWorkerReply compileMermaidSync(String code, pele.PelePalette palette) {
   } on Object catch (error) {
     return (
       compiledBytes: null,
+      svg: null,
       width: 0.0,
       height: 0.0,
       semanticsLabel: null,

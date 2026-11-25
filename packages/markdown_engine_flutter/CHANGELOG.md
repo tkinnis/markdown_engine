@@ -1,3 +1,13 @@
+## 0.2.0
+
+Added interactive Mermaid diagram tap hooks, flattened SVG payload propagation, and hover overlay controls.
+
+### Interactive Mermaid Diagrams
+
+- **Tap-to-Zoom Hook (`onTapMermaid`)**: Added `MarkdownMermaidTapCallback` and `MarkdownMermaidDiagram` (`code`, `compiledBytes`, `svg`, `logicalSize`, `semanticsLabel`, `brightness`) to `MarkdownBuilderDelegates` and `BuiltInMermaidDiagram`.
+- **Hover Overlay Controls**: Added a widgets-only top-right floating pill toolbar (`Zoom` and `Copy` / `Copied`) and `zoomIn` cursor on interactive Mermaid diagram cards while keeping non-interactive diagrams identical.
+- **Worker & Cache SVG Propagation**: Propagated flattened SVG 1.1 markup across Mermaid worker isolates into `BuiltInMermaidSuccess` and `BuiltInMermaidCache` byte-budget accounting.
+
 ## 0.1.0
 
 Initial public release of `markdown_engine_flutter`, delivering virtualized Flutter Markdown widgets, built-in OpenType TeX math and vector Mermaid rendering, native HTML block and inline conversion, theming, and selection support built atop `markdown_engine`.

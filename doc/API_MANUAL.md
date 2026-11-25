@@ -453,7 +453,8 @@ When `usePersistentMermaidIsolate` is true (default), cold Mermaid compiles reus
 | `MarkdownImagePolicy` | `block`, `ask`, `load` | Controls whether remote/external images render a non-network placeholder (`block`, default), prompt for consent (`ask`), or load automatically (`load`). |
 | `MarkdownBuilderDelegates` (policies) | `imagePolicy`, `remoteImagesApproved`, `onLoadRemoteImages`, `autoScrollToAnchors`, `urlPolicy` | Configures remote image consent (`MarkdownImagePolicy.block` default), automatic `#fragment` scrolling (`true`), and URI validation (`MarkdownUrlPolicy`). |
 | `MarkdownBuilderDelegates` (builders) | `enableBuiltInMath`, `enableBuiltInMermaid`, `mathInlineBuilder`, `mathBlockBuilder`, `diagramBuilder`, `codeBlockBuilder`, `imageBuilder` | Controls built-in math/Mermaid opt-outs (`true` by default) and custom block/inline widget overrides. |
-| `MarkdownBuilderDelegates` (links & helpers) | `onTapLink`, `onOpenWebLink`, `copyWith(...)`, `resolveUrlPolicy(fallback)`, `normalizeUrlDestination(destination)`, `isRemoteImageUrl(destination)` | Link tap callbacks and policy normalization/inspection utilities. |
+| `MarkdownBuilderDelegates` (links & helpers) | `onTapLink`, `onOpenWebLink`, `onTapMermaid`, `copyWith(...)`, `resolveUrlPolicy(fallback)`, `normalizeUrlDestination(destination)`, `isRemoteImageUrl(destination)` | Link tap callbacks, interactive Mermaid tap-to-zoom hook, and policy normalization/inspection utilities. |
+| `MarkdownMermaidDiagram` | `code`, `compiledBytes`, `svg`, `logicalSize`, `semanticsLabel`, `brightness` | Immutable compiled Mermaid payload handed to `onTapMermaid` carrying trimmed source, `vector_graphics` bytes, flattened SVG 1.1 markup, intrinsic viewBox size, accessible label, and theme brightness. |
 | `MarkdownMathInlineBuilder` | `InlineSpan Function(BuildContext context, MathInlineNode node, TextStyle style, GestureRecognizer? linkRecognizer)` | Custom override for inline `$...$` / `\(...\)` math nodes (takes precedence over built-in `tex_math_flutter`), receiving `linkRecognizer` inside links. |
 | `MarkdownMathBlockBuilder` | `Widget Function(BuildContext context, MathBlockNode node)` | Custom override for display `$$...$$` / `\[...\]` math blocks (takes precedence over built-in `tex_math_flutter`). |
 | `MarkdownDiagramBuilder` | `Widget? Function(BuildContext context, CodeBlockNode node)` | Custom diagram builder checked before built-in Mermaid and `codeBlockBuilder`; returning `null` falls back to built-in Mermaid or code blocks. |
@@ -461,6 +462,7 @@ When `usePersistentMermaidIsolate` is true (default), cold Mermaid compiles reus
 | `MarkdownImageBuilder` | `Widget Function(BuildContext context, ImageNode node)` | Custom renderer invoked for images allowed by `imagePolicy` and `MarkdownUrlPolicy`. |
 | `MarkdownLinkTapCallback` | `void Function(String destination, String? title)` | Callback fired when a user taps any policy-allowed link destination. |
 | `MarkdownWebLinkCallback` | `void Function(Uri uri)` | Callback fired when a user taps a policy-allowed `http` or `https` web URI. |
+| `MarkdownMermaidTapCallback` | `void Function(BuildContext context, MarkdownMermaidDiagram diagram)` | Callback fired when a user taps or activates `Zoom` on a compiled built-in Mermaid diagram, enabling tap-to-zoom and hover `Zoom` / `Copy` overlay controls. |
 
 ```dart
 import 'dart:async' show unawaited;
@@ -488,6 +490,9 @@ Widget buildIntegratedMarkdownView(
         },
         onOpenWebLink: (Uri uri) {
           // Open validated http/https links externally.
+        },
+        onTapMermaid: (BuildContext ctx, MarkdownMermaidDiagram diagram) {
+          // Present an interactive zoom/export dialog using diagram.compiledBytes or diagram.svg.
         },
         // Optional override for custom non-Mermaid fences; returning null preserves
         // built-in pele_dart rendering for `mermaid` blocks.

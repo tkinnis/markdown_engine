@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:isolate' show IsolateSpawnException;
+import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RendererBinding;
+import 'package:flutter/services.dart' show MethodCall, SystemChannels;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_engine_flutter/markdown_engine_flutter.dart';
 import 'package:markdown_engine_flutter/src/built_in_mermaid.dart';
@@ -456,6 +459,255 @@ End of document.
         expect(find.byType(VectorGraphic), findsNothing);
         expect(find.text('mermaid'), findsOneWidget);
         expect(find.text('Copy'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'onTapMermaid fires with populated MarkdownMermaidDiagram across light/dark themes and delegates equality',
+      (WidgetTester tester) async {
+        final List<MarkdownMermaidDiagram> tapped = <MarkdownMermaidDiagram>[];
+        void handleTap(BuildContext context, MarkdownMermaidDiagram diagram) {
+          tapped.add(diagram);
+        }
+
+        final MarkdownBuilderDelegates baseDelegates =
+            const MarkdownBuilderDelegates();
+        final MarkdownBuilderDelegates withTap = baseDelegates.copyWith(
+          onTapMermaid: handleTap,
+        );
+        expect(withTap.onTapMermaid, same(handleTap));
+        expect(withTap, isNot(equals(baseDelegates)));
+        expect(
+          withTap,
+          equals(MarkdownBuilderDelegates(onTapMermaid: handleTap)),
+        );
+        expect(
+          withTap.hashCode,
+          equals(MarkdownBuilderDelegates(onTapMermaid: handleTap).hashCode),
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownTheme(
+                data: const MarkdownThemeData.light(),
+                child: MarkdownView(
+                  '```mermaid\nflowchart LR\n  A[Start] --> B[End]\n\n```\n',
+                  selectable: true,
+                  delegates: withTap,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byType(VectorGraphic), findsOneWidget);
+        await tester.tap(find.byType(VectorGraphic));
+        await tester.pump();
+
+        expect(tapped, hasLength(1));
+        final MarkdownMermaidDiagram lightDiagram = tapped.single;
+        expect(lightDiagram.code, 'flowchart LR\n  A[Start] --> B[End]');
+        expect(lightDiagram.compiledBytes, isNotEmpty);
+        expect(lightDiagram.svg, contains('<svg'));
+        expect(lightDiagram.logicalSize.width, greaterThan(0.0));
+        expect(lightDiagram.logicalSize.height, greaterThan(0.0));
+        expect(lightDiagram.semanticsLabel, isNotEmpty);
+        expect(lightDiagram.brightness, Brightness.light);
+
+        final MarkdownMermaidDiagram identicalCopy = MarkdownMermaidDiagram(
+          code: lightDiagram.code,
+          compiledBytes: Uint8List.fromList(lightDiagram.compiledBytes),
+          svg: lightDiagram.svg,
+          logicalSize: lightDiagram.logicalSize,
+          semanticsLabel: lightDiagram.semanticsLabel,
+          brightness: lightDiagram.brightness,
+        );
+        expect(lightDiagram, equals(identicalCopy));
+        expect(lightDiagram.hashCode, equals(identicalCopy.hashCode));
+
+        // Dark theme propagates Brightness.dark cleanly.
+        tapped.clear();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MarkdownTheme(
+                data: const MarkdownThemeData.dark(),
+                child: MarkdownView(
+                  '```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```',
+                  selectable: false,
+                  delegates: withTap,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byType(VectorGraphic));
+        await tester.pump();
+        expect(tapped, hasLength(1));
+        expect(tapped.single.brightness, Brightness.dark);
+        expect(tapped.single.svg, contains('<svg'));
+      },
+    );
+
+    testWidgets(
+      'hovering interactive Mermaid diagram reveals Zoom and Copy pill controls without double-firing outer onTapMermaid',
+      (WidgetTester tester) async {
+        String? copiedClipboardText;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (MethodCall call) async {
+            if (call.method == 'Clipboard.setData') {
+              final Map<Object?, Object?>? args =
+                  call.arguments as Map<Object?, Object?>?;
+              copiedClipboardText = args?['text'] as String?;
+            }
+            return null;
+          },
+        );
+        addTearDown(() {
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          );
+        });
+
+        final List<MarkdownMermaidDiagram> tapped = <MarkdownMermaidDiagram>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 400.0,
+                child: MarkdownView(
+                  '```mermaid\nflowchart LR\n  HoverA --> HoverB\n```',
+                  selectable: true,
+                  delegates: MarkdownBuilderDelegates(
+                    onTapMermaid: (
+                      BuildContext ctx,
+                      MarkdownMermaidDiagram d,
+                    ) => tapped.add(d),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Zoom'), findsNothing);
+        expect(find.text('Copy'), findsNothing);
+        expect(find.text('Copied'), findsNothing);
+
+        final TestGesture mouse = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          pointer: 1,
+        );
+        addTearDown(mouse.removePointer);
+        await mouse.addPointer(location: Offset.zero);
+        await tester.pump();
+
+        final Offset diagramCenter = tester.getCenter(
+          find.byType(BuiltInMermaidDiagram),
+        );
+        await mouse.moveTo(diagramCenter);
+        await tester.pump();
+
+        expect(
+          RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(1),
+          SystemMouseCursors.zoomIn,
+        );
+        expect(find.text('Zoom'), findsOneWidget);
+        expect(find.text('Copy'), findsOneWidget);
+        expect(find.bySemanticsLabel('Zoom Mermaid diagram'), findsOneWidget);
+        expect(find.bySemanticsLabel('Copy Mermaid source'), findsOneWidget);
+
+        // Hovering and tapping Copy copies raw Mermaid source, toggles Copied,
+        // and MUST NOT invoke onTapMermaid.
+        final Offset copyCenter = tester.getCenter(find.text('Copy'));
+        await mouse.moveTo(copyCenter);
+        await tester.pump();
+        expect(
+          RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(1),
+          SystemMouseCursors.click,
+        );
+
+        await tester.tap(find.text('Copy'));
+        await tester.pump();
+        expect(tapped, isEmpty);
+        expect(copiedClipboardText, 'flowchart LR\n  HoverA --> HoverB\n');
+        expect(find.text('Copied'), findsOneWidget);
+        expect(find.bySemanticsLabel('Copied'), findsOneWidget);
+
+        // Hovering and tapping Zoom invokes onTapMermaid exactly once.
+        final Offset zoomCenter = tester.getCenter(find.text('Zoom'));
+        await mouse.moveTo(zoomCenter);
+        await tester.pump();
+        expect(
+          RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(1),
+          SystemMouseCursors.click,
+        );
+
+        await tester.tap(find.text('Zoom'));
+        await tester.pump();
+        expect(tapped, hasLength(1));
+        expect(tapped.single.code, 'flowchart LR\n  HoverA --> HoverB');
+
+        // Copied label resets back to Copy after 1.5s, and leaving hides overlay.
+        await tester.pump(const Duration(milliseconds: 1500));
+        expect(find.text('Copy'), findsOneWidget);
+
+        await mouse.moveTo(const Offset(599.0, 399.0));
+        await tester.pump();
+        expect(find.text('Zoom'), findsNothing);
+        expect(find.text('Copy'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'onTapMermaid == null shows no hover toolbar, keeps non-zoom cursor, and tapping does nothing',
+      (WidgetTester tester) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600.0,
+                height: 400.0,
+                child: MarkdownView(
+                  '```mermaid\nflowchart LR\n  StaticA --> StaticB\n```',
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final TestGesture mouse = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+          pointer: 1,
+        );
+        addTearDown(mouse.removePointer);
+        await mouse.addPointer(location: Offset.zero);
+        await tester.pump();
+
+        await mouse.moveTo(
+          tester.getCenter(find.byType(BuiltInMermaidDiagram)),
+        );
+        await tester.pump();
+
+        expect(find.text('Zoom'), findsNothing);
+        expect(find.text('Copy'), findsNothing);
+        expect(
+          RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(1),
+          isNot(SystemMouseCursors.zoomIn),
+        );
+
+        await tester.tap(find.byType(VectorGraphic));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
       },
     );
   });
@@ -1047,6 +1299,56 @@ End of document.
         MarkdownBuiltInRenderers.clearCaches();
         expect(MarkdownBuiltInRenderers.mermaidCacheLength, 0);
         expect(MarkdownBuiltInRenderers.mermaidCacheBytes, 0);
+      },
+    );
+
+    testWidgets(
+      'BuiltInMermaidCache.currentBytes accounts for propagated svg bytes across sync and persistent worker paths',
+      (WidgetTester tester) async {
+        addTearDown(() async {
+          MarkdownBuiltInRenderers.debugForceAsyncMermaidInTests = false;
+          MarkdownBuiltInRenderers.resetCacheDefaults();
+          MarkdownBuiltInRenderers.clearCaches();
+          await MarkdownBuiltInRenderers.dispose();
+        });
+
+        const String source = 'flowchart LR\n  SvgByteA --> SvgByteB';
+        final DerivedMermaidTheme theme = deriveMermaidTheme(
+          const MarkdownThemeData.light(),
+        );
+
+        final BuiltInMermaidResult syncResult = BuiltInMermaidCache.instance
+            .renderSync(source, theme);
+        expect(syncResult, isA<BuiltInMermaidSuccess>());
+        final BuiltInMermaidSuccess syncOk =
+            syncResult as BuiltInMermaidSuccess;
+        expect(syncOk.svg, contains('<svg'));
+
+        final int expectedBytes =
+            syncOk.compiledBytes.lengthInBytes +
+            syncOk.svg.length * 2 +
+            syncOk.semanticsLabel.length * 2 +
+            source.trim().length * 2 +
+            128;
+        expect(BuiltInMermaidCache.instance.currentBytes, expectedBytes);
+        expect(
+          BuiltInMermaidCache.instance.currentBytes,
+          greaterThan(syncOk.compiledBytes.lengthInBytes + syncOk.svg.length),
+        );
+
+        // Verify persistent isolate path produces the same SVG & byte accounting.
+        MarkdownBuiltInRenderers.clearCaches();
+        MarkdownBuiltInRenderers.debugForceAsyncMermaidInTests = true;
+        await tester.runAsync(() async {
+          final BuiltInMermaidResult asyncResult = await BuiltInMermaidCache
+              .instance
+              .render(source, theme);
+          expect(asyncResult, isA<BuiltInMermaidSuccess>());
+          final BuiltInMermaidSuccess asyncOk =
+              asyncResult as BuiltInMermaidSuccess;
+          expect(asyncOk.svg, equals(syncOk.svg));
+          expect(BuiltInMermaidCache.instance.currentBytes, expectedBytes);
+        });
       },
     );
   });

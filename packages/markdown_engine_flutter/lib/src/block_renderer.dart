@@ -752,6 +752,7 @@ Widget _buildCodeBlock(
       node: node,
       theme: renderContext.theme,
       isStreamingIncomplete: isStreamingIncomplete,
+      onTapMermaid: renderContext.delegates.onTapMermaid,
     );
   }
 
